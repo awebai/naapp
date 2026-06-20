@@ -2,28 +2,80 @@ from __future__ import annotations
 
 import os
 import re
-from functools import lru_cache
 from html import escape
 from pathlib import Path
-from typing import Any
+
+import aweb_naapp as naapp
+from aweb_naapp import FooterColumn, NavLink, SiteConfig, aweb_css
 
 from library.aweb_manifest import MANIFEST
+
+__all__ = [
+    "aweb_css",
+    "render_landing_page",
+    "render_reference_page",
+    "llms_txt",
+    "robots_txt",
+    "skills_index",
+    "read_skill",
+    "skill_names",
+]
 
 _SKILL_NAME = re.compile(r"^[a-z0-9][a-z0-9-]{0,80}$")
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SKILLS_DIR = _REPO_ROOT / "skills"
 _CONTAINER_SKILLS_DIR = Path("/app/skills")
-_ASSETS_DIR = Path(__file__).resolve().parent / "assets"
 
-# aweb design system, vendored verbatim from the awebai/ac repo
-# (site/static/css/aweb.css, sha256
-# 6b2acef0d614c33508fe0f4e7270b4a2770ef18fb45d856c0d3e7862f85f2c19) and served at
-# /css/aweb.css. The shared Paper/Clay foundation, byte-for-byte.
+# library's identity in the shared naapp chrome. The aweb design system, the
+# chrome, the manifest-driven llms.txt blocks, and the /reference page all come
+# from aweb_naapp; library supplies its manifest, this site config, and its own
+# landing body and llms.txt prose.
+_VERB = "library"
+_NAV_LINKS = (
+    NavLink("Model", "/#model"),
+    NavLink("llms.txt", "/llms.txt"),
+    NavLink("Reference", "/reference"),
+    NavLink("Skills", "/skills/"),
+    NavLink("AWID", "https://awid.ai"),
+)
+_FOOTER_BLURB = (
+    "Public profile packs and private team shelves for AWID teams — "
+    "adopt, bind, materialize, and evolve your agents' profiles."
+)
+_FOOTER_COLUMNS = (
+    FooterColumn(
+        "Agents",
+        (
+            NavLink("llms.txt", "/llms.txt"),
+            NavLink("API reference", "/reference"),
+            NavLink("Skills", "/skills/"),
+            NavLink("App manifest", "/aweb-app.json"),
+        ),
+    ),
+    FooterColumn(
+        "aweb",
+        (
+            NavLink("aweb.ai", "https://aweb.ai"),
+            NavLink("AWID", "https://awid.ai"),
+        ),
+    ),
+)
+_FOOTER_BOTTOM = (
+    "library is a Native Agentic App on the aweb.ai hub. AWID is the identity authority."
+)
 
 
-@lru_cache(maxsize=1)
-def aweb_css() -> str:
-    return (_ASSETS_DIR / "aweb.css").read_text(encoding="utf-8")
+def _site(*, public_origin: str, title: str, description: str) -> SiteConfig:
+    return SiteConfig(
+        origin=public_origin.rstrip("/"),
+        brand="library",
+        title=title,
+        description=description,
+        nav_links=_NAV_LINKS,
+        footer_blurb=_FOOTER_BLURB,
+        footer_columns=_FOOTER_COLUMNS,
+        footer_bottom=_FOOTER_BOTTOM,
+    )
 
 
 def _skills_dir() -> Path:
@@ -37,146 +89,18 @@ def _skills_dir() -> Path:
     return _SKILLS_DIR
 
 
-_COPY_BTN = (
-    '<button class="copy-btn" type="button" aria-label="Copy command">'
-    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" '
-    'stroke-linecap="round" stroke-linejoin="round">'
-    '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/>'
-    '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg></button>'
-)
-
-# Shared site chrome — used verbatim by the landing and the reference page so the
-# two surfaces stay consistent. The scripts live in plain string constants (not
-# f-strings) so the JS braces need no escaping.
-_THEME_INIT_SCRIPT = """  <script>
-    (function () {
-      try {
-        var t = localStorage.getItem('aweb-theme');
-        if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
-      } catch (e) {}
-    })();
-  </script>"""
-
-_SITE_HEADER = """  <header class="site-header">
-    <div class="wrap">
-      <a class="brand" href="/"><span class="dot"></span>library</a>
-      <nav class="nav-links">
-        <a href="/#model">Model</a>
-        <a href="/llms.txt">llms.txt</a>
-        <a href="/reference">Reference</a>
-        <a href="/skills/">Skills</a>
-        <a href="https://awid.ai">AWID</a>
-      </nav>
-      <div class="header-right">
-        <button class="theme-toggle" type="button" aria-label="Toggle dark mode" onclick="awebToggleTheme()">
-          <svg class="icon-moon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></svg>
-          <svg class="icon-sun" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M6.34 17.66l-1.41 1.41M19.07 4.93l-1.41 1.41"/></svg>
-        </button>
-        <a class="btn secondary" href="https://aweb.ai">aweb.ai</a>
-        <a class="btn primary" href="/llms.txt">Read llms.txt <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12h14"/><path d="m13 6 6 6-6 6"/></svg></a>
-      </div>
-    </div>
-  </header>"""
-
-_SITE_SCRIPT_BODY = """    function awebToggleTheme() {
-      var el = document.documentElement;
-      var cur = el.getAttribute('data-theme');
-      if (!cur) {
-        cur = window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
-      }
-      var next = cur === 'dark' ? 'light' : 'dark';
-      el.setAttribute('data-theme', next);
-      try { localStorage.setItem('aweb-theme', next); } catch (e) {}
-    }
-    Array.prototype.forEach.call(document.querySelectorAll('.cmd .copy-btn'), function (button) {
-      button.addEventListener('click', function () {
-        var pre = button.parentElement.querySelector('pre');
-        if (!pre) return;
-        navigator.clipboard.writeText(pre.textContent).then(function () {
-          button.classList.add('copied');
-          setTimeout(function () { button.classList.remove('copied'); }, 1600);
-        });
-      });
-    });"""
-
-_COPY_LLMS_SCRIPT = """    var llmsBtn = document.getElementById('copy-llms');
-    if (llmsBtn) {
-      llmsBtn.addEventListener('click', function () {
-        fetch(llmsBtn.getAttribute('data-llms-url')).then(function (r) { return r.text(); }).then(function (text) {
-          navigator.clipboard.writeText(text).then(function () {
-            var label = llmsBtn.textContent;
-            llmsBtn.classList.add('copied');
-            llmsBtn.textContent = 'Copied llms.txt';
-            setTimeout(function () { llmsBtn.classList.remove('copied'); llmsBtn.textContent = label; }, 1600);
-          });
-        });
-      });
-    }"""
-
-
-def _site_head(*, title: str, description: str) -> str:
-    return f"""<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="{escape(description, quote=True)}">
-  <meta name="theme-color" content="#faf7f2" media="(prefers-color-scheme: light)">
-  <meta name="theme-color" content="#0a0705" media="(prefers-color-scheme: dark)">
-  <title>{escape(title)}</title>
-{_THEME_INIT_SCRIPT}
-  <link rel="stylesheet" href="/css/aweb.css">
-</head>"""
-
-
-def _site_scripts(*, include_copy_llms: bool = False) -> str:
-    body = _SITE_SCRIPT_BODY
-    if include_copy_llms:
-        body = f"{body}\n{_COPY_LLMS_SCRIPT}"
-    return f"  <script>\n{body}\n  </script>"
-
-
-def _site_footer(origin: str) -> str:
-    return f"""  <footer class="site-footer">
-    <div class="wrap">
-      <div class="footer-cols">
-        <div class="footer-brand">
-          <a class="brand" href="/"><span class="dot"></span>library</a>
-          <p>Public profile packs and private team shelves for AWID teams — adopt, bind, materialize, and evolve your agents' profiles.</p>
-        </div>
-        <div class="footer-col">
-          <h4>Agents</h4>
-          <a href="/llms.txt">llms.txt</a>
-          <a href="/reference">API reference</a>
-          <a href="/skills/">Skills</a>
-          <a href="/aweb-app.json">App manifest</a>
-        </div>
-        <div class="footer-col">
-          <h4>aweb</h4>
-          <a href="https://aweb.ai">aweb.ai</a>
-          <a href="https://awid.ai">AWID</a>
-        </div>
-      </div>
-      <div class="footer-bottom">library is a Native Agentic App on the aweb.ai hub. AWID is the identity authority. Origin: {origin}</div>
-    </div>
-  </footer>"""
-
-
 def render_landing_page(*, public_origin: str) -> str:
     origin = escape(public_origin.rstrip("/"), quote=True)
-    copy = _COPY_BTN
-    head = _site_head(
+    copy = naapp.COPY_BTN
+    site = _site(
+        public_origin=public_origin,
         title="library — agent profiles for AWID teams",
         description=(
             "library is the agent-first service for public profile packs, private team "
             "shelves, bindings, materialization, and learning for AWID teams."
         ),
     )
-    return f"""<!doctype html>
-<html lang="en">
-{head}
-<body>
-{_SITE_HEADER}
-  <main>
-    <section class="hero-center">
+    body = f"""    <section class="hero-center">
       <div class="wrap">
         <p class="kicker">Native Agentic App · library.aweb.ai</p>
         <h1>Where teams choose, keep, and improve the profiles their agents run.</h1>
@@ -310,72 +234,27 @@ def render_landing_page(*, public_origin: str) -> str:
           <a class="btn secondary btn--lg" href="/aweb-app.json">Read the manifest</a>
         </div>
       </div>
-    </section>
-  </main>
-{_site_footer(origin)}
-{_site_scripts(include_copy_llms=True)}
-</body>
-</html>"""
+    </section>"""
+    return naapp.page(site, body, include_copy_llms=True)
 
 
-# Live values that make the public catalog-read examples genuinely runnable
-# against production (these resolve against the seeded engineering pack).
-_EXAMPLE_PATH_VALUES = {"pack_ref": "aweb.engineering-pack", "profile_ref": "coordinator"}
-
-
-def _tool_params(tool: dict[str, Any]) -> tuple[list[str], list[str]]:
-    """A tool's (required, optional) parameter names, in manifest order.
-
-    Path params are required by construction — the route cannot match without
-    them — even when the manifest input_schema does not list them in `required`.
-    Treating them as required here (a rendering concern) keeps the served
-    manifest digest unchanged."""
-    schema = tool.get("input_schema") or {}
-    path_params = {p["name"] for p in tool.get("params", []) if p.get("in") == "path"}
-    required = set(schema.get("required") or []) | path_params
-    order: list[str] = [p["name"] for p in tool.get("params", []) if "name" in p]
-    for name in schema.get("properties") or {}:
-        if name not in order:
-            order.append(name)
-    req = [n for n in order if n in required]
-    opt = [n for n in order if n not in required]
-    return req, opt
-
-
-def _example_path(tool: dict[str, Any]) -> str:
-    """The path with placeholders replaced by live values, so a public read is a
-    genuinely runnable URL with no brace placeholders."""
-    path = tool["path"]
-    for name, value in _EXAMPLE_PATH_VALUES.items():
-        path = path.replace("{" + name + "}", value)
-    return path
-
-
-def _public_tools() -> list[dict[str, Any]]:
-    return [t for t in MANIFEST["tools"] if t.get("auth") == "none"]
-
-
-def _cert_tools() -> list[dict[str, Any]]:
-    return [t for t in MANIFEST["tools"] if t.get("auth") != "none"]
-
-
-def _llms_operation_block(tool: dict[str, Any]) -> str:
-    req, opt = _tool_params(tool)
-    lines = [
-        f"aw library {tool['name']}  ({tool['method']} {tool['path']})",
-        f"    {tool['description']}",
-    ]
-    if req:
-        lines.append(f"    required: {', '.join(req)}")
-    if opt:
-        lines.append(f"    optional: {', '.join(opt)}")
-    return "\n".join(lines)
+def render_reference_page(*, public_origin: str) -> str:
+    site = _site(
+        public_origin=public_origin,
+        title="library — API reference",
+        description=(
+            "Every library operation in parallel: the canonical aw library verb and the "
+            "raw HTTP wire format with AWID team-certificate signing."
+        ),
+    )
+    return naapp.render_reference(MANIFEST, site, verb=_VERB)
 
 
 def llms_txt(*, public_origin: str) -> str:
     origin = public_origin.rstrip("/")
-    public_ops = "\n\n".join(_llms_operation_block(t) for t in _public_tools())
-    team_ops = "\n\n".join(_llms_operation_block(t) for t in _cert_tools())
+    public_ops = naapp.llms.public_operations(MANIFEST, _VERB)
+    team_ops = naapp.llms.cert_operations(MANIFEST, _VERB)
+    auth = naapp.llms.auth_section(MANIFEST, origin)
     return f"""# library — agent-first profiles for AWID teams
 
 library is the app that owns agent profiles, profile packs, profile versions and
@@ -426,20 +305,7 @@ hatch) if you are not using the plugin.
 
 ## Authentication
 
-Public catalog reads (list-packs, get-pack, get-profile) need no auth. Every other
-operation is team-scoped and authenticated with your AWID team certificate. When you
-call through the aw plugin verbs (or the low-level aw id request --team-auth), aw
-signs each request for you with your team member key — you never assemble auth
-headers by hand.
-
-For raw HTTP without aw, every team-certificate request carries four headers:
-- Authorization: DIDKey <did:key> <signature> — base64 Ed25519 signature (standard alphabet, no padding) over the canonical payload bytes
-- X-AWEB-Timestamp: <RFC3339 UTC> — equals the envelope timestamp; 300s replay window
-- X-AWEB-Signed-Payload: base64url WITHOUT padding of the canonical JSON envelope — sorted keys, no whitespace; v=2; reserved fields aud, body_sha256, method, path, team_id, timestamp, v
-- X-AWID-Team-Certificate: standard base64 of the team certificate JSON
-
-This wire format tracks the aweb team-auth-envelope-v2 conformance vector. The full
-signing recipe with per-operation curl is at {origin}/reference.
+{auth}
 
 
 ## Operations
@@ -461,185 +327,6 @@ Team operations (AWID team certificate):
 - Shelf versions are immutable: a version's digest is its identity, never overwritten.
 - library owns its own binding, materialization, and proposal state.
 """
-
-
-_SIGNED_HEADERS = (
-    "Authorization: DIDKey <did:key> <base64 Ed25519 signature, standard alphabet, no padding>\n"
-    "X-AWEB-Timestamp: <RFC3339 UTC, equal to the envelope timestamp field>\n"
-    "X-AWEB-Signed-Payload: <base64url WITHOUT padding of the canonical JSON payload bytes>\n"
-    "X-AWID-Team-Certificate: <standard base64 of the team certificate JSON>"
-)
-
-
-def _envelope_spec(origin: str) -> str:
-    """The signed-payload envelope, shown with canonical (sorted) key order. The
-    bytes actually signed are canonical JSON — sorted keys, no insignificant
-    whitespace, UTF-8, no HTML escaping — so this pretty-printed form is for
-    reading; a signer must emit the compact canonical bytes."""
-    return (
-        "{\n"
-        f'  "aud": "{origin}",\n'
-        '  "body_sha256": "<lowercase hex sha256 of the exact request body bytes;'
-        ' empty body hashes the empty string>",\n'
-        '  "method": "<uppercase HTTP method, e.g. POST>",\n'
-        '  "path": "<escaped request target incl. query, e.g. /v1/shelf/import'
-        ' or /v1/profile-packs?tags=starter>",\n'
-        '  "team_id": "<your AWID team id>",\n'
-        '  "timestamp": "<RFC3339 UTC, equal to X-AWEB-Timestamp>",\n'
-        '  "v": 2\n'
-        "}"
-    )
-
-
-def _params_by_loc(tool: dict[str, Any]) -> dict[str, str]:
-    return {p["name"]: p.get("in", "body") for p in tool.get("params", []) if "name" in p}
-
-
-def _aw_command(tool: dict[str, Any], *, examples: dict[str, str] | None = None) -> str:
-    req, _opt = _tool_params(tool)
-    examples = examples or {}
-    parts = [f"aw library {tool['name']}"]
-    parts += [f"--{name} {examples.get(name, f'<{name}>')}" for name in req]
-    return " ".join(parts)
-
-
-def _aw_id_request(origin: str, tool: dict[str, Any]) -> str:
-    locs = _params_by_loc(tool)
-    req, _opt = _tool_params(tool)
-    cmd = f"aw id request --team-auth {tool['method']} {origin}{tool['path']}"
-    body_req = [n for n in req if locs.get(n) == "body"]
-    if body_req:
-        body = "{" + ", ".join(f'"{n}": "..."' for n in body_req) + "}"
-        cmd += f" --body '{body}'"
-    return cmd
-
-
-def _wire_block(origin: str, tool: dict[str, Any]) -> str:
-    if tool.get("auth") == "none":
-        return f"curl -s {origin}{_example_path(tool)}"
-    locs = _params_by_loc(tool)
-    req, opt = _tool_params(tool)
-    lines = [f"{tool['method']} {tool['path']}", _SIGNED_HEADERS]
-    body_req = [n for n in req if locs.get(n) == "body"]
-    body_opt = [n for n in opt if locs.get(n) == "body"]
-    if body_req or body_opt:
-        lines.append("Content-Type: application/json")
-        lines.append("")
-        lines.append("{" + ", ".join(f'"{n}": "..."' for n in body_req) + "}")
-    return "\n".join(lines)
-
-
-def _reference_operation(origin: str, tool: dict[str, Any]) -> str:
-    req, opt = _tool_params(tool)
-    is_public = tool.get("auth") == "none"
-    pill = (
-        '<span class="pill ok">public</span>'
-        if is_public
-        else '<span class="pill run">team cert</span>'
-    )
-    bits = []
-    if req:
-        bits.append(f"required: {escape(', '.join(req))}")
-    if opt:
-        bits.append(f"optional: {escape(', '.join(opt))}")
-    params_line = f'<p class="op-params">{" · ".join(bits)}</p>' if bits else ""
-
-    signed = ""
-    if not is_public:
-        signed = (
-            '\n          <p class="cmd-label">Run it signed, without the plugin</p>'
-            f'\n          <div class="cmd-list"><div class="cmd"><pre>{escape(_aw_id_request(origin, tool), quote=False)}</pre>{_COPY_BTN}</div></div>'
-        )
-    wire_label = "On the wire — runnable" if is_public else "On the wire — aw signs this for you"
-    aw_examples = _EXAMPLE_PATH_VALUES if is_public else None
-
-    return f"""        <div class="cmd-panel op" id="op-{tool['name']}">
-          <h3><code>aw library {tool['name']}</code> {pill}</h3>
-          <p class="op-meta"><code>{tool['method']} {escape(tool['path'])}</code></p>
-          <p>{escape(tool['description'])}</p>
-          {params_line}
-          <p class="cmd-label">Run it</p>
-          <div class="cmd-list"><div class="cmd"><pre>{escape(_aw_command(tool, examples=aw_examples), quote=False)}</pre>{_COPY_BTN}</div></div>{signed}
-          <p class="cmd-label">{wire_label}</p>
-          <div class="cmd-list"><div class="cmd"><pre>{escape(_wire_block(origin, tool), quote=False)}</pre>{_COPY_BTN}</div></div>
-        </div>"""
-
-
-def render_reference_page(*, public_origin: str) -> str:
-    raw_origin = public_origin.rstrip("/")
-    origin = escape(raw_origin, quote=True)
-    copy = _COPY_BTN
-    head = _site_head(
-        title="library — API reference",
-        description=(
-            "Every library operation in parallel: the canonical aw library verb and the "
-            "raw HTTP wire format with AWID team-certificate signing."
-        ),
-    )
-    public_ops = "\n".join(_reference_operation(raw_origin, t) for t in _public_tools())
-    team_ops = "\n".join(_reference_operation(raw_origin, t) for t in _cert_tools())
-    return f"""<!doctype html>
-<html lang="en">
-{head}
-<body>
-{_SITE_HEADER}
-  <main>
-    <section class="hero-center">
-      <div class="wrap">
-        <p class="kicker">API reference · library.aweb.ai</p>
-        <h1>Every operation, two ways</h1>
-        <p class="lede">Each library operation is shown as the canonical <code>aw library</code> verb a person or agent runs, and as the raw HTTP wire format for anyone writing their own client. The verbs are the <a href="/aweb-app.json">canonical manifest</a>; this page is generated from it.</p>
-        <div class="cta-row">
-          <a class="btn primary btn--lg" href="/llms.txt">Read llms.txt</a>
-          <a class="btn secondary btn--lg" href="/#use">Getting started</a>
-        </div>
-      </div>
-    </section>
-
-    <section class="section section--tint" id="auth">
-      <div class="wrap">
-        <div class="section-head">
-          <p class="kicker">Authentication</p>
-          <h2>Public reads need nothing; everything else is signed</h2>
-          <p>The three public catalog reads take no auth. Every other operation is team-scoped and authenticated with your AWID team certificate. Through the <code>aw</code> plugin verbs (or <code>aw id request --team-auth</code>), aw signs each request for you — you never assemble these headers by hand. Build your own client only if you are porting the signer to another language.</p>
-        </div>
-        <p class="prose-intro">This wire format tracks the canonical <strong>team-auth-envelope-v2</strong> conformance vector — the source of truth, at <a href="https://github.com/awebai/aweb/blob/main/cli/go/internal/conformance/vectors/team-auth-envelope-v2.json"><code>cli/go/internal/conformance/vectors/team-auth-envelope-v2.json</code></a>. To port a signer to another language, match that vector byte for byte.</p>
-        <p class="cmd-label">Every team-certificate request carries four headers</p>
-        <div class="cmd-list"><div class="cmd"><pre>{escape(_SIGNED_HEADERS, quote=False)}</pre>{copy}</div></div>
-        <p class="prose-intro">Mind the three encodings — do not mix them: the <code>Authorization</code> signature and the certificate use standard base64; the signed payload uses base64url <strong>without padding</strong> (Library rejects values containing <code>=</code>). The certificate's <code>member_did_key</code> must equal the <code>Authorization</code> did:key.</p>
-        <p class="cmd-label">The signed payload — a canonical-JSON envelope (version 2)</p>
-        <div class="cmd-list"><div class="cmd"><pre>{escape(_envelope_spec(raw_origin), quote=False)}</pre>{copy}</div></div>
-        <p class="prose-intro">The bytes signed are <strong>canonical JSON</strong>: sorted keys, no insignificant whitespace, UTF-8, no HTML escaping (the same convention as awid <code>canonical_json_bytes</code>). The fields are shown above in sorted order; the pretty-printing is for reading only. The signature is over those canonical payload bytes <strong>after</strong> the timestamp is injected — not over the base64url <code>X-AWEB-Signed-Payload</code> header value.</p>
-        <p class="prose-outro">Reserved fields are <code>aud</code>, <code>body_sha256</code>, <code>method</code>, <code>path</code>, <code>team_id</code>, <code>timestamp</code>, and <code>v</code>; a surface may add custom fields only in addition to these. aw sets <code>aud</code> to this origin (scheme and host), <code>method</code> uppercase, <code>path</code> to the exact escaped request target the server receives — the root-mounted <code>/v1/...</code> with its query string and no <code>/api</code> prefix — <code>body_sha256</code> to the lowercase hex SHA-256 of the exact body bytes (empty body hashes the empty string), <code>timestamp</code> equal to <code>X-AWEB-Timestamp</code>, and <code>team_id</code> from the certificate. The server recomputes and verifies all of it within a replay window of 300 seconds.</p>
-      </div>
-    </section>
-
-    <section class="section" id="public">
-      <div class="wrap">
-        <div class="section-head">
-          <p class="kicker">Public operations</p>
-          <h2>Catalog reads — no auth</h2>
-          <p>Browse the public profile-pack catalog. These are literal and copy-paste-runnable.</p>
-        </div>
-{public_ops}
-      </div>
-    </section>
-
-    <section class="section section--tint" id="team">
-      <div class="wrap">
-        <div class="section-head">
-          <p class="kicker">Team operations</p>
-          <h2>Shelf, bindings, materialize, proposals — AWID team certificate</h2>
-          <p>Each shows the canonical verb, the signed hand-runnable <code>aw id request</code> form, and the raw wire format aw produces.</p>
-        </div>
-{team_ops}
-      </div>
-    </section>
-  </main>
-{_site_footer(origin)}
-{_site_scripts()}
-</body>
-</html>"""
 
 
 def robots_txt() -> str:

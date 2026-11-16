@@ -1,12 +1,6 @@
-"""Shared team/app setup, provisioning and owner-act test utilities.
+"""Shared ordinary team setup, app owner acts and deployment fault helpers.
 
-The deployment journey uses these helpers to found a team, admit ordinary
-members, activate app hooks, designate a holding, and enroll the current
-signer's approver through B3. Tests also use the independent owner-act and
-fault-injection utilities. No credential, session or success row is inserted.
-
-The retired service-owned revoke round trip is removed. Its replacement
-approval-service/enforcer acceptance belongs to adcl.6, not these setup helpers.
+Approval-service gates and key-holder admission are not built here.
 """
 
 from __future__ import annotations
@@ -24,8 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 import pexpect
-from awid.did import did_key_from_signing_key
-from awid.signing import load_signing_key_pem
 
 
 def docker(*args: str, timeout: int = 120, input: str | None = None) -> subprocess.CompletedProcess[str]:
@@ -40,24 +32,8 @@ DID_KEY_LIMIT, DID_KEY_WINDOW = 60, 60
 LEAST_THROTTLED_SECONDS = 20
 
 
-def did_key_window(now: float, client_ip: str) -> dict:
-    """The real limiter's key for client_ip's did_key window at now, as
-    RedisFixedWindowRateLimiter writes it (key, limit, its EXPIRE), and how long
-    to wait first so that at least LEAST_THROTTLED_SECONDS of it remain."""
-    remaining = DID_KEY_WINDOW - now % DID_KEY_WINDOW
-    wait = remaining if remaining < LEAST_THROTTLED_SECONDS else 0.0
-    window_id = int((now + wait) // DID_KEY_WINDOW)
-    return {"key": f"aweb:rl:did_key:{client_ip}:{window_id}", "limit": DID_KEY_LIMIT, "ttl": DID_KEY_WINDOW + 2,
-            "wait": wait, "remaining": remaining if not wait else float(DID_KEY_WINDOW)}
 
 
-def changed_act(record: dict, role: str) -> dict:
-    """aw's saved request with only its act's role changed: a validly encoded
-    intent under the same operation id."""
-    body = json.loads(base64.b64decode(record["body"]))
-    body["subject"]["role"] = role
-    encoded = base64.b64encode(json.dumps(body, separators=(",", ":"), sort_keys=True).encode()).decode()
-    return {**record, "body": encoded}
 
 
 def first_json(text: str):
@@ -125,12 +101,9 @@ class Holder:
     def act(self, principal: str, *args: str) -> pexpect.spawn:
         """aw as the holder for a command that a holder-signed start begins.
 
-        This is the one place that chooses how the holder authenticates. Today
-        it is the existing --human participation (the human key in this
-        machine's Secret Service, unlocked at the terminal). The protected
-        profile (package 1 rule (b)) replaces only this method: a restricted
-        requester credential, a B3 UV login at the protected service, and the
-        server's holder-signed start. The H acceptance (acxy.9/11) runs there.
+        The existing --human participation uses the human key in this
+        machine's Secret Service, unlocked at the terminal. It is ordinary
+        app authentication; awsign gates are not integrated here.
         """
         return self.spawn("--human", principal, "--human-domain", self.domain, *args)
 
@@ -645,9 +618,6 @@ class Site:
     team: str
     registry: str
     aweb: str
-    signer: str
-    human: str
-    service_id: str
     # The installed Secrets and Logs apps' ids, and the schema Secrets keeps
     # its records in.
     app_id: str
@@ -657,29 +627,7 @@ class Site:
     contact: str
     # The captured notification transport's API, as a machine reaches it.
     mail_api: str
-    # The operator profile, as aw in the holder's machine reads it.
-    profile_in_machine: str
     publish_controller: Callable[[str], None]
-    # The signer's ordinary member key (aw's PEM file), stored where only it reads.
-    store_member: Callable[[str], None]
-    # The operator profile and scope, and the process configuration.
-    configure_signer: Callable[[dict, dict], None]
-    # The team owner's existing controller PEM into the signer's private
-    # custody, by the package's install-controller command.
-    install_controller: Callable[[Path], None]
-    # python -m aweb.protected_signing.operator in the signer's container, as
-    # its uid with its own settings; returns its JSON.
-    operator: Callable[..., dict]
-    start_signer: Callable[[], None]
-    # What the signer holds for one operation, read from its database
-    # (e2e/protected/evidence.py): signed, committed, refusal_code,
-    # expires_at, frozen_nonce, and for a signed one the act's act_sha256 and
-    # nonce.
-    signer_evidence: Callable[[str], dict]
-    # How many operations the signer has signed.
-    signatures: Callable[[], int]
-    # The signer's own access log so far, as uvicorn writes it.
-    signer_access_log: Callable[[], str]
     # The approving human's Chromium in a machine's network namespace.
     chromium: Callable[..., dict]
     # One SELECT against the app's database, read only (read_only_psql).
@@ -691,9 +639,6 @@ class Site:
     def team_id(self) -> str:
         return f"{self.team}:{self.domain}"
 
-    @property
-    def rp_id(self) -> str:
-        return self.human.removeprefix("https://")
 
 
 @dataclass(frozen=True)
@@ -812,7 +757,7 @@ def holding_of(site: Site, principal: str) -> tuple[str, str]:
 
 
 def designate_holding(site: Site, holder: Holder, founded: Founded) -> dict:
-    """The approver's holding of the app role the round trip revokes, made
+    """The approver's holding of the app role, made
     the supported way while the owner still holds the team's key: the
     owner adds the human to the team; the human, with its own key, fetches
     its certificate, connects to the team's aweb and registers a passkey on
@@ -877,66 +822,3 @@ def designate_holding(site: Site, holder: Holder, founded: Founded) -> dict:
     assert contact == site.contact, contact
     return {"role": site.role, "principal": human, "fingerprint": fingerprint, "contact": contact,
             "refused_before_activation": "503 release_context_unavailable", "hooks": hooks}
-
-
-def enrolment_link(site: Site, machine: str) -> str:
-    """The approver's enrolment link, as the signer delivered it to the
-    captured transport."""
-    listing = docker("exec", machine, "wget", "-qO-", f"{site.mail_api}/api/v1/messages")
-    assert listing.returncode == 0, listing.stderr
-    messages = [m for m in json.loads(listing.stdout)["messages"] if any(t["Address"] == site.contact for t in m["To"])]
-    assert len(messages) == 1, messages
-    message = docker("exec", machine, "wget", "-qO-", f"{site.mail_api}/api/v1/message/{messages[0]['ID']}")
-    link = re.search(re.escape(site.human) + r"/enrolment#token=\S+", json.loads(message.stdout)["Text"])
-    assert link, message.stdout
-    return link.group(0)
-
-
-def provision_signer(site: Site, holder: Holder, founded: Founded) -> None:
-    """Configure the signer, install its controller, bootstrap its first
-    approver with the operator command, start it, and enrol the approver's
-    passkey on its human origin's own page."""
-    machine = holder.container
-    # The protected server's ordinary member credential (never the controller):
-    # aw creates the key in the member's own identity.
-    home = f"{site.mounted}/protected-reader"
-    (site.runtime / "protected-reader" / "identity").mkdir(parents=True, mode=0o700)
-    requested = first_json(docker("exec", "-e", f"HOME={home}", "-w", f"{home}/identity", machine, "aw", "--json",
-                                  "id", "team", "request", "--create-local-key", "--team", site.team_id,
-                                  "--name", "protected-reader", timeout=300).stdout)
-    added = aw(machine, "id", "team", "add-member", "--team", site.team, "--namespace", site.domain,
-               "--did", requested["did_key"], "--name", "protected-reader", "--local")
-    assert added["certificate_id"]
-    site.store_member((site.runtime / "protected-reader" / "identity" / ".aw" / "signing.key").read_text())
-
-    # The operator profile, its one binding, and the process configuration.
-    # The binding names the team controller's public key, read from the
-    # owner's existing PEM.
-    team_key = site.runtime / "holder" / ".awid" / "team-keys" / site.domain / f"{site.team}.key"
-    controller_did = did_key_from_signing_key(load_signing_key_pem(team_key.read_bytes()))
-    scope = {"v": 1, "kind": "protected_key", "service_id": site.service_id,
-             "authority": {"kind": "team_controller", "id": site.team_id, "domain": site.domain},
-             "human": {"id": founded.approver, "domain": site.domain}, "generation": 1}
-    profile = {
-        "v": 1, "service_id": site.service_id, "request_origin": site.signer, "human_origin": site.human,
-        "rp_id": site.rp_id, "registry_origin": site.registry,
-        "namespace_authorities": [{"domain": site.domain, "controller_did": founded.controller_did}],
-        "bindings": [{"scope": scope, "authority_key_did": controller_did,
-                      "policy": {"ref": "aweb.human-assurance/1", "version": 1}}],
-    }
-    site.configure_signer(profile, scope)
-
-    # Team administration is done: the controller key leaves the holder's
-    # machine for the protected server's custody (HOST.md, controller key
-    # installation).
-    site.install_controller(team_key)
-    team_key.unlink()
-
-    # HOST.md, first operator enrollment: the operator's once-only bootstrap
-    # mails the approver's enrolment link; on the started host's human origin
-    # the shared page registers the passkey through B3, then check.
-    site.operator("bootstrap", "--requester", founded.requester, "--contact", site.contact)
-    site.start_signer()
-    site.chromium(machine, "enrol-page", "--url", enrolment_link(site, machine),
-                  "--device", f"{site.mounted}/approver-device.json")
-    assert site.operator("check") == {"provisioned": True, "service_id": site.service_id}

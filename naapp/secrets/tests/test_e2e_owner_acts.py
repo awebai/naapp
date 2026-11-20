@@ -101,6 +101,13 @@ LOGS_COMPOSE_ENV = {
     "LOGS_EMAIL_FROM": "logs@svc.test",
     "LOGS_EMAIL_CA_FILE": CA_PATH,
     "LOGS_EGRESS_DENIED_NETWORKS": "[]",
+    # The team's coordination server behind the lane's TLS front, on the
+    # lane's network: the operator's own, trusted through the lane's CA. Logs
+    # lists no hook receiver of its own.
+    "LOGS_HOOK_INTERNAL_DESTINATIONS": "allowed",
+    "LOGS_HOOK_INTERNAL_CIDR": LANE_SUBNET,
+    "LOGS_TEAM_SERVER_INTERNAL_ORIGINS": json.dumps([AWEB]),
+    "LOGS_HOOK_CA_FILE": "/runtime/tls/ca.pem",
 }
 # What the TLS front serves, and the service behind each host.
 UPSTREAMS = {
@@ -123,7 +130,6 @@ def secrets_env() -> dict[str, str]:
     lane's Logs, inside the lane's network."""
     return {
         "APP_ENV": "development",
-        "SSL_CERT_FILE": "/run/secrets-keys/hook-ca.pem",
         "SECRETS_DATABASE_URL": "postgresql://secrets:disposable@postgres:5432/secrets",
         "SECRETS_DB_SCHEMA": SECRETS_SCHEMA,
         "SECRETS_APP_ID": APP_ID,
@@ -155,6 +161,8 @@ def secrets_env() -> dict[str, str]:
         "SECRETS_HOOK_INTERNAL_DESTINATIONS": "allowed",
         "SECRETS_HOOK_INTERNAL_CIDR": LANE_SUBNET,
         "SECRETS_HOOK_CA_FILE": "/run/secrets-keys/hook-ca.pem",
+        # The team's coordination server behind the lane's TLS front, on the
+        # lane's network: the operator's own, trusted through the hook CA.
         "SECRETS_TEAM_SERVER_INTERNAL_ORIGINS": json.dumps([AWEB]),
     }
 

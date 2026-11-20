@@ -42,12 +42,9 @@ COMMON = yaml.safe_load(BASE_COMPOSE.read_text())
 LOGS_BASE = (APP_DIR.parent / "logs" / "compose.logs.yaml").read_text()
 REQUIRED = re.compile(r"\$\{([A-Z0-9_]+):\?")
 # Settings only the lane's Logs has, which never belong in the deployment
-# base: the lane's http registry is accepted only in development, its
-# certificates are the lane's own CA, and its coordination server is the
-# operator's own. Every other setting comes through the base.
-LANE_ONLY_LOGS_SETTINGS = frozenset(
-    {"APP_ENV", "SSL_CERT_FILE", "LOGS_TEAM_SERVER_INTERNAL_ORIGINS"}
-)
+# base: the lane's http registry is accepted only in development. Every other
+# setting comes through the base.
+LANE_ONLY_LOGS_SETTINGS = frozenset({"APP_ENV"})
 
 
 def test_every_setting_the_logs_base_requires_is_in_the_lanes_compose_environment():
@@ -118,7 +115,10 @@ def test_the_team_server_origin_resolves_only_to_the_lanes_tls_front(prepared_la
     ).read_text()
     assert set(front["depends_on"]) == {"aweb"}
     assert COMMON["services"]["cli"]["environment"]["SSL_CERT_FILE"] == "/runtime/tls/ca.pem"
-    assert secrets_env()["SSL_CERT_FILE"] == secrets_env()["SECRETS_HOOK_CA_FILE"]
+    # Secrets reads the team's server through its guard, which trusts the
+    # hook CA; the process trust store does not hold the lane's CA.
+    assert json.loads(secrets_env()["SECRETS_TEAM_SERVER_INTERNAL_ORIGINS"]) == [AWEB]
+    assert "SSL_CERT_FILE" not in secrets_env()
 
 
 def test_the_front_routes_each_host_to_its_service_with_the_lanes_certificate():

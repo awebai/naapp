@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -17,7 +18,13 @@ from aweb_naapp.hooks.owner_act import Refused, VerifiedOwnerAct
 from aweb_naapp_testing.owner_acts import APP_ID, INSTALLATION_ID, TEAM_ID
 
 from aweb_logs.governance import GovernanceRefused
-from aweb_logs.ledger import append
+from aweb_logs.ledger import (
+    GOVERNANCE_BEFORE,
+    append,
+    load_governance_before,
+    open_next_epoch,
+    verify_epoch,
+)
 from aweb_logs.retention import apply_retention
 
 from .fixtures import _APP_EVENT, SECRETS_SEED
@@ -26,6 +33,7 @@ from .reader_world import (
     World,
     count,
     held_reader,
+    move_logs,
     outbox,
     world_fixture,  # noqa: F401
 )
@@ -124,8 +132,9 @@ async def test_a_shortened_retention_is_recorded_and_its_purges_name_that_record
         30,
     )
     assert entry["authority"] == "owner_act"
-    assert await apply_retention(world.db, world.purges, now=NOW, logs_origin=LOGS) == 1
+    assert await apply_retention(world.db, world.purges, now=NOW) == 1
     assert await purged(world) == {1: f"logs.retention.set:{event_id}", 2: None}
+
 
 async def test_keeping_events_longer_is_a_widening_act_that_needs_a_target(world: World):
     await set_retention(world, "all", 30)
@@ -184,11 +193,11 @@ async def test_a_hold_on_everything_stops_retention_and_erasure_until_released(w
     await appended(world, secret_use(seq=1), age=timedelta(days=45))
     await hold(world, "hold-1")
     await set_retention(world, "all", 30)
-    assert await apply_retention(world.db, world.purges, now=NOW, logs_origin=LOGS) == 0
+    assert await apply_retention(world.db, world.purges, now=NOW) == 0
     with pytest.raises(GovernanceRefused):
         await erase(world, erase_scope="range", chain_epoch=1, team_seq_first=1, team_seq_last=1)
     await release(world, "hold-1")
-    assert await apply_retention(world.db, world.purges, now=NOW, logs_origin=LOGS) == 1
+    assert await apply_retention(world.db, world.purges, now=NOW) == 1
     assert [entry["act"] for entry in await governance(world)] == [
         "logs.legal_hold.set",
         "logs.retention.shortened",
@@ -201,7 +210,7 @@ async def test_a_hold_on_an_actor_keeps_only_that_actors_events(world: World):
     await appended(world, secret_use(seq=2, actor=OTHER_AGENT), age=timedelta(days=45))
     await hold(world, "hold-1", actor_ref=AGENT)
     await set_retention(world, "all", 30)
-    assert await apply_retention(world.db, world.purges, now=NOW, logs_origin=LOGS) == 1
+    assert await apply_retention(world.db, world.purges, now=NOW) == 1
     after = await purged(world)
     assert after[1] is None and after[2] is not None
 
@@ -240,12 +249,12 @@ async def test_a_hold_id_is_set_once(world: World):
         await release(world, "hold-2")
 
 
-def another_apps_governance() -> tuple[bytes, str]:
+def another_apps_governance(**payload) -> tuple[bytes, str]:
     """A post-governance-hook event another app produced and logs received."""
     event = copy.deepcopy(_APP_EVENT)
     event["event_id"] = str(uuid.uuid4())
     event["hook"] = "post-governance-hook"
-    event["payload"] = {"act": "role.revoked", "direction": "narrowing"}
+    event["payload"] = payload or {"act": "role.revoked", "direction": "narrowing"}
     return hook_envelope.sign(SECRETS_SEED, event)
 
 
@@ -256,7 +265,7 @@ async def test_retention_never_purges_logs_own_governance_records(world: World):
     await appended(world, secret_use(seq=1), age=timedelta(days=2))
     await set_retention(world, "all", 1)
     later = datetime.now(UTC) + timedelta(days=3)
-    assert await apply_retention(world.db, world.purges, now=later, logs_origin=LOGS) == 2
+    assert await apply_retention(world.db, world.purges, now=later) == 2
     rows = await world.db.fetch_all(
         "SELECT producer_origin = $2 AS own, purge_act IS NOT NULL AS purged"
         " FROM {{tables.chain_events}} WHERE team_id = $1 ORDER BY team_seq",
@@ -305,7 +314,7 @@ async def test_an_erasure_counts_what_it_purged_while_retention_runs(world: Worl
     range_ = {"erase_scope": "range", "chain_epoch": 1, "team_seq_first": 1, "team_seq_last": 2}
     erasing = asyncio.create_task(erase(world, **range_))
     await recording.wait()
-    retained = await apply_retention(world.db, world.purges, now=NOW, logs_origin=LOGS)
+    retained = await apply_retention(world.db, world.purges, now=NOW)
     proceed.set()
     erased = await erasing
     assert (erased, retained) == (2, 0)
@@ -356,3 +365,161 @@ async def test_an_erasure_and_an_append_overlapping_on_unprojected_history_both_
     await appending
     first, second = (await purged(world)).values()
     assert first is not None and second is None
+
+
+async def verified(world: World, chain_epoch: int = 1) -> dict:
+    keys = frozenset({world.signer.did_key})
+    return await verify_epoch(
+        world.db, TEAM_ID, chain_epoch, receipt_keys=keys, checkpoint_keys=keys
+    )
+
+
+async def governance_positions(world: World) -> list[dict]:
+    """Where each of logs' own governance entries sits in the team's chain."""
+    rows = await world.db.fetch_all(
+        "SELECT chain_epoch, team_seq FROM {{tables.chain_events}} WHERE team_id = $1"
+        " AND hook = 'post-governance-hook' AND producer_origin = $2"
+        " ORDER BY chain_epoch, team_seq",
+        TEAM_ID,
+        LOGS,
+    )
+    return [{"chain_epoch": row["chain_epoch"], "team_seq": row["team_seq"]} for row in rows]
+
+
+async def test_verify_discloses_each_hold_from_its_chain_entries(world: World):
+    await appended(world, secret_use(seq=1), age=timedelta(days=1))
+    await hold(world, "hold-1")
+    await hold(world, "hold-2", actor_ref=AGENT)
+    await release(world, "hold-1")
+    set_1, set_2, released_1 = await governance_positions(world)
+    report = await verified(world)
+    assert report["intact"]
+    assert report["holds"] == [
+        {"hold_id": "hold-1", "hold_scope": "all", "set": set_1, "released": released_1},
+        {"hold_id": "hold-2", "hold_scope": "actor", "actor_ref": AGENT, "set": set_2,
+         "released": None},
+    ]  # fmt: skip
+
+
+async def test_verify_never_counts_another_producers_hold_acts(world: World):
+    await hold(world, "hold-1")
+    forged = {"direction": "widening", "hold_scope": "all", "reason_code": "litigation"}
+    await appended(
+        world,
+        another_apps_governance(act="logs.legal_hold.set", hold_id="forged", **forged),
+        age=timedelta(seconds=1),
+    )
+    await appended(
+        world,
+        another_apps_governance(act="logs.legal_hold.released", direction="narrowing",
+                                hold_id="hold-1"),
+        age=timedelta(seconds=1),
+    )  # fmt: skip
+    [set_1] = await governance_positions(world)
+    report = await verified(world)
+    assert report["intact"]
+    assert report["holds"] == [
+        {"hold_id": "hold-1", "hold_scope": "all", "set": set_1, "released": None}
+    ]
+
+
+async def test_verify_carries_each_hold_still_active_into_the_next_epoch(world: World):
+    await hold(world, "hold-1")
+    await hold(world, "hold-2")
+    await release(world, "hold-2")
+    await open_next_epoch(world.db, world.signer, TEAM_ID, at=datetime.now(UTC))
+    await hold(world, "hold-3", actor_ref=AGENT)
+    await release(world, "hold-1")
+    set_1, _, _, set_3, released_1 = await governance_positions(world)
+    assert (set_1["chain_epoch"], set_3["chain_epoch"], released_1["chain_epoch"]) == (1, 2, 2)
+    report = await verified(world, chain_epoch=2)
+    assert report["intact"]
+    assert report["holds"] == [
+        {"hold_id": "hold-1", "hold_scope": "all", "set": set_1, "released": released_1},
+        {"hold_id": "hold-3", "hold_scope": "actor", "actor_ref": AGENT, "set": set_3,
+         "released": None},
+    ]  # fmt: skip
+
+
+MOVED = "https://logs.moved.example"
+
+
+async def held_then_moved(world: World) -> tuple[dict, frozenset[str]]:
+    """An actor hold set at logs' first origin, beside another producer's
+    governance event, then logs moves: the hold's set entry and the keys that
+    signed both epochs."""
+    await hold(world, "hold-1", actor_ref=OTHER_AGENT)
+    await appended(world, another_apps_governance(), age=timedelta(days=2))
+    [set_1] = await governance_positions(world)
+    first_key = world.signer.did_key
+    await move_logs(world, MOVED)
+    return set_1, frozenset({first_key, world.signer.did_key})
+
+
+async def disclosed_after_move(world: World, keys: frozenset[str]) -> list[dict]:
+    report = await verify_epoch(world.db, TEAM_ID, 2, receipt_keys=keys, checkpoint_keys=keys)
+    assert report["intact"]
+    return report["holds"]
+
+
+async def test_retention_after_a_move_keeps_logs_earlier_governance_and_its_holds(world: World):
+    set_1, keys = await held_then_moved(world)
+    await set_retention(world, "all", 1)
+    later = datetime.now(UTC) + timedelta(days=3)
+    # Only the other producer's event expires: logs' entry from its first
+    # origin is still its own.
+    assert await apply_retention(world.db, world.purges, now=later) == 1
+    assert await disclosed_after_move(world, keys) == [
+        {"hold_id": "hold-1", "hold_scope": "actor", "actor_ref": OTHER_AGENT, "set": set_1,
+         "released": None},
+    ]  # fmt: skip
+
+
+async def test_an_erased_range_after_a_move_keeps_logs_earlier_governance_and_its_holds(
+    world: World,
+):
+    set_1, keys = await held_then_moved(world)
+    assert (
+        await erase(world, erase_scope="range", chain_epoch=1, team_seq_first=1, team_seq_last=2)
+        == 1
+    )
+    assert await disclosed_after_move(world, keys) == [
+        {"hold_id": "hold-1", "hold_scope": "actor", "actor_ref": OTHER_AGENT, "set": set_1,
+         "released": None},
+    ]  # fmt: skip
+
+
+def index_names(plan: dict) -> set[str]:
+    names = {plan["Index Name"]} if "Index Name" in plan else set()
+    for child in plan.get("Plans", []):
+        names |= index_names(child)
+    return names
+
+
+async def test_earlier_epochs_governance_is_read_by_its_own_index(world: World):
+    for seq in range(1, 6):
+        await appended(world, secret_use(seq=seq), age=timedelta(days=1))
+    await hold(world, "hold-1")
+    await open_next_epoch(world.db, world.signer, TEAM_ID, at=datetime.now(UTC))
+    async with world.db.transaction() as tx:
+        await tx.execute("SET LOCAL enable_seqscan = off")
+        [explained] = json.loads(
+            await tx.fetch_value(  # nonliteral-call: EXPLAIN of GOVERNANCE_BEFORE
+                "EXPLAIN (FORMAT JSON) " + GOVERNANCE_BEFORE, TEAM_ID, 2
+            )
+        )
+    assert "idx_chain_events_governance" in index_names(explained["Plan"])
+
+
+async def test_earlier_epochs_are_read_only_once_the_epoch_exists(world: World):
+    """Epoch 1 is still open while epoch 2 does not exist: a read of the epochs
+    before 2 would miss a hold set before the rotation, so it is refused."""
+    await hold(world, "hold-1")
+    with pytest.raises(LookupError):
+        await load_governance_before(world.db, TEAM_ID, 2)
+    with pytest.raises(LookupError):
+        await verified(world, chain_epoch=2)
+    await hold(world, "hold-2")
+    await open_next_epoch(world.db, world.signer, TEAM_ID, at=datetime.now(UTC))
+    report = await verified(world, chain_epoch=2)
+    assert [hold["hold_id"] for hold in report["holds"]] == ["hold-1", "hold-2"]

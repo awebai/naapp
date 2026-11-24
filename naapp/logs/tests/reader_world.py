@@ -41,7 +41,7 @@ from pgdbm import AsyncDatabaseManager, AsyncMigrationManager
 
 from aweb_logs import MIGRATIONS_MODULE, MIGRATIONS_PATH
 from aweb_logs.governance import SELF_RECORDED_ACTS, LogsGovernance
-from aweb_logs.ledger import LogsSigner
+from aweb_logs.ledger import LogsSigner, open_next_epoch
 from aweb_logs.purge_ledger import PurgeLedger
 from aweb_logs.readers import READER_ROLE, ReaderDirectory, ReaderRemovals
 
@@ -143,6 +143,8 @@ class World:
     governance: LogsGovernance = field(init=False)
     removals: ReaderRemovals = field(init=False)
     recorder: CredentialAudit = field(init=False)
+    # logs' producer of its own governance events, at logs' current origin.
+    producer: HookProducer = field(init=False)
     passkeys: Passkeys = field(init=False)
     devices: dict[str, SoftAuthenticator] = field(default_factory=dict)
     # The team's human members, and the certificate of each by principal.
@@ -177,6 +179,30 @@ class World:
         )
 
 
+def governance_producer(origin: str) -> HookProducer:
+    """logs' producer of its own governance events at ``origin``."""
+    return HookProducer(
+        ServerProducer.app(
+            origin=origin,
+            app_id=APP_ID,
+            installation_id=INSTALLATION_ID,
+            generation=1,
+            kid="logs-governance",
+            seed=os.urandom(32),
+        )
+    )
+
+
+async def move_logs(world: World, origin: str) -> None:
+    """logs moves to ``origin``: the team's next epoch is logs' at that origin,
+    and logs signs and produces from there on."""
+    await open_next_epoch(world.db, world.signer, TEAM_ID, at=datetime.now(UTC), logs_origin=origin)
+    world.signer = LogsSigner(
+        logs_origin=origin, kid="logs-chain", signing_key=SigningKey.generate()
+    )
+    world.producer = governance_producer(origin)
+
+
 @pytest.fixture(name="world")
 async def world_fixture(test_db_factory) -> AsyncIterator[World]:
     db = await test_db_factory.create_db(suffix="logs_reader_designation")
@@ -193,16 +219,6 @@ async def world_fixture(test_db_factory) -> AsyncIterator[World]:
     ).apply_pending_migrations()
     installations = Installations()
     fence = InstallationFence(db, app_id=APP_ID, grants=installations)
-    producer = HookProducer(
-        ServerProducer.app(
-            origin=LOGS,
-            app_id=APP_ID,
-            installation_id=INSTALLATION_ID,
-            generation=1,
-            kid="logs-governance",
-            seed=os.urandom(32),
-        )
-    )
     signer = LogsSigner(logs_origin=LOGS, kid="logs-chain", signing_key=SigningKey.generate())
     registered = [True]
 
@@ -217,6 +233,7 @@ async def world_fixture(test_db_factory) -> AsyncIterator[World]:
                 db, owner, signer, directory, Inbox(), registered, installations.grant, fence
             )
             state.registry, state.namespace = registry, namespace
+            state.producer = governance_producer(LOGS)
             state.members = AWIDTeamCache(
                 registry_url=REGISTRY_URL,
                 ttl_seconds=60,
@@ -225,11 +242,12 @@ async def world_fixture(test_db_factory) -> AsyncIterator[World]:
             )
             await state.join("first-reader", READER_KEY)
             await state.join("other-reader", OTHER_READER_KEY)
-            append_own = directory.appender(signer)
 
             async def append(tx, event_id) -> None:
                 await state.before_append()
-                await append_own(tx, event_id)
+                # The world's signer at the time: a test that moves logs to another
+                # origin swaps it.
+                await directory.appender(state.signer)(tx, event_id)
 
             state.recorder = CredentialAudit(
                 db=db,
@@ -237,7 +255,7 @@ async def world_fixture(test_db_factory) -> AsyncIterator[World]:
                 fence=fence,
                 contexts=directory.proof_context(app_id=APP_ID),
                 owner_act_scope=owner.verifier.scope,
-                producer=lambda **_: producer,
+                producer=lambda **_: state.producer,
                 passkeys=lambda: state.passkeys,
                 role_of=directory.role_of,
                 registration_view=view,
@@ -267,7 +285,6 @@ async def world_fixture(test_db_factory) -> AsyncIterator[World]:
                 fence=fence,
                 verifier=owner.verifier,
                 recorder=state.recorder,
-                logs_origin=LOGS,
             )
             state.removals = ReaderRemovals(
                 directory, fence=fence, passkeys=state.passkeys, recorder=state.recorder

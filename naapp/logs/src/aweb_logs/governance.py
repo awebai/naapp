@@ -33,11 +33,11 @@ from pgdbm import AsyncDatabaseManager
 from pgdbm.core import TransactionManager
 
 from aweb_logs import read_store
-from aweb_logs.ledger import lock_head
+from aweb_logs.chain import HOLD_RELEASED, HOLD_SET
+from aweb_logs.ledger import OWN_GOVERNANCE, lock_head
 from aweb_logs.purge_ledger import PurgeLedger
 from aweb_logs.retention import (
     ALL_EVENTS,
-    GOVERNANCE_HOOK,
     HELD,
     lock_holds,
     purge,
@@ -45,36 +45,35 @@ from aweb_logs.retention import (
 )
 
 # Fixed in reviewed code, never configuration: adding an act is a reviewed change.
-SELF_RECORDED_ACTS = frozenset({"logs.legal_hold.set"})
+SELF_RECORDED_ACTS = frozenset({HOLD_SET})
 
 # The governance event acts each owner act may record, so no act is recorded
 # under a name (and so a gate) that its signed act does not permit.
 _EVENT_ACTS = {
     "logs.retention.set": frozenset({"logs.retention.shortened", "logs.retention.lengthened"}),
     "logs.erase": frozenset({"logs.erased"}),
-    "logs.legal-hold.set": frozenset({"logs.legal_hold.set"}),
-    "logs.legal-hold.release": frozenset({"logs.legal_hold.released"}),
+    "logs.legal-hold.set": frozenset({HOLD_SET}),
+    "logs.legal-hold.release": frozenset({HOLD_RELEASED}),
 }
 
 
 # The unpurged events an erasure names, each with whether a hold holds it: a
 # range of the chain's positions, or every event whose projection names the
-# actor. logs' own governance records ($2 its hook, $3 its origin) are never
-# erased.
+# actor. logs' own governance records are never erased.
 _ERASABLE = "SELECT e.chain_epoch, e.team_seq, " + HELD + " AS held FROM {{tables.chain_events}} e"
-_NOT_OWN = " AND NOT (e.hook = $2 AND e.producer_origin = $3)"
+_NOT_OWN = " AND NOT " + OWN_GOVERNANCE
 # The covered events are locked, in position order as catch-up and purges lock,
 # before they are counted: the count recorded is what this erasure purges, and
 # a retention pass skips them meanwhile.
 _LOCKED = " ORDER BY e.chain_epoch, e.team_seq FOR UPDATE OF e"
 _RANGE_ERASED = (
-    _ERASABLE + " WHERE e.team_id = $1 AND e.chain_epoch = $4 AND e.team_seq BETWEEN $5 AND $6"
+    _ERASABLE + " WHERE e.team_id = $1 AND e.chain_epoch = $2 AND e.team_seq BETWEEN $3 AND $4"
     " AND e.purge_act IS NULL" + _NOT_OWN + _LOCKED
 )
 _ACTOR_ERASED = (
     _ERASABLE + " JOIN {{tables.read_events}} r ON r.team_id = e.team_id"
     " AND r.chain_epoch = e.chain_epoch AND r.team_seq = e.team_seq"
-    " WHERE e.team_id = $1 AND (r.actor_did_aw = $4 OR r.actor_did_key = $4)"
+    " WHERE e.team_id = $1 AND (r.actor_did_aw = $2 OR r.actor_did_key = $2)"
     " AND e.purge_act IS NULL" + _NOT_OWN + _LOCKED
 )
 
@@ -93,7 +92,6 @@ class LogsGovernance:
         fence: InstallationFence,
         verifier: OwnerActVerifier,
         recorder: CredentialAudit,
-        logs_origin: str,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self.db = db
@@ -101,7 +99,6 @@ class LogsGovernance:
         self.fence = fence
         self.verifier = verifier
         self.recorder = recorder
-        self.logs_origin = logs_origin
         self.now = now
 
     async def set_retention(
@@ -191,8 +188,6 @@ class LogsGovernance:
             positions = await tx.fetch_all(
                 (_ACTOR_ERASED if erase_scope == "actor" else _RANGE_ERASED),
                 team_id,
-                GOVERNANCE_HOOK,
-                self.logs_origin,
                 *((actor_ref,) if erase_scope == "actor" else
                   (chain_epoch, team_seq_first, team_seq_last)),
             )  # fmt: skip
@@ -240,7 +235,7 @@ class LogsGovernance:
             ):
                 raise GovernanceRefused("this hold id was already set")
             event_id = await self._record(
-                tx, act, {"act": "logs.legal_hold.set", "direction": "widening", **fields}
+                tx, act, {"act": HOLD_SET, "direction": "widening", **fields}
             )
             await tx.execute(
                 "INSERT INTO {{tables.legal_holds}}"
@@ -272,7 +267,7 @@ class LogsGovernance:
             ):
                 raise GovernanceRefused("no active hold has this id")
             event_id = await self._record(
-                tx, act, {"act": "logs.legal_hold.released", "direction": "narrowing", **fields}
+                tx, act, {"act": HOLD_RELEASED, "direction": "narrowing", **fields}
             )
             await tx.execute(
                 "UPDATE {{tables.legal_holds}} SET released_at = NOW(), released_event_id = $3"

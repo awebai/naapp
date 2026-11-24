@@ -37,6 +37,12 @@ from awid.did import did_key_from_signing_key
 from awid.signature_wire import sign_bytes
 from nacl.signing import SigningKey
 
+# The hook logs records its own owner acts under, in each team's chain.
+GOVERNANCE_HOOK = "post-governance-hook"
+# The acts logs' own governance entries record for a legal hold.
+HOLD_SET = "logs.legal_hold.set"
+HOLD_RELEASED = "logs.legal_hold.released"
+
 RECEIPT_PURPOSE = "logs-receipt"
 CHECKPOINT_PURPOSE = "logs-checkpoint"
 

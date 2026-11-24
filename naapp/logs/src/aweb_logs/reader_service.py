@@ -43,6 +43,7 @@ from fastapi import APIRouter, Request
 from pgdbm import AsyncDatabaseManager
 from pgdbm.core import TransactionManager
 
+from aweb_logs.chain import GOVERNANCE_HOOK
 from aweb_logs.console_ui import console_pages_router
 from aweb_logs.governance import SELF_RECORDED_ACTS, LogsGovernance
 from aweb_logs.ledger import LogsSigner
@@ -51,7 +52,6 @@ from aweb_logs.read_routes import ReaderReads, reader_read_router, reader_remova
 from aweb_logs.reader_acts import reader_acts
 from aweb_logs.readers import READER_ROLE, ReaderDirectory, ReaderRemovals
 
-GOVERNANCE_HOOK = "post-governance-hook"
 CREDENTIAL_AUDIT_MODULE = "aweb_logs_credential_audit"
 
 
@@ -277,7 +277,6 @@ async def reader_service(
             fence=fence,
             verifier=verifier,
             recorder=recorder,
-            logs_origin=runtime.settings.public_origin,
         ),
         owner_acts=owner_acts,
     )

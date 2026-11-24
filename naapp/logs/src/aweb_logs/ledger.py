@@ -24,6 +24,7 @@ from pgdbm.core import TransactionManager
 
 from aweb_logs import read_store
 from aweb_logs.chain import (
+    GOVERNANCE_HOOK,
     SALT_BYTES,
     Checkpoint,
     Genesis,
@@ -37,7 +38,13 @@ from aweb_logs.chain import (
     sign_checkpoint,
     sign_receipt,
 )
-from aweb_logs.verify import Content, StoredEvent, verify_chain, verify_deliveries
+from aweb_logs.verify import (
+    Content,
+    StoredEvent,
+    disclosed_holds,
+    verify_chain,
+    verify_deliveries,
+)
 
 
 @dataclass(frozen=True)
@@ -331,6 +338,31 @@ async def open_next_epoch(
         return final
 
 
+_GENESIS_COLUMNS = "chain_epoch, logs_origin, created_at, previous_checkpoint_sha256"
+_EVENT_COLUMNS = (
+    "chain_epoch, team_seq, prev_event_hash, event_hash, received_at, hook, producer_origin,"
+    " content_commitment, salt, signing_bytes, signature, key_evidence, purge_act,"
+    " receipt_bytes, receipt_signature"
+)
+
+# Whether the chain event ``e`` is one of logs' own governance entries: its
+# hook, produced by the logs origin of the epoch it is in. Each epoch keeps its
+# own origin, so an entry stays logs' own after logs moves to another origin.
+OWN_GOVERNANCE = (
+    "(e.hook = '" + GOVERNANCE_HOOK + "' AND e.producer_origin ="
+    " (SELECT p.logs_origin FROM {{tables.chain_epochs}} p"
+    " WHERE p.team_id = e.team_id AND p.chain_epoch = e.chain_epoch))"
+)
+
+# logs' own governance entries in a team's epochs before $2, read through
+# idx_chain_events_governance: their count, not the team's history, is the cost.
+GOVERNANCE_BEFORE = (
+    "SELECT " + _EVENT_COLUMNS + " FROM {{tables.chain_events}} e"
+    " WHERE e.team_id = $1 AND e.chain_epoch < $2 AND " + OWN_GOVERNANCE +
+    " ORDER BY e.chain_epoch, e.team_seq"
+)
+
+
 async def load_epoch(
     db: AsyncDatabaseManager | TransactionManager, team_id: str, chain_epoch: int
 ) -> tuple[Genesis, list[StoredEvent]]:
@@ -348,19 +380,56 @@ async def load_genesis(
     db: AsyncDatabaseManager | TransactionManager, team_id: str, chain_epoch: int
 ) -> Genesis:
     epoch = await db.fetch_one(
-        "SELECT logs_origin, created_at, previous_checkpoint_sha256"
-        " FROM {{tables.chain_epochs}} WHERE team_id = $1 AND chain_epoch = $2",
+        "SELECT " + _GENESIS_COLUMNS + " FROM {{tables.chain_epochs}}"
+        " WHERE team_id = $1 AND chain_epoch = $2",
         team_id,
         chain_epoch,
     )
     if epoch is None:
         raise LookupError(f"team {team_id} has no epoch {chain_epoch}")
+    return _genesis(team_id, epoch)
+
+
+async def load_governance_before(
+    db: AsyncDatabaseManager | TransactionManager, team_id: str, chain_epoch: int
+) -> list[tuple[Genesis, list[StoredEvent]]]:
+    """Each of the team's epochs before ``chain_epoch``, in order, with only
+    logs' own governance entries in it: the chain that carries a hold across
+    epochs. Raises LookupError unless ``chain_epoch`` exists: only then are the
+    epochs before it closed, and their governance entries final."""
+    if not await db.fetch_value(
+        "SELECT 1 FROM {{tables.chain_epochs}} WHERE team_id = $1 AND chain_epoch = $2",
+        team_id,
+        chain_epoch,
+    ):
+        raise LookupError(f"team {team_id} has no epoch {chain_epoch}")
+    epochs = await db.fetch_all(
+        "SELECT " + _GENESIS_COLUMNS + " FROM {{tables.chain_epochs}}"
+        " WHERE team_id = $1 AND chain_epoch < $2 ORDER BY chain_epoch",
+        team_id,
+        chain_epoch,
+    )
+    rows = await db.fetch_all(GOVERNANCE_BEFORE, team_id, chain_epoch)
+    return [
+        (
+            _genesis(team_id, epoch),
+            [
+                _stored_event(team_id, epoch["chain_epoch"], row)
+                for row in rows
+                if row["chain_epoch"] == epoch["chain_epoch"]
+            ],
+        )
+        for epoch in epochs
+    ]
+
+
+def _genesis(team_id: str, row: Mapping[str, Any]) -> Genesis:
     return Genesis(
         team_id=team_id,
-        chain_epoch=chain_epoch,
-        logs_origin=epoch["logs_origin"],
-        created_at=epoch["created_at"],
-        previous_checkpoint_sha256=epoch["previous_checkpoint_sha256"],
+        chain_epoch=row["chain_epoch"],
+        logs_origin=row["logs_origin"],
+        created_at=row["created_at"],
+        previous_checkpoint_sha256=row["previous_checkpoint_sha256"],
     )
 
 
@@ -420,11 +489,7 @@ async def load_checkpoints(
     return [(row["team_seq"], (bytes(row["signing_bytes"]), row["signature"])) for row in rows]
 
 
-_EVENTS = (
-    "SELECT team_seq, prev_event_hash, event_hash, received_at, hook, producer_origin,"
-    " content_commitment, salt, signing_bytes, signature, key_evidence, purge_act,"
-    " receipt_bytes, receipt_signature FROM {{tables.chain_events}}"
-)
+_EVENTS = "SELECT " + _EVENT_COLUMNS + " FROM {{tables.chain_events}}"
 
 
 def _stored_event(team_id: str, chain_epoch: int, row: Mapping[str, Any]) -> StoredEvent:
@@ -475,6 +540,10 @@ async def verify_epoch(
     checkpoints that cover it is seen only through witnesses held outside logs'
     database, which the caller passes.
     """
+    # Once the epoch exists the earlier ones are closed, and no purge reaches
+    # logs' own governance entries, so they are read outside the head lock
+    # appends wait on.
+    earlier = await load_governance_before(db, team_id, chain_epoch)
     async with db.transaction() as tx:
         head = await _existing_head(tx, team_id)
         genesis, events = await load_epoch(tx, team_id, chain_epoch)
@@ -535,6 +604,9 @@ async def verify_epoch(
         ],
         "head_matches": head_matches,
     }
+    report["holds"] = [
+        hold.to_json() for hold in disclosed_holds([*earlier, (genesis, events)])
+    ]
     report["delivery"] = verify_deliveries(genesis, events).to_json()
     report["conflicts"] = [
         {"fault_id": f["fault_id"], "event_id": str(f["event_id"]), "team_seq": f["team_seq"],

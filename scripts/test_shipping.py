@@ -285,7 +285,8 @@ class CandidateContractTest(unittest.TestCase):
             cwd=root, env=fixture_env(), capture_output=True, text=True,
         )
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-        self.assertIn("[release-checks] Error 3", refused.stderr)
+        # GNU make names the Makefile and line in the failed target; BSD make does not.
+        self.assertRegex(refused.stderr, r"\[(?:Makefile:\d+: )?release-checks\] Error 3")
         self.assertIn("candidate refused: make release-checks failed", refused.stderr)
         self.assertEqual(command(root, "git", "tag", "--list"), "")
 

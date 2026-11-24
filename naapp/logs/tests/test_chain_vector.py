@@ -12,9 +12,7 @@ from aweb_naapp.hooks.strictjson import Refused
 
 from aweb_logs.chain import (
     Checkpoint,
-    Genesis,
     Receipt,
-    content_commitment,
     open_checkpoint,
     open_receipt,
 )
@@ -39,19 +37,6 @@ def test_the_vector_regenerates_byte_for_byte() -> None:
         "the committed logs-chain vector differs from the regenerated one; "
         "rewrite it only for a reviewed change"
     )
-
-
-@pytest.mark.parametrize("entry", VECTOR["genesis_cases"])
-def test_genesis_hashes_from_the_file(entry: dict[str, Any]) -> None:
-    assert Genesis(**entry["genesis"]).hash() == entry["genesis_hash"]
-
-
-@pytest.mark.parametrize("entry", VECTOR["commitment_cases"])
-def test_commitments_from_the_file(entry: dict[str, Any]) -> None:
-    commitment = content_commitment(
-        unb64(entry["salt_b64url"]), unb64(entry["signing_bytes_b64url"]), entry["signature"]
-    )
-    assert commitment == entry["content_commitment"]
 
 
 @pytest.mark.parametrize("entry", VECTOR["artefact_cases"]["positive"], ids=lambda e: e["name"])

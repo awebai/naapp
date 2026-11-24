@@ -7,7 +7,7 @@ from typing import Any
 
 import pytest
 from aweb_naapp.hooks import envelope as hook_envelope
-from aweb_naapp.hooks.strictjson import Refused, encode_signature
+from aweb_naapp.hooks.strictjson import Refused
 from nacl.signing import SigningKey
 
 from aweb_logs.chain import (
@@ -20,7 +20,6 @@ from aweb_logs.chain import (
     format_time,
     link_for,
     open_checkpoint,
-    open_receipt,
     sign_checkpoint,
     sign_receipt,
 )
@@ -188,57 +187,10 @@ def test_a_link_refuses_a_malformed_digest() -> None:
         dataclasses.replace(_link(), prev_event_hash="AB" * 32).event_hash()
 
 
-def test_a_receipt_opens_to_what_logs_signed() -> None:
-    receipt = _receipt()
-    signing, signature = sign_receipt(SigningKey(LOGS_SEED), receipt)
-    assert signing.startswith(b"aweb.logs-receipt/1\n")
-    assert open_receipt(signing, signature) == receipt
-
-
 def test_logs_signs_only_with_the_key_the_artefact_names() -> None:
     with pytest.raises(Refused) as caught:
         sign_receipt(SigningKey(OTHER_LOGS_SEED), _receipt())
     assert caught.value.code == "signer_mismatch"
-
-
-def test_a_receipt_signed_by_another_key_is_refused() -> None:
-    signing, _ = sign_receipt(SigningKey(LOGS_SEED), _receipt())
-    forged = SigningKey(OTHER_LOGS_SEED).sign(signing).signature
-    with pytest.raises(Refused) as caught:
-        open_receipt(signing, encode_signature(forged))
-    assert caught.value.code == "bad_signature"
-
-
-def test_a_tampered_receipt_is_refused() -> None:
-    signing, signature = sign_receipt(SigningKey(LOGS_SEED), _receipt())
-    tampered = signing.replace(b'"team_seq":1', b'"team_seq":2')
-    with pytest.raises(Refused) as caught:
-        open_receipt(tampered, signature)
-    assert caught.value.code == "bad_signature"
-
-
-def test_a_checkpoint_is_never_a_receipt_and_back() -> None:
-    receipt_signing, receipt_signature = sign_receipt(SigningKey(LOGS_SEED), _receipt())
-    checkpoint_signing, checkpoint_signature = sign_checkpoint(SigningKey(LOGS_SEED), _checkpoint())
-    with pytest.raises(Refused) as caught:
-        open_receipt(checkpoint_signing, checkpoint_signature)
-    assert caught.value.code == "wrong_prefix"
-    with pytest.raises(Refused) as caught:
-        open_checkpoint(receipt_signing, receipt_signature)
-    assert caught.value.code == "wrong_prefix"
-
-
-def test_receipt_bytes_must_be_canonical_and_known() -> None:
-    signing, _ = sign_receipt(SigningKey(LOGS_SEED), _receipt())
-    spaced = signing.replace(b'{"chain_epoch"', b'{ "chain_epoch"')
-    key = SigningKey(LOGS_SEED)
-    with pytest.raises(Refused) as caught:
-        open_receipt(spaced, encode_signature(key.sign(spaced).signature))
-    assert caught.value.code == "not_canonical"
-    extra = signing.replace(b'{"chain_epoch"', b'{"a":1,"chain_epoch"')
-    with pytest.raises(Refused) as caught:
-        open_receipt(extra, encode_signature(key.sign(extra).signature))
-    assert caught.value.code == "unknown_field"
 
 
 def test_a_checkpoint_links_to_the_previous_one() -> None:

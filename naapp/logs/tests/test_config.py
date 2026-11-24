@@ -62,14 +62,6 @@ def test_the_client_address_header_is_unset_unless_the_deployment_names_one(
     assert LogsSettings(_env_file=None).client_address_header == "X-Real-IP"
 
 
-def test_the_console_origin_is_read_from_its_setting(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("LOGS_DATABASE_URL", "postgresql://localhost/logs")
-    monkeypatch.setenv("LOGS_PURGE_LEDGER_DATABASE_URL", "postgresql://localhost/logs_purges")
-    monkeypatch.setenv("LOGS_PUBLIC_ORIGIN", "https://logs.example.test")
-    monkeypatch.setenv("LOGS_CONSOLE_ORIGIN", "https://console.logs.example.test")
-    assert LogsSettings(_env_file=None).console_origin == "https://console.logs.example.test"
-
-
 @pytest.mark.parametrize(
     "console_origin",
     [

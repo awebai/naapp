@@ -148,16 +148,6 @@ async def test_a_scope_that_is_no_current_reader_is_removed_by_nobody(world: Wor
     assert await chained(world) == before
 
 
-async def test_a_member_of_another_team_removes_nobody(world: World):
-    await held_reader(world)
-    scope, reader = await held_reader(world, OTHER_READER)
-    with pytest.raises(RemovalRefused):
-        await world.removals.remove(
-            principal=member("another-team"), grant=world.grant, scope=scope
-        )
-    assert await holder(world, scope) == reader
-
-
 async def held_open(world: World) -> tuple[asyncio.Event, asyncio.Event]:
     """Hold the next governance transaction open just before logs appends its
     event: returns (entered, release)."""

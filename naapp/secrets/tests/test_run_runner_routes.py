@@ -1,5 +1,7 @@
 """The real S15a framing adapter against the actual S13 run service and PG."""
 
+from contextlib import asynccontextmanager
+
 import httpx
 from fastapi import FastAPI
 from nacl.signing import SigningKey
@@ -15,12 +17,18 @@ def headers(signed):
     return {"Content-Type": "application/json", "X-Aweb-Secrets-Runner-Request": signed.header}
 
 
-async def test_framed_claim_started_and_streamed_report_use_one_actual_service(uses):
-    context = await setup(uses)
-    await context.service.submit(job=context.job.job_id, submission=context.submission)
+@asynccontextmanager
+async def runner_client(context):
     app = FastAPI()
     app.include_router(runner_dispatch_router(service=lambda: context.service))
     async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=ORIGIN) as client:
+        yield client
+
+
+async def test_framed_claim_started_and_streamed_report_use_one_actual_service(uses):
+    context = await setup(uses)
+    await context.service.submit(job=context.job.job_id, submission=context.submission)
+    async with runner_client(context) as client:
         signed = context.signed("/runner/v1/claim")
         assignment = await client.post(
             signed.raw_target, content=signed.body, headers=headers(signed)
@@ -57,8 +65,6 @@ async def test_result_signature_preflight_refuses_before_streaming_any_body(uses
     dispatch_ref = wire["assignment"]["dispatch_id"]
     target = f"/runner/v1/dispatches/{dispatch_ref}/result"
     signed = context.signed(target, report(), key=SigningKey.generate())
-    app = FastAPI()
-    app.include_router(runner_dispatch_router(service=lambda: context.service))
     streamed = False
 
     async def unread():
@@ -67,7 +73,7 @@ async def test_result_signature_preflight_refuses_before_streaming_any_body(uses
         yield signed.body
 
     before = await uses.world.db.fetch_value("SELECT count(*) FROM {{tables.scoped_nonces}}")
-    async with httpx.AsyncClient(transport=httpx.ASGITransport(app), base_url=ORIGIN) as client:
+    async with runner_client(context) as client:
         response = await client.post(target, content=unread(), headers=headers(signed))
     assert response.status_code == 401 and response.json()["detail"]["code"] == "runner_unknown"
     assert not streamed

@@ -100,6 +100,7 @@ async def setup(
     approval_required=False,
     producer_clock=None,
     job_timeout_s=None,
+    job_output_max_bytes=None,
     variant="",
     reuse_source=None,
     paired=False,
@@ -125,6 +126,8 @@ async def setup(
         body["job_id"] += "-" + variant
     if job_timeout_s is not None:
         body["timeout_s"] = job_timeout_s
+    if job_output_max_bytes is not None:
+        body["output"]["max_bytes"] = job_output_max_bytes
     body["credentials"][0]["secret_ref"] = record["ref"]
     body["env"] = {"DB_ADMIN": {"$credential": record["ref"], "field": "value"}}
     secondary = None

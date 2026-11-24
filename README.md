@@ -17,21 +17,9 @@ commit that touched the paths listed in the script, rewritten to hold only those
 paths. The current import is from aweb
 `d8ee9ed31ad275da7cab3a3cade0006e06587f02`.
 
-Until the cutover, aweb is the source of truth for everything under
-`aweb-import`. Changes to those files land in aweb and come here by import, not
-by editing them here. To take newer aweb history:
-
-```sh
-scripts/extract-from-aweb.sh <aweb clone or URL> <aweb commit> /tmp/naapp-import
-git fetch /tmp/naapp-import aweb-import:aweb-import   # a fast-forward
-git merge aweb-import
-```
-
-The extraction takes about 30 seconds and checks its own result: the extracted
-tree equals aweb's under the kept paths, and no dropped file appears in any
-commit. The rewrite is deterministic for a given path list, so a newer import
-is a fast-forward of the previous one. Changing the path list rewrites the
-commits that touch the changed paths.
+This repository is the only home of the runtime and the apps: the extraction
+ran once, at the cutover, and nothing more is imported from aweb. The script
+records how `aweb-import` was made, and reproduces it from that aweb commit.
 
 ## Dependencies from aweb
 
@@ -43,9 +31,15 @@ commits that touch the changed paths.
   `scripts/test-egress/production-awid` pins. Move that pin when production
   moves.
 - The e2e stacks run the published awid and aweb server images, pinned by
-  digest in each app's `docker-compose.e2e.yml`. Secrets' federation CLI has no
-  published image and is built from aweb's source at the commit this
-  repository was extracted from.
+  digest in each app's `docker-compose.e2e.yml`.
+- Two e2e images are still built from aweb's source on GitHub, because aweb
+  publishes no image of them. Each becomes a pinned published image when aweb
+  publishes one:
+  - Secrets' federation CLI (`naapp/secrets/docker-compose.e2e.yml`, service
+    `cli`), at aweb `d8ee9ed31ad275da7cab3a3cade0006e06587f02`;
+  - Library's pre-status registry (`naapp/library/docker-compose.e2e.yml`,
+    service `awid-pre-status`), at aweb
+    `0bc7546de0b5c002e3496ae4807fb1a4e12bd0b4`.
 
 ## Checks that hold across the move
 

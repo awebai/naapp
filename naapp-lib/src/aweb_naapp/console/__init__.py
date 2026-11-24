@@ -194,6 +194,15 @@ ScopeAdmission = Callable[[str], Awaitable[bool]]
 MemberAdmission = Callable[[str], Awaitable[ScopeMember]]
 
 
+class InstallationUnobservable(HTTPException):
+    """A session refusal: the scope's stale installation could not be observed
+    again. It refuses this request only, with the installation's own status
+    and code, and leaves the session open."""
+
+    def __init__(self, refused: InstallationRefused) -> None:
+        super().__init__(status_code=refused.status, detail=refused.code)
+
+
 class ScopeInstallations(Protocol):
     """The installation behind each console scope, as the app records it.
 
@@ -386,7 +395,7 @@ class ConsoleSessions:
         try:
             await self.installations.refresh(team_id)
         except InstallationRefused as refused:
-            raise HTTPException(status_code=refused.status, detail=refused.code) from None
+            raise InstallationUnobservable(refused) from None
 
     async def _cookie_row(self, request: Request) -> Any:
         """The open, unexpired session row of the request's cookie, by local

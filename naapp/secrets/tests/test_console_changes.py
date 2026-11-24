@@ -20,7 +20,7 @@ from aweb_secrets.console_values import ConsoleValues, console_values_router
 from aweb_secrets.use_context import apply_use_context_migrations
 from tests.human_owner import fixture_member_admission
 from tests.test_change_set_onepassword import view
-from tests.test_change_sets import ALICE, BOB, ORIGIN, TEAM, enrol_owner, unreachable
+from tests.test_change_sets import ALICE, BOB, ORIGIN, TEAM, Installations, enrol_owner, unreachable
 from tests.test_change_sets import world as _world
 from tests.test_console import API
 
@@ -582,7 +582,7 @@ async def test_personal_locator_resolves_only_the_current_candidates_frozen_chan
         assert approved.json()["can_confirm"] is True
 
 
-@pytest.mark.parametrize("reason", ["ended", "membership_unavailable"])
+@pytest.mark.parametrize("reason", ["ended", "membership_unavailable", "installation_unavailable"])
 async def test_lost_session_after_commit_returns_only_an_applied_receipt_and_reauth(world, reason):
     w = world
     scope = await enrol_owner(w, ALICE, "alice@acme.com")
@@ -594,15 +594,25 @@ async def test_lost_session_after_commit_returns_only_an_applied_receipt_and_rea
     async def cleanup(*args):
         if reason == "ended":
             await retire_owner(w, scope, holder.subject)
-        else:
+        elif reason == "membership_unavailable":
             w.console.sessions.member = unavailable
+        else:
+            # The installation goes stale and its authority cannot be reached
+            # between the commit and the session's re-admission.
+            await w.db.execute(
+                "UPDATE {{tables.installation_fences}} SET fresh_until=clock_timestamp()-interval '1 second'"
+            )
+            Installations.reachable = False
 
     async with clients(w, cleanup=cleanup) as (human, _):
         headers = await sign_in(w, human, scope)
         drafted = await token_draft(w, human, headers)
         path = await approve(w, human, headers, drafted)
-        result = await human.post(path + "/confirm", json={}, headers=headers)
-        assert result.status_code == 200
+        try:
+            result = await human.post(path + "/confirm", json={}, headers=headers)
+        finally:
+            Installations.reachable = True
+        assert result.status_code == 200, result.text
         assert result.json() == {
             "change_id": drafted["change_id"],
             "revision": 1,
@@ -611,9 +621,13 @@ async def test_lost_session_after_commit_returns_only_an_applied_receipt_and_rea
         }
         if reason == "ended":
             assert "Max-Age=0" in result.headers["set-cookie"]
-        else:
+        elif reason == "membership_unavailable":
             assert "set-cookie" not in result.headers
             assert (await human.get("/session")).status_code == 503
+        else:
+            # The session stays open: once the authority answers, it reads again.
+            assert "set-cookie" not in result.headers
+            assert (await human.get("/session")).status_code == 200
         assert (
             await w.db.fetch_value("SELECT active_version FROM {{tables.onepassword_credentials}}")
             == 1

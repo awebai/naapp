@@ -10,16 +10,16 @@
       "/aweb-app.json": "c68373f5928d0cac3119c71b1e85b1f53babda8dea7801ad536e8c3a3baea273"
     },
     "logs": {
-      "/.well-known/aweb-app-versions.json": "a331e0a34131ef380f446a7f6e605ef836c1d3e2e09f398d3cd6494e53f2c940",
-      "/aweb-app.json": "f8dc9fca850d5661402482b60bcb56711e4193d664566d1928132ba511b0ed80",
+      "/.well-known/aweb-app-versions.json": "5cceafd2c9af2747270ca76cf962794b16811535f9eca5082c17fa4c05673513",
+      "/aweb-app.json": "0d82572d5a0799d84317ca92773748b703aff9593ba09a2d9cc040e5bd8fd8ee",
       "/manifests/v2.json": "8d99779ad84176d80891bf58b30a17a42d6b4ac53aa635850d979e7df0b758d0",
-      "/manifests/v3.json": "f8dc9fca850d5661402482b60bcb56711e4193d664566d1928132ba511b0ed80"
+      "/manifests/v3.json": "0d82572d5a0799d84317ca92773748b703aff9593ba09a2d9cc040e5bd8fd8ee"
     },
     "secrets": {
-      "/.well-known/aweb-app-versions.json": "54bd186d8c6185e06ed99bd94015f2081bf05c38dcd24041fcaa5dd77e71de3a",
-      "/aweb-app.json": "67489bc4488018cb860b1da61de6ef675e1342f85ae218737305bf11cee81642",
+      "/.well-known/aweb-app-versions.json": "bcf1fc8a62f78326c0912750923786be77c59b37ef8447255b77d7adc90636dc",
+      "/aweb-app.json": "ac7f68608c96c40d5e2f57169064f5f4e76622dd5d7ee4b06ce74f4185a184ef",
       "/manifests/v2.json": "13bfac65eede613e1a5d9c36ce9e7c2f9c8854f5b62df301e9b4ffad9b1457fc",
-      "/manifests/v3.json": "67489bc4488018cb860b1da61de6ef675e1342f85ae218737305bf11cee81642"
+      "/manifests/v3.json": "ac7f68608c96c40d5e2f57169064f5f4e76622dd5d7ee4b06ce74f4185a184ef"
     }
   },
   "recorded_from": "aweb d8ee9ed31ad275da7cab3a3cade0006e06587f02, each app in its own aweb environment"

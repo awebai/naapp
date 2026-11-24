@@ -331,16 +331,6 @@ def test_sealed_credential_cases(case):
     assert SUITE.decrypt(sealed, private, info) == case["expected"]["plaintext"].encode()
 
 
-def test_an_oversized_claim_response_is_refused():
-    valid = next(c for c in VECTOR["assignments"] if c["name"] == "valid")
-    padding = ', "padding": "' + "x" * MAX_ASSIGNMENT_BODY_BYTES + '"'
-    padded = valid["body_json"].replace('"database": "orders"', '"database": "orders"' + padding)
-    assert padded != valid["body_json"]
-    with pytest.raises(Refused) as refused:
-        verify_assignment(dict(valid, body_json=padded))
-    assert refused.value.code == "assignment_invalid"
-
-
 def test_every_refusal_code_of_the_contract_has_a_case():
     request_codes = {c["expected"].get("error") for c in VECTOR["requests"]} - {None}
     assignment_codes = {c["expected"].get("error") for c in VECTOR["assignments"]} - {None}

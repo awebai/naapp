@@ -43,6 +43,20 @@ class Workflow(unittest.TestCase):
         self.assertEqual(sorted(shards), sorted([path, f'--ignore={path}']))
         self.assertEqual(job['env']['NAAPP_LIB_TESTS'], '${{ matrix.tests }}')
 
+    def test_every_test_job_keeps_its_per_test_results(self):
+        for name, job in workflow()['jobs'].items():
+            commands = [line.split() for step in job['steps'] for line in step.get('run', '').splitlines()]
+            if not any(words[:2] == ['make', 'test'] or words[1:2] and words[0] == 'make'
+                       and words[1].startswith('e2e-') for words in commands):
+                continue
+            with self.subTest(job=name):
+                env = job.get('env', {})
+                self.assertTrue('JUNIT_DIR' in env or '--junitxml=' in env.get('PYTEST_ADDOPTS', ''))
+                uploads = [step for step in job['steps'] if step.get('uses', '').startswith('actions/upload-artifact@')]
+                self.assertEqual(len(uploads), 1)
+                self.assertEqual(uploads[0]['if'], 'always()')
+                self.assertEqual(uploads[0]['with']['path'], 'junit/')
+
     def test_no_trigger_filters_by_path(self):
         for path in sorted(WORKFLOWS.glob('*.yml')):
             triggers = yaml.load(path.read_text(), Loader=yaml.BaseLoader)['on']

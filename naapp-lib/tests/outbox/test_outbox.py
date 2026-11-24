@@ -18,7 +18,6 @@ from pgdbm import AsyncDatabaseManager
 
 import aweb_naapp.outbox as outbox
 from aweb_naapp.outbox import (
-    DRAINED_PRUNE_BATCH,
     DRAINED_RETENTION,
     Acked,
     Cancelled,
@@ -104,8 +103,12 @@ class Scripted:
         return outcome
 
 
-async def _states(db: AsyncDatabaseManager) -> dict[str, str]:
-    rows = await db.fetch_all("SELECT target_id, state FROM {{tables.outbox_deliveries}}")
+async def _states(db: AsyncDatabaseManager, event_id: UUID | None = None) -> dict[str, str]:
+    rows = await db.fetch_all(
+        "SELECT target_id, state FROM {{tables.outbox_deliveries}} "
+        "WHERE $1::uuid IS NULL OR event_id = $1",
+        event_id,
+    )
     return {row["target_id"]: row["state"] for row in rows}
 
 
@@ -1159,17 +1162,6 @@ async def test_a_prune_deletes_no_more_than_its_batch(db) -> None:
     assert await prune_drained(db, limit=2) == 0
 
 
-class Prunes:
-    """Count real prune calls made by the drain loop."""
-
-    def __init__(self) -> None:
-        self.calls = 0
-
-    async def __call__(self, db: AsyncDatabaseManager, *, limit: int = DRAINED_PRUNE_BATCH) -> int:
-        self.calls += 1
-        return await prune_drained(db, limit=limit)
-
-
 async def _run_drain_until(db, done, **options) -> None:
     """Run the drain loop until ``done()`` holds, at most five seconds."""
     stop = asyncio.Event()
@@ -1194,31 +1186,50 @@ async def _run_drain_until(db, done, **options) -> None:
         await loop
 
 
-async def test_the_drain_loop_prunes_drained_events_past_retention(db, monkeypatch) -> None:
-    prunes = Prunes()
-    monkeypatch.setattr(outbox, "prune_drained", prunes)
+async def test_the_drain_loop_prunes_drained_events_past_retention(db) -> None:
     old = [_event(str(n).encode()) for n in range(2)]
     for event in old:
         await _deliver(db, event, _DELIVERED)
     await _age(db, _PAST_RETENTION, *old)
     recent = _event(b"recent")
     await _deliver(db, recent, _DELIVERED)
+    next_event = _event(b"next pass")
+    queued = False
 
-    async def pruned() -> bool:
-        return await _event_ids(db) == {recent.event_id}
+    async def delivered_after_prune() -> bool:
+        nonlocal queued
+        if not queued:
+            if await _event_ids(db) != {recent.event_id}:
+                return False
+            await _age(db, _PAST_RETENTION, recent)
+            async with db.transaction() as tx:
+                await enqueue(tx, next_event)
+            queued = True
+        return await _states(db, next_event.event_id) == {"a": "delivered"}
 
-    await _run_drain_until(db, pruned)
-    assert prunes.calls == 1, "one prune per interval, however many passes run"
+    await _run_drain_until(db, delivered_after_prune)
+    # The new delivery superseded the aged receipt. The next pass left the
+    # newly eligible event alone because the prune interval had not elapsed.
+    assert await _event_ids(db) == {recent.event_id, next_event.event_id}
 
 
-async def test_the_drain_loop_prunes_again_once_its_interval_has_passed(db, monkeypatch) -> None:
-    prunes = Prunes()
-    monkeypatch.setattr(outbox, "prune_drained", prunes)
+async def test_the_drain_loop_prunes_again_once_its_interval_has_passed(db) -> None:
+    first, second = _event(b"first"), _event(b"second")
+    for event in (first, second):
+        await _deliver(db, event, {"a": Acked("delivered")})
+    await _age(db, _PAST_RETENTION, first)
+    aged_second = False
 
-    async def pruned_three_times() -> bool:
-        return prunes.calls >= 3
+    async def pruned_both() -> bool:
+        nonlocal aged_second
+        remaining = await _event_ids(db)
+        if not aged_second and remaining == {second.event_id}:
+            await _age(db, _PAST_RETENTION, second)
+            aged_second = True
+        return aged_second and not remaining
 
-    await _run_drain_until(db, pruned_three_times, prune_interval_seconds=0.02)
+    await _run_drain_until(db, pruned_both, prune_interval_seconds=0.02)
+    assert not await _delivery_event_ids(db)
 
 
 async def test_the_drain_loop_keeps_delivering_when_a_prune_fails(db, caplog) -> None:
@@ -1246,10 +1257,7 @@ async def test_the_drain_loop_keeps_delivering_when_a_prune_fails(db, caplog) ->
             async with db.transaction() as tx:
                 await enqueue(tx, event)
             queued = True
-        return await db.fetch_value(
-            "SELECT state FROM {{tables.outbox_deliveries}} WHERE event_id = $1 AND target_id = 'a'",
-            event.event_id,
-        ) == "delivered"
+        return await _states(db, event.event_id) == {"a": "delivered"}
 
     with caplog.at_level(logging.ERROR, logger=outbox.__name__):
         await _run_drain_until(db, delivered_after_failure)

@@ -48,7 +48,7 @@ packages = ["src/library"]
 # as its context (see Dockerfile). Tokenless certificate verification requires
 # awid's status route (AWID >=0.5.22). pgdbm resolves from PyPI.
 [tool.uv.sources]
-awid-service = { path = "../../awid", editable = true }
+awid-service = { git = "https://github.com/awebai/aweb", rev = "d8ee9ed31ad275da7cab3a3cade0006e06587f02", subdirectory = "awid" }
 aweb-naapp = { path = "../../naapp-lib", editable = true }
 
 [dependency-groups]

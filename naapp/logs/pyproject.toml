@@ -29,7 +29,7 @@ packages = ["src/aweb_logs"]
 # of the aweb checkout it lives in, so its Docker build uses the repository root as
 # its context (see Dockerfile).
 [tool.uv.sources]
-awid-service = { path = "../../awid", editable = true }
+awid-service = { git = "https://github.com/awebai/aweb", rev = "d8ee9ed31ad275da7cab3a3cade0006e06587f02", subdirectory = "awid" }
 aweb-naapp = { path = "../../naapp-lib", editable = true }
 aweb-naapp-testing = { path = "../../naapp-lib/testing", editable = true }
 

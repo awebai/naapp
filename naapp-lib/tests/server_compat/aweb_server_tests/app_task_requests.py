@@ -7,7 +7,8 @@ script from the aweb tag this repository pins.
 # ruff: noqa
 from aweb.app_credentials import APP_REQUEST, AppCredential
 from aweb.app_registry import get_installation_on
-from aweb_naapp.runtime.task_requests import AUTHORIZATION_PREFIX, app_request_credential, sign_stage_receipt
+from aweb_naapp.runtime.app_credentials import app_request_credential
+from aweb_naapp.runtime.task_requests import AUTHORIZATION_PREFIX, sign_stage_receipt
 from awid.did import did_from_public_key
 from awid.signing import canonical_json_bytes, sign_message
 from datetime import datetime, timedelta, timezone

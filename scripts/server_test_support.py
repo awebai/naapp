@@ -160,6 +160,24 @@ def collect(checkout: Path, tag: str):
     return modules, chosen, imports, nested
 
 
+# Names this repository's runtime defines in another module than the runtime the
+# aweb release was tested with: (module at the release, name) -> module here.
+RUNTIME_MOVES = {
+    ("aweb_naapp.runtime.task_requests", "app_request_credential"): "aweb_naapp.runtime.app_credentials",
+}
+
+
+def relocated(statement: ast.stmt) -> list[ast.stmt]:
+    """``statement``, with each name RUNTIME_MOVES relocates imported from its module here."""
+    if not isinstance(statement, ast.ImportFrom):
+        return [statement]
+    by_module: dict[str, list[ast.alias]] = {}
+    for alias in statement.names:
+        target = RUNTIME_MOVES.get((statement.module, alias.name), statement.module)
+        by_module.setdefault(target, []).append(alias)
+    return [ast.ImportFrom(module=module, names=names, level=statement.level) for module, names in by_module.items()]
+
+
 def module_name(source: str) -> str:
     """The copy's module name: aweb's, without the test_ prefix pytest collects,
     and never conftest, which pytest would load as one."""
@@ -200,7 +218,7 @@ def render_module(tag: str, current: Module, chosen, imports) -> str:
     # form and order, so a regenerated module is byte-identical.
     if any(isinstance(n, ast.ImportFrom) and n.module == "__future__" for n in current.tree.body):
         lines.append("from __future__ import annotations")
-    lines += sorted({ast.unparse(statement) for statement in statements})
+    lines += sorted({ast.unparse(moved) for statement in statements for moved in relocated(statement)})
     for source, pairs in sorted(sibling_imports.items()):
         names = ", ".join(original if original == bound else f"{original} as {bound}" for original, bound in sorted(pairs))
         lines.append(f"from {IMPORT_PREFIX}.{module_name(source)} import {names}")

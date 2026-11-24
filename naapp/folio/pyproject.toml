@@ -47,7 +47,6 @@ packages = ["src/folio"]
 # of the aweb checkout it lives in, so the Docker build must use the repository root
 # as its context (see Dockerfile). pgdbm resolves from PyPI.
 [tool.uv.sources]
-awid-service = { git = "https://github.com/awebai/aweb", rev = "d8ee9ed31ad275da7cab3a3cade0006e06587f02", subdirectory = "awid" }
 aweb-naapp = { path = "../../naapp-lib", editable = true }
 aweb-naapp-testing = { path = "../../naapp-lib/testing", editable = true }
 

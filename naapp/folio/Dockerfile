@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
-# Build context: the aweb repository root, because folio depends on the in-repo
-# awid and naapp-lib:  docker build -f naapp/folio/Dockerfile .
+# Build context: the repository root, because folio depends on the in-repo
+# naapp-lib:  docker build -f naapp/folio/Dockerfile .
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -17,12 +17,10 @@ RUN apt-get update \
 # uv binary from the official image — no pip anywhere in the build.
 COPY --from=ghcr.io/astral-sh/uv:0.11.21 /uv /uvx /bin/
 
-# /app mirrors the repository layout, so folio's path sources ../../awid and
-# ../../naapp-lib resolve in the image as they do in a checkout. Only the paths the
+# /app mirrors the repository layout, so folio's path source
+# ../../naapp-lib resolves in the image as it does in a checkout. Only the paths the
 # service needs are copied, so nothing local to a checkout (.venv, .env) enters
 # the image.
-COPY awid/pyproject.toml awid/README.md /app/awid/
-COPY awid/src /app/awid/src
 COPY naapp-lib/pyproject.toml naapp-lib/README.md /app/naapp-lib/
 COPY naapp-lib/src /app/naapp-lib/src
 

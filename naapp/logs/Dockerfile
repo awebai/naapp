@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
-# Build context: the aweb repository root, because logs depends on the in-repo
-# awid and naapp-lib:
+# Build context: the repository root, because logs depends on the in-repo
+# naapp-lib:
 #   docker build -f naapp/logs/Dockerfile --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) .
 FROM python:3.12-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
 
@@ -25,12 +25,10 @@ RUN apt-get update \
 # uv binary from the official image — no pip anywhere in the build.
 COPY --from=ghcr.io/astral-sh/uv:0.11.21@sha256:ff07b86af50d4d9391d9daf4ff89ce427bc544f9aae87057e69a1cc0aa369946 /uv /uvx /bin/
 
-# /app mirrors the repository layout, so logs' path sources ../../awid and
-# ../../naapp-lib resolve in the image as they do in a checkout. Only the paths the
+# /app mirrors the repository layout, so logs' path source
+# ../../naapp-lib resolves in the image as it does in a checkout. Only the paths the
 # service needs are copied, so nothing local to a checkout (.venv, .env) enters
 # the image.
-COPY awid/pyproject.toml awid/README.md /app/awid/
-COPY awid/src /app/awid/src
 COPY naapp-lib/pyproject.toml naapp-lib/README.md /app/naapp-lib/
 COPY naapp-lib/src /app/naapp-lib/src
 

@@ -115,7 +115,6 @@ build-backend = "hatchling.build"
 packages = ["src/aweb_naapp"]
 
 [tool.uv.sources]
-awid-service = { git = "https://github.com/awebai/aweb", rev = "d8ee9ed31ad275da7cab3a3cade0006e06587f02", subdirectory = "awid" }
 aweb-naapp-testing = { path = "testing", editable = true }
 
 [dependency-groups]

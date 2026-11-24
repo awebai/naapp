@@ -200,8 +200,8 @@ runtime = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", marker = "extra == 'runtime'", specifier = ">=0.32.0" },
-    { name = "awid-service", marker = "extra == 'hooks'", git = "https://github.com/awebai/aweb?subdirectory=awid&rev=d8ee9ed31ad275da7cab3a3cade0006e06587f02" },
-    { name = "awid-service", marker = "extra == 'runtime'", git = "https://github.com/awebai/aweb?subdirectory=awid&rev=d8ee9ed31ad275da7cab3a3cade0006e06587f02" },
+    { name = "awid-service", marker = "extra == 'hooks'", specifier = ">=0.5.40" },
+    { name = "awid-service", marker = "extra == 'runtime'", specifier = ">=0.5.40" },
     { name = "cbor2", marker = "extra == 'runtime'", specifier = ">=6.1.2" },
     { name = "cryptography", marker = "extra == 'crypto'", specifier = ">=50.0.0" },
     { name = "dnspython", marker = "extra == 'egress'", specifier = ">=2.7.0" },
@@ -264,7 +264,7 @@ requires-dist = [
     { name = "aiosmtpd", specifier = ">=1.4.6" },
     { name = "aweb", marker = "extra == 'server'", specifier = ">=1.27.35" },
     { name = "aweb-naapp", extras = ["hooks", "runtime"], editable = "../../naapp-lib" },
-    { name = "awid-service", git = "https://github.com/awebai/aweb?subdirectory=awid&rev=d8ee9ed31ad275da7cab3a3cade0006e06587f02" },
+    { name = "awid-service", specifier = ">=0.5.33" },
     { name = "cbor2", specifier = ">=5.6.0" },
     { name = "cryptography", specifier = ">=46.0.0" },
     { name = "dnspython", specifier = ">=2.7.0" },
@@ -275,8 +275,8 @@ provides-extras = ["server"]
 
 [[package]]
 name = "awid-service"
-version = "0.5.42"
-source = { git = "https://github.com/awebai/aweb?subdirectory=awid&rev=d8ee9ed31ad275da7cab3a3cade0006e06587f02#d8ee9ed31ad275da7cab3a3cade0006e06587f02" }
+version = "0.5.41"
+source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "asyncpg" },
     { name = "base58" },
@@ -292,6 +292,10 @@ dependencies = [
     { name = "redis" },
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/5f/60/d7b787ebf4029ae57c77003dcaf4cfe7fa67fc90d7a1d1ec11c36ecb46cb/awid_service-0.5.41.tar.gz", hash = "sha256:889ef6e4bb98fde51d9eceffc321a13d4cbbd0be68bcaceb5fe7e6d3173e6393", size = 613643, upload-time = "2026-11-24T16:46:56.1Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d2/d0/70a285bdf565b7c0fa0b42f02c3eb41ec4c18260341d9e2733d9cadb72cc/awid_service-0.5.41-py3-none-any.whl", hash = "sha256:ba53e4fb34f3bc27a2ee6bf1316b4698b5d5b3154cd78fc1af8e12e9cf57b4ac", size = 236544, upload-time = "2026-11-24T16:46:54.46Z" },
 ]
 
 [[package]]
@@ -554,7 +558,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "aweb-naapp", extras = ["runtime", "outbox"], editable = "../../naapp-lib" },
-    { name = "awid-service", git = "https://github.com/awebai/aweb?subdirectory=awid&rev=d8ee9ed31ad275da7cab3a3cade0006e06587f02" },
+    { name = "awid-service" },
     { name = "fastapi", specifier = ">=0.116.1" },
     { name = "httpx", specifier = ">=0.28.1" },
     { name = "markdown", specifier = ">=3.8.2" },

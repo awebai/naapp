@@ -20,8 +20,6 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:0.11.21@sha256:ff07b86af50d4d9391d9daf4ff89ce427bc544f9aae87057e69a1cc0aa369946 /uv /bin/uv
 
-COPY awid/pyproject.toml awid/README.md /app/awid/
-COPY awid/src /app/awid/src
 COPY naapp-lib/pyproject.toml naapp-lib/README.md /app/naapp-lib/
 COPY naapp-lib/src /app/naapp-lib/src
 COPY naapp/secrets/values/pyproject.toml naapp/secrets/values/README.md /app/naapp/secrets/values/

@@ -34,4 +34,3 @@ packages = ["src/aweb_naapp_testing"]
 
 [tool.uv.sources]
 aweb-naapp = { path = "..", editable = true }
-awid-service = { git = "https://github.com/awebai/aweb", rev = "d8ee9ed31ad275da7cab3a3cade0006e06587f02", subdirectory = "awid" }

@@ -35,10 +35,10 @@ commits that touch the changed paths.
 
 ## Dependencies from aweb
 
-- `awid-service` is pinned by git URL to aweb
-  `d8ee9ed31ad275da7cab3a3cade0006e06587f02` (`subdirectory = "awid"`), until a
-  release of awid-service carries that code.
-- The aweb server (`aweb`, used only by tests) comes from PyPI.
+- `awid-service` and the aweb server (`aweb`, used only by tests) are published
+  releases from PyPI, pinned by each project's `uv.lock`.
+- Tests that run `aw` use the release that `scripts/install-aw.sh` installs,
+  checked against its recorded sha256.
 
 ## Temporary copies, deleted when the contracts package publishes
 

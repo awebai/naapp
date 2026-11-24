@@ -25,9 +25,8 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/aweb_logs"]
 
-# awid-service and aweb-naapp are not on PyPI. logs runs on the awid and naapp-lib
-# of the aweb checkout it lives in, so its Docker build uses the repository root as
-# its context (see Dockerfile).
+# logs runs on the naapp-lib of the checkout it lives in, so its Docker build uses the
+# repository root as its context (see Dockerfile). awid-service resolves from PyPI.
 [tool.uv.sources]
 aweb-naapp = { path = "../../naapp-lib", editable = true }
 aweb-naapp-testing = { path = "../../naapp-lib/testing", editable = true }

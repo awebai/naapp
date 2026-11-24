@@ -313,13 +313,19 @@ async def test_a_failing_prune_does_not_fail_opening_a_session(
     )
     async with await _client(console.sessions()) as client:
         cookie, csrf = await _login(client, owners)
-        await client.post("/logout", headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        ended = await _session(console, cookie)
+        logout = await client.post("/logout", headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert logout.status_code == 200
         with caplog.at_level("WARNING", logger="aweb_naapp.console"):
             current, _ = await _login(client, owners)
         assert (await client.get("/whoami", headers={"Cookie": current})).status_code == 200
     [record] = [r for r in caplog.records if r.name == "aweb_naapp.console"]
-    assert "console_sessions" in record.getMessage()
-    assert cookie.split("=", 1)[1] not in record.getMessage()
+    assert record.getMessage() == "console prune of console_sessions failed: QueryError"
+    assert record.exc_info is None
+    assert await console.db.fetch_value(
+        "SELECT closed_at FROM {{tables.console_sessions}} WHERE token_sha256=$1",
+        ended.token_sha256,
+    ) is not None
 
 
 async def _session(console: Console, cookie: str) -> ConsoleSession:

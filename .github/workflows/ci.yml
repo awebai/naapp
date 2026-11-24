@@ -28,11 +28,13 @@ on:
 permissions:
   contents: read
 
-# A newer run on the same ref replaces the running one, on main as elsewhere:
-# the latest commit's run is the one that counts.
+# One run per ref at a time. On a pull request a newer run replaces the running
+# one. On main the running one finishes and the newest push waits behind it,
+# replacing any older waiting run, so main's long jobs complete while several
+# seats push.
 concurrency:
   group: naapp-ci-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   plan:

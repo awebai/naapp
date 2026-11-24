@@ -612,9 +612,6 @@ CONSOLE_PAGES = (
     "/runners/new",
     "/installations/{installation_id}/jobs/new",
     "/installations/{installation_id}/runners/new",
-    "/reconciliations/unknown",
-    "/reconciliation-controls/unknown",
-    "/reconciliation-approvals",
     "/use-approvals",
     "/run-approvals",
 )

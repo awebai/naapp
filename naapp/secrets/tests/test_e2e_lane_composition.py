@@ -3,11 +3,13 @@ before any container starts (docker-compose.e2e.yml and the lane fixtures)."""
 
 import json
 import re
+from urllib.parse import urlsplit
 
 import yaml
 
 from tests.test_e2e_owner_acts import (
     APP_DIR,
+    AWEB,
     CONSOLE,
     LANE_SUBNET,
     LOGS_API,
@@ -39,8 +41,12 @@ def test_the_lanes_logs_is_the_deployments_base_with_its_files_read_only():
     assert logs["extends"] == {"file": "../logs/compose.logs.yaml", "service": "logs"}
     assert logs["profiles"] == ["logs"]
     assert "${SECRETS_E2E_RUNTIME:?}/logs:/run/secrets/logs:ro" in logs["volumes"]
-    # Every setting reaches it through the base, as in a deployment.
-    assert "environment" not in logs and "env_file" not in logs
+    # Only the disposable registry and private CA differ from the base service.
+    assert logs["environment"] == {
+        "APP_ENV": "development",
+        "SSL_CERT_FILE": "/runtime/tls/ca.pem",
+    }
+    assert "env_file" not in logs
     assert logs["depends_on"]["postgres"] == {"condition": "service_healthy"}
     assert "logs" in LANE["services"]["smtp-tls"]["profiles"]
 
@@ -61,6 +67,20 @@ def test_the_front_serves_logs_and_aweb_installs_it_from_its_internal_origin():
     origins = json.loads(LANE["services"]["aweb"]["environment"]["AWEB_APP_INTERNAL_ORIGINS"])
     assert LOGS_API in origins
     assert UPSTREAMS["api.logs.svc.test"] == UPSTREAMS["console.logs.svc.test"] == "logs:8765"
+
+
+def test_the_team_server_origin_resolves_only_to_the_lanes_tls_front():
+    aweb = LANE["services"]["aweb"]
+    front = LANE["services"]["front"]
+    origin = urlsplit(AWEB)
+    assert origin.scheme == "https" and origin.port is None
+    assert aweb["environment"]["AWEB_PUBLIC_ORIGIN"] == AWEB
+    assert origin.hostname in front["networks"]["default"]["aliases"]
+    assert origin.hostname not in aweb.get("networks", {}).get("default", {}).get("aliases", [])
+    assert UPSTREAMS[origin.hostname] == f"aweb:{aweb['environment']['AWEB_PORT']}"
+    assert set(front["depends_on"]) == {"aweb"}
+    assert LANE["services"]["cli"]["environment"]["SSL_CERT_FILE"] == "/runtime/tls/ca.pem"
+    assert secrets_env()["SSL_CERT_FILE"] == secrets_env()["SECRETS_HOOK_CA_FILE"]
 
 
 def test_the_front_routes_each_host_to_its_service_with_the_lanes_certificate():

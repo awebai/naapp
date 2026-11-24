@@ -13,6 +13,11 @@ name: naapp CI
 # main and a manual run test everything. The "naapp CI" job is the single
 # required check: scripts/ci_result.py fails it unless every selected job
 # succeeded.
+#
+# Folio's document-change and browser-wake acceptance (aweb's
+# scripts/e2e-folio-wakes.sh) is not run here: it tests aweb's server and
+# channel-core against a real Folio, so it stays in aweb's gate against a
+# published Folio image by digest.
 
 on:
   push:

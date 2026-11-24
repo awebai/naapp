@@ -56,6 +56,11 @@ digest, so a change there needs every installation to re-pin.
 The suites run behind the egress guard in `scripts/test-egress/native.py`,
 which refuses network access beyond loopback and the reserved test names.
 
+Two journeys that use the apps stay in aweb's gate and run against published
+images by digest: the CLI's Library journey and Folio's document-change and
+browser-wake acceptance. They test aweb's client, server and channel-core
+against a real app.
+
 ## Temporary copies, deleted when the contracts package publishes
 
 The contract part of `aweb_naapp` is also in aweb, where the server uses it. It

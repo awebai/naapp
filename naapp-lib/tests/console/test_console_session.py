@@ -181,8 +181,14 @@ async def test_an_expired_session_is_refused(console: Console, owners: dict[str,
     async with await _client(console.sessions(ttl=timedelta(seconds=1))) as client:
         cookie, _ = await _login(client, owners)
         assert (await client.get("/whoami", headers={"Cookie": cookie})).status_code == 200
-        await asyncio.sleep(1.2)
-        assert (await client.get("/whoami", headers={"Cookie": cookie})).status_code == 401
+        session = await _session(console, cookie)
+        await _wait_for_database_expiry(console, session.expires_at)
+        refused = await client.get("/whoami", headers={"Cookie": cookie})
+    assert (refused.status_code, refused.json()) == (401, {"detail": "console_session_required"})
+    assert "set-cookie" in refused.headers
+    cleared = SimpleCookie(refused.headers["set-cookie"])[cookie.split("=", 1)[0]]
+    assert cleared.value == ""
+    assert cleared["max-age"] == "0"
 
 
 async def test_a_session_lasts_at_most_fifteen_minutes(
@@ -254,11 +260,7 @@ async def test_ended_sessions_are_dropped_as_new_ones_open(
 
         logout = await client.post("/logout", headers={"Cookie": closing_cookie, "X-CSRF-Token": csrf})
         assert logout.status_code == 200
-        async with asyncio.timeout(5):
-            while not await console.db.fetch_value(
-                "SELECT NOW() >= $1::timestamptz", expiring.expires_at
-            ):
-                await asyncio.sleep(0.01)
+        await _wait_for_database_expiry(console, expiring.expires_at)
         ended = await console.db.fetch_all(
             "SELECT token_sha256, closed_at IS NOT NULL AS closed, expires_at <= NOW() AS expired "
             "FROM {{tables.console_sessions}}"
@@ -342,6 +344,13 @@ async def _session(console: Console, cookie: str) -> ConsoleSession:
         token_sha256=bytes(row["token_sha256"]),
         member=await console.member(row["scope"]),
     )
+
+
+async def _wait_for_database_expiry(console: Console, expires_at: datetime) -> None:
+    """Wait on the PostgreSQL clock used by cookie reads and pruning."""
+    async with asyncio.timeout(5):
+        while not await console.db.fetch_value("SELECT NOW() >= $1::timestamptz", expires_at):
+            await asyncio.sleep(0.01)
 
 
 async def _current(console: Console, session: ConsoleSession, *, hold: bool = False) -> bool:

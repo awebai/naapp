@@ -47,6 +47,13 @@ records how `aweb-import` was made, and reproduces it from that aweb commit.
 manifest bytes it served in aweb. Installations pin an app by its manifest
 digest, so a change there needs every installation to re-pin.
 
+`naapp-lib/tests/server_compat` drives the runtime against the real aweb
+server this repository pins: discovery, hook resolution and registrations, team
+grants and the task stage receipts. Its fixtures are aweb's own server test
+helpers, copied verbatim from that release into `aweb_server_tests/` by
+`scripts/server_test_support.py` and checked against their recorded sources.
+When the aweb pin moves, rerun the script from the new release tag.
+
 The suites run behind the egress guard in `scripts/test-egress/native.py`,
 which refuses network access beyond loopback and the reserved test names.
 

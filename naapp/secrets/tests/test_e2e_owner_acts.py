@@ -66,7 +66,7 @@ TEAM = "h"
 APP_ID = "lane-secrets"
 TEAM_ID = f"{TEAM}:{DOMAIN}"
 REGISTRY = "http://awid.svc.test:8010"
-AWEB = "http://aweb.svc.test:8000"
+AWEB = "https://aweb.svc.test"
 API = "https://api.secrets.svc.test"
 CONSOLE = "https://console.secrets.svc.test"
 ROLE = "secrets.owner"
@@ -96,6 +96,7 @@ LOGS_COMPOSE_ENV = {
 }
 # What the TLS front serves, and the service behind each host.
 UPSTREAMS = {
+    "aweb.svc.test": "aweb:8000",
     "api.secrets.svc.test": "secrets:8770",
     "console.secrets.svc.test": "secrets:8770",
     "api.logs.svc.test": "logs:8765",
@@ -137,6 +138,8 @@ def secrets_env() -> dict[str, str]:
     service token), its key files, its mail, and its hook events to the
     lane's Logs, inside the lane's network."""
     return {
+        "APP_ENV": "development",
+        "SSL_CERT_FILE": "/run/secrets-keys/hook-ca.pem",
         "SECRETS_DATABASE_URL": "postgresql://secrets:disposable@postgres:5432/secrets",
         "SECRETS_DB_SCHEMA": SECRETS_SCHEMA,
         "SECRETS_APP_ID": APP_ID,
@@ -352,7 +355,7 @@ def lane(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Lane]:
         ip = _docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", dns).stdout.strip()
         assert ip, "no DNS address"
         lane.env["SECRETS_E2E_DNS_IP"] = ip
-        lane.up("postgres", "redis", "awid", "aweb", "smtp")
+        lane.up("postgres", "redis", "awid", "aweb", "smtp", "front")
         result = lane.compose("--profile", "browser", "build", "cli", "browser")
         assert result.returncode == 0, result.stdout + result.stderr
         _docker("tag", f"{project}-browser", f"{project}-browser")
@@ -410,7 +413,7 @@ def write_service_member(lane: Lane, controller: str) -> None:
     for name in ("custody", "request", "params", "response", "runner", "smtp", "manifest", "event", "delivery", "grant", "resolve"):
         # The app's shared key-file format: 64 hex characters, each independent.
         (keys / name).write_text(secrets.token_hex(32) + "\n")
-    # The lane's CA, which the app's hook deliveries to the lane's Logs trust.
+    # The lane's CA for hook deliveries and team-server reads.
     shutil.copyfile(lane.runtime / "tls" / "ca.pem", keys / "hook-ca.pem")
     for path in keys.iterdir():
         path.chmod(0o644)
@@ -450,7 +453,7 @@ def start_apps(lane: Lane, controller: str) -> None:
     write_service_member(lane, controller)
     write_logs_files(lane, controller)
     create_logs_databases(lane)
-    lane.up("secrets", "logs", "front")
+    lane.up("secrets", "logs")
 
 
 def install_apps(lane: Lane, controller: str, owner_did_key: str) -> None:

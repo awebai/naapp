@@ -99,33 +99,19 @@ def write_home(home, member, registry, server, *, file_key=True):
 
 @pytest.fixture(scope="module")
 def human_fixture_binary(tmp_path_factory):
+    # make test builds the fixture before the suite goes offline.
+    built = os.environ.get("NAAPP_LAB_HUMAN_FIXTURE")
+    if built:
+        return Path(built)
     root = Path(__file__).resolve().parents[3]
-    binary = tmp_path_factory.mktemp("lab-human-fixture") / "human-fixture"
-    aw_version = subprocess.run(
-        [str(root / "scripts/install-aw.sh"), "--version"],
+    directory = tmp_path_factory.mktemp("lab-human-fixture")
+    subprocess.run(
+        [str(root / "scripts/build-lab-human-fixture.sh"), str(directory)],
         check=True,
         capture_output=True,
-        text=True,
-    ).stdout.strip()
-    # The fixture uses aw's Go packages, so it builds in a module that requires
-    # the aw release the rest of these tests run.
-    module = tmp_path_factory.mktemp("lab-human-fixture-module")
-    shutil.copy(Path(__file__).parent / "testdata/lab_human_fixture.go", module / "main.go")
-    for command in (
-        ["go", "mod", "init", "labhumanfixture"],
-        ["go", "get", f"github.com/awebai/aw@v{aw_version}"],
-        ["go", "mod", "tidy"],
-        ["go", "build", "-o", str(binary), "."],
-    ):
-        subprocess.run(
-            command,
-            cwd=module,
-            env={**os.environ, "GOMAXPROCS": "2"},
-            check=True,
-            capture_output=True,
-            timeout=120,
-        )
-    return binary
+        timeout=300,
+    )
+    return directory / "lab-human-fixture"
 
 
 @pytest.fixture

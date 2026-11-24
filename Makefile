@@ -20,7 +20,7 @@ SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_serv
 	test_secrets_shards test_shipping
 
 .PHONY: affected sync lint test test-scripts production-awid-sync browsers aw \
-	check-library-aatk check-secrets-shards e2e-folio e2e-library e2e-secrets release-checks \
+	check-library-aatk check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets release-checks \
 	release-candidate release-publish
 
 # The packages the change from BASE to HEAD affects, as a JSON list.
@@ -46,12 +46,24 @@ lint:
 		git diff --exit-code -- $$package/uv.lock; \
 	done
 
-test: production-awid-sync
+# What Secrets' tests run with aw, prepared while the network is still allowed:
+# the pinned aw release and the lab's human fixture built against it.
+SECRETS_AW_TOOLS := $(if $(filter naapp/secrets,$(PACKAGES)),secrets-aw-tools)
+
+secrets-aw-tools: aw
+	scripts/build-lab-human-fixture.sh $(AW_DIR)
+
+# The suites run offline behind the egress guard. AWS_EC2_METADATA_DISABLED
+# keeps the AWS SDK from probing a cloud host's metadata service for credentials.
+test: production-awid-sync $(SECRETS_AW_TOOLS)
 	set -e; for package in $(PACKAGES); do \
 		echo "=== test $$package ==="; \
 		uv sync --frozen --project $$package; \
 		UV_FROZEN=1 UV_OFFLINE=1 PYTHONPYCACHEPREFIX=/tmp/pycache \
-			NAAPP_REQUIRE_TEST_DATABASE=1 LIBRARY_REQUIRE_TEST_DATABASE=1 $(TEST_EGRESS_RUNNER) $(MAKE) -C $$package test; \
+			NAAPP_REQUIRE_TEST_DATABASE=1 LIBRARY_REQUIRE_TEST_DATABASE=1 \
+			AWS_EC2_METADATA_DISABLED=true \
+			NAAPP_AW_BINARY=$(AW_DIR)/aw NAAPP_LAB_HUMAN_FIXTURE=$(AW_DIR)/lab-human-fixture \
+			$(TEST_EGRESS_RUNNER) $(MAKE) -C $$package test; \
 		git diff --exit-code -- $$package/uv.lock; \
 	done
 

@@ -16,7 +16,7 @@ classifiers = [
   "Programming Language :: Python :: 3.13",
 ]
 dependencies = [
-  "aweb-naapp",
+  "aweb-naapp[runtime]",
   "awid-service>=0.5.22",
   "bleach>=6.4.0",
   "fastapi>=0.116.1",
@@ -49,6 +49,7 @@ packages = ["src/library"]
 # (AWID >=0.5.22).
 [tool.uv.sources]
 aweb-naapp = { path = "../../naapp-lib", editable = true }
+aweb-naapp-testing = { path = "../../naapp-lib/testing", editable = true }
 
 [dependency-groups]
 dev = [
@@ -57,6 +58,7 @@ dev = [
   "ruff>=0.14.0",
   "mypy>=1.18.0",
   "httpx2>=2.9.1",
+  "aweb-naapp-testing",
 ]
 
 [tool.pytest.ini_options]

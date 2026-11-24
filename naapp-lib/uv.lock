@@ -176,7 +176,7 @@ wheels = [
 [[package]]
 name = "aweb"
 version = "1.27.53"
-source = { registry = "https://pypi.org/simple" }
+source = { editable = "../server" }
 dependencies = [
     { name = "asyncpg" },
     { name = "aweb-naapp", extra = ["egress", "hooks"] },
@@ -198,9 +198,40 @@ dependencies = [
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/af/dd/b37840edc982e910e6ca0ce43727188e3c54a89e1155751d076f42f20208/aweb-1.27.53.tar.gz", hash = "sha256:151cccfcfce84af9917bd347139b555be9b4466d899ad43df03d4d9ccb920817", size = 639862, upload-time = "2026-11-24T16:48:32.821Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/7e/9c/afd53acb579b7150ddc94a6aa2911fdd73cd84c966438714424874d466a4/aweb-1.27.53-py3-none-any.whl", hash = "sha256:7de178087e2c80b4caf064eb2d075d9d06ee6373d68125bff229ab323070800e", size = 705519, upload-time = "2026-11-24T16:48:31.243Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "asyncpg", specifier = ">=0.32.0" },
+    { name = "aweb-naapp", extras = ["egress", "hooks"], editable = "." },
+    { name = "awid-service", editable = "../awid" },
+    { name = "base58", specifier = ">=2.1.1" },
+    { name = "cryptography", specifier = ">=45.0.6" },
+    { name = "dnspython", specifier = ">=2.8.0" },
+    { name = "fastapi", specifier = ">=0.116.1" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "mcp", specifier = ">=1.26.0,<2" },
+    { name = "pgdbm", specifier = ">=0.5.0" },
+    { name = "prometheus-client", specifier = ">=0.22.1" },
+    { name = "publicsuffix2", specifier = ">=2.20191221" },
+    { name = "pydantic", specifier = ">=2.11.7" },
+    { name = "pydantic-settings", specifier = ">=2.10.1" },
+    { name = "pynacl", specifier = ">=1.6.2" },
+    { name = "pyyaml", specifier = ">=6.0.2" },
+    { name = "redis", specifier = ">=6.4.0" },
+    { name = "typer", specifier = ">=0.16.1" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.35.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "aweb-naapp", editable = "." },
+    { name = "aweb-naapp-testing", editable = "testing" },
+    { name = "mypy", specifier = "==1.19.1" },
+    { name = "playwright", specifier = "==1.63.0" },
+    { name = "pytest", specifier = ">=9.0.0" },
+    { name = "pytest-asyncio", specifier = ">=1.2.0" },
+    { name = "pytest-xdist", specifier = ">=3.8.0" },
+    { name = "ruff", specifier = "==0.15.0" },
 ]
 
 [[package]]
@@ -252,10 +283,14 @@ runtime = [
     { name = "asyncpg" },
     { name = "awid-service" },
     { name = "cbor2" },
+    { name = "dnspython" },
     { name = "fastapi" },
+    { name = "httpcore", extra = ["asyncio"] },
     { name = "httpx" },
+    { name = "idna" },
     { name = "jsonschema" },
     { name = "pgdbm" },
+    { name = "publicsuffixlist" },
     { name = "pydantic-settings" },
     { name = "pynacl" },
     { name = "webauthn" },
@@ -282,8 +317,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", marker = "extra == 'runtime'", specifier = ">=0.32.0" },
-    { name = "awid-service", marker = "extra == 'hooks'", specifier = ">=0.5.40" },
-    { name = "awid-service", marker = "extra == 'runtime'", specifier = ">=0.5.40" },
+    { name = "aweb-naapp", extras = ["egress"], marker = "extra == 'runtime'" },
+    { name = "awid-service", marker = "extra == 'hooks'", editable = "../awid" },
+    { name = "awid-service", marker = "extra == 'runtime'", editable = "../awid" },
     { name = "cbor2", marker = "extra == 'runtime'", specifier = ">=6.1.2" },
     { name = "cryptography", marker = "extra == 'crypto'", specifier = ">=50.0.0" },
     { name = "dnspython", marker = "extra == 'egress'", specifier = ">=2.7.0" },
@@ -351,9 +387,9 @@ server = [
 [package.metadata]
 requires-dist = [
     { name = "aiosmtpd", specifier = ">=1.4.6" },
-    { name = "aweb", marker = "extra == 'server'", specifier = ">=1.27.35" },
+    { name = "aweb", marker = "extra == 'server'", editable = "../server" },
     { name = "aweb-naapp", extras = ["hooks", "runtime"], editable = "." },
-    { name = "awid-service", specifier = ">=0.5.33" },
+    { name = "awid-service", editable = "../awid" },
     { name = "cbor2", specifier = ">=5.6.0" },
     { name = "cryptography", specifier = ">=46.0.0" },
     { name = "dnspython", specifier = ">=2.7.0" },
@@ -364,8 +400,8 @@ provides-extras = ["server"]
 
 [[package]]
 name = "awid-service"
-version = "0.5.41"
-source = { registry = "https://pypi.org/simple" }
+version = "0.5.42"
+source = { editable = "../awid" }
 dependencies = [
     { name = "asyncpg" },
     { name = "base58" },
@@ -382,9 +418,32 @@ dependencies = [
     { name = "typer" },
     { name = "uvicorn", extra = ["standard"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/5f/60/d7b787ebf4029ae57c77003dcaf4cfe7fa67fc90d7a1d1ec11c36ecb46cb/awid_service-0.5.41.tar.gz", hash = "sha256:889ef6e4bb98fde51d9eceffc321a13d4cbbd0be68bcaceb5fe7e6d3173e6393", size = 613643, upload-time = "2026-11-24T16:46:56.1Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/d2/d0/70a285bdf565b7c0fa0b42f02c3eb41ec4c18260341d9e2733d9cadb72cc/awid_service-0.5.41-py3-none-any.whl", hash = "sha256:ba53e4fb34f3bc27a2ee6bf1316b4698b5d5b3154cd78fc1af8e12e9cf57b4ac", size = 236544, upload-time = "2026-11-24T16:46:54.46Z" },
+
+[package.metadata]
+requires-dist = [
+    { name = "asyncpg", specifier = ">=0.32.0" },
+    { name = "base58", specifier = ">=2.1.1" },
+    { name = "dnspython", specifier = ">=2.8.0" },
+    { name = "fastapi", specifier = ">=0.116.1" },
+    { name = "httpcore", specifier = ">=1.0.9" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "pgdbm", specifier = ">=0.5.0" },
+    { name = "publicsuffix2", specifier = ">=2.20191221" },
+    { name = "pydantic", specifier = ">=2.11.7" },
+    { name = "pydantic-settings", specifier = ">=2.10.1" },
+    { name = "pynacl", specifier = ">=1.6.2" },
+    { name = "redis", specifier = ">=6.4.0" },
+    { name = "typer", specifier = ">=0.16.1" },
+    { name = "uvicorn", extras = ["standard"], specifier = ">=0.35.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "mypy", specifier = "==1.19.1" },
+    { name = "pytest", specifier = ">=9.0.0" },
+    { name = "pytest-asyncio", specifier = ">=1.2.0" },
+    { name = "ruff", specifier = "==0.15.0" },
+    { name = "trustme", specifier = ">=1.2.1" },
 ]
 
 [[package]]

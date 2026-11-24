@@ -107,12 +107,16 @@ operational-record transaction; an `Authorization` and a completed HTTP
 response do not provide that transaction. Required enqueue failure rolls back
 the local effect. The runtime starts and joins a separate hooks-channel drain
 in its lifespan, using `HookTransport` with that same registration source/key.
-App-event delivery stays on its own channel. The default egress rejects
-private destinations; a self-hosted operator may explicitly supply
-`hook_egress`, `hook_internal_cidr`, and `hook_internal_origins` under the shared
-guard's existing rules. The origin set defaults to empty, so a CIDR alone never
-permits an internal retry. List each origin exactly as its installation shows
-it, including any non-default port; default `:443` is omitted by normalization.
+App-event delivery stays on its own channel. Hook deliveries and team-server
+reads go through the app's one guard, `OperatorEgress.from_settings`
+(`aweb_naapp.runtime.operator_egress`), which rejects private destinations
+unless a self-hosted operator names its network (`HOOK_INTERNAL_DESTINATIONS=allowed`
+and `HOOK_INTERNAL_CIDR`) and lists exact origins per purpose
+(`HOOK_INTERNAL_ORIGINS`, `TEAM_SERVER_INTERNAL_ORIGINS`), each under the app's
+prefix; the rule is `aweb_naapp.egress.internal`. A network with no origin,
+or an origin without the network, stops the app starting. List each origin
+exactly as its installation shows it, including any non-default port; default
+`:443` is omitted by normalization.
 `hook_events_stalled_after_seconds` and `hook_delivery_timeout_seconds` bound
 retry reporting and each drain call.
 
@@ -241,7 +245,11 @@ An app names its signing keys by kid, as key files:
 must be a regular file of at most 1 KiB, and must not be group- or world-writable. The
 app-event key may instead be given as `<PREFIX>APP_EMIT_KEY_SEED_HEX` with
 `<PREFIX>APP_EMIT_KID`, a form that signs app events only. An app with
-`<PREFIX>APP_EVENTS_ORIGIN` set (https, or http on loopback) must hold its app-event key.
+`<PREFIX>APP_EVENTS_ORIGIN` set must hold its app-event key. Despite its name, the
+setting is the core's base URL, not a bare origin: https, or http on `127.0.0.1`,
+`[::1]` or `localhost`, optionally with the path prefix the core is mounted under
+(`https://core.example/api`), and no query, fragment or userinfo. Events are
+posted to `<base>/v1/events/app`.
 
 ### The served manifest
 

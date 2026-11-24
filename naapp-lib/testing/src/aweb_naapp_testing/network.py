@@ -169,7 +169,9 @@ def make_certificates(directory: Path, names: list[str], addresses: list[str]) -
     alt_names += [x509.IPAddress(ipaddress.ip_address(address)) for address in addresses]
     cert = (
         x509.CertificateBuilder()
-        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, names[0])]))
+        # Clients verify the subject alternative names; a common name holds at
+        # most 64 characters, fewer than a stack's scoped service names.
+        .subject_name(x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "aweb test server")]))
         .issuer_name(ca_name)
         .public_key(key.public_key())
         .serial_number(x509.random_serial_number())
@@ -205,6 +207,21 @@ class Seen:
     request_line: str
     headers: list[tuple[str, str]]
     body: bytes
+    # The listener's own address the connection was accepted on.
+    local: str | None = None
+
+    @property
+    def method(self) -> str:
+        return self.request_line.split(" ")[0]
+
+    @property
+    def target(self) -> str:
+        """The request target as received: path and query."""
+        return self.request_line.split(" ")[1]
+
+    @property
+    def path(self) -> str:
+        return self.target.split("?")[0]
 
 
 Reply = tuple[int, bytes, list[tuple[str, str]]]
@@ -226,6 +243,8 @@ class TlsServer:
     seen: list[Seen] = field(default_factory=list)
     respond: Callable[[Seen], Awaitable[Reply]] | None = None
     port: int = 0
+    # Every TCP connection accepted, before and whatever its TLS handshake.
+    connections: int = 0
     _server: asyncio.Server | None = None
 
     async def start(self) -> None:
@@ -239,14 +258,19 @@ class TlsServer:
         context.sni_callback = remember  # type: ignore[assignment]
 
         async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            self.connections += 1
+            local = writer.get_extra_info("sockname")[0]
             try:
-                await self._handle(reader, writer, sni.get(id(writer.get_extra_info("ssl_object"))))
+                await writer.start_tls(context)
+                await self._handle(
+                    reader, writer, sni.get(id(writer.get_extra_info("ssl_object"))), local
+                )
             except (ConnectionError, asyncio.IncompleteReadError, ssl.SSLError):
                 pass
             finally:
                 writer.close()
 
-        self._server = await asyncio.start_server(handle, self.host, 0, ssl=context)
+        self._server = await asyncio.start_server(handle, self.host, 0)
         self.port = self._server.sockets[0].getsockname()[1]
 
     async def close(self) -> None:
@@ -255,14 +279,18 @@ class TlsServer:
             await self._server.wait_closed()
 
     async def _handle(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, sni: str | None
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+        sni: str | None,
+        local: str | None,
     ) -> None:
         head = await reader.readuntil(b"\r\n\r\n")
         lines = head.decode("latin-1").split("\r\n")
         headers = [tuple(line.split(": ", 1)) for line in lines[1:] if line]
         length = next((int(v) for k, v in headers if k.lower() == "content-length"), 0)
         body = await reader.readexactly(length) if length else b""
-        seen = Seen(sni, lines[0], [(k, v) for k, v in headers], body)
+        seen = Seen(sni, lines[0], [(k, v) for k, v in headers], body, local)
         self.seen.append(seen)
         if self.respond is not None:
             status, reply, reply_headers = await self.respond(seen)

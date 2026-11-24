@@ -17,15 +17,7 @@ lint:
 	uv run mypy src
 
 e2e:
-	set -e; \
-	cleanup() { \
-		status=$$?; trap - EXIT; \
-		docker compose -p $(NAAPP_E2E_PROJECT) -f docker-compose.e2e.yml down -v --remove-orphans || status=1; \
-		exit "$$status"; \
-	}; trap cleanup EXIT; \
-	docker compose -p $(NAAPP_E2E_PROJECT) -f docker-compose.e2e.yml down -v --remove-orphans >/dev/null 2>&1 || true; \
-	docker compose -p $(NAAPP_E2E_PROJECT) -f docker-compose.e2e.yml up --build -d; \
-	FOLIO_E2E=1 uv run pytest -q -m e2e
+	$(MAKE) -C ../.. naapp-package-e2e PACKAGE=naapp/folio ENABLE=FOLIO_E2E
 
 e2e-up:
 	docker compose -p $(NAAPP_E2E_PROJECT) -f docker-compose.e2e.yml up --build -d

@@ -20,6 +20,7 @@ from pydantic_settings import (
 )
 
 from aweb_naapp.outbox import MAX_CALL_TIMEOUT_SECONDS
+from aweb_naapp.runtime.operator_egress import OperatorNetworkSettings
 from aweb_naapp.runtime.team_auth import (
     MAX_TEAM_FACTS_TTL_SECONDS,
     MAX_TIMESTAMP_SKEW_SECONDS,
@@ -52,7 +53,7 @@ class AWIDMemberCredentialFiles(BaseModel):
     certificate_file: Path
 
 
-class NaappSettings(BaseSettings):
+class NaappSettings(BaseSettings, OperatorNetworkSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
 
     @classmethod
@@ -104,7 +105,9 @@ class NaappSettings(BaseSettings):
     did_aw_profile: DidAwProfile = DidAwProfile.REQUIRE
     # Staged team-key pin enforcement, one name for every naapp and the aweb
     # server: OFF logs team_key_pin_mismatch and serves the registry's key.
-    enforce_team_key_pins: bool = Field(default=False, validation_alias="AWEB_ENFORCE_TEAM_KEY_PINS")
+    enforce_team_key_pins: bool = Field(
+        default=False, validation_alias="AWEB_ENFORCE_TEAM_KEY_PINS"
+    )
     db_pool_min_connections: int = Field(default=1, ge=1)
     db_pool_max_connections: int = Field(default=5, ge=1)
     db_statement_cache_size: int = Field(default=0, ge=0)

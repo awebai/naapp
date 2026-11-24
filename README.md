@@ -31,15 +31,36 @@ records how `aweb-import` was made, and reproduces it from that aweb commit.
   `scripts/test-egress/production-awid` pins. Move that pin when production
   moves.
 - The e2e stacks run the published awid and aweb server images, pinned by
-  digest in each app's `docker-compose.e2e.yml`.
+  digest in the shared lane's `lane.compose.yaml` or the app's own Compose file.
 - Two e2e images are still built from aweb's source on GitHub, because aweb
   publishes no image of them. Each becomes a pinned published image when aweb
   publishes one:
-  - Secrets' federation CLI (`naapp/secrets/docker-compose.e2e.yml`, service
-    `cli`), at aweb `d8ee9ed31ad275da7cab3a3cade0006e06587f02`;
+  - The shared Compose lane's federation CLI (`aweb_naapp_testing/lane.compose.yaml`,
+    service `cli`), at aweb `d8ee9ed31ad275da7cab3a3cade0006e06587f02`;
   - Library's pre-status registry (`naapp/library/docker-compose.e2e.yml`,
     service `awid-pre-status`), at aweb
     `0bc7546de0b5c002e3496ae4807fb1a4e12bd0b4`.
+
+## Shared Compose lane for app journeys
+
+`aweb_naapp_testing.compose_lane.ComposeLane` provides the registry, team
+server, private network, DNS, TLS front, PostgreSQL, Redis and CLI containers.
+See `naapp/secrets/docker-compose.e2e.yml` for how to extend its services
+using `${NAAPP_E2E_BASE_COMPOSE}`. Declare each app variant as a separate
+service in the same network. The caller owns its build, environment and
+read-only key files, including their mode and ownership. Additional services,
+such as a second registry, use their own service names or network aliases.
+
+Give `prepare()` each routed hostname and backend in `upstreams`, and each
+installable API origin in `app_origins`. Use `lane.subnet`, `TEAM_SERVER_ORIGIN`
+and `CA_PATH` for the apps' internal destination settings. Write the app env
+files before `start_core()`; then use `up()` to start the app services.
+`machine()` starts a CLI container on the lane network. It accepts an
+optional checksum-verified Linux `aw` binary, and its Python can make plain
+HTTPS requests with the lane CA through `SSL_CERT_FILE`. Use `query()` for
+read-only database assertions. Register disposable credential values with
+`redact()` before starting a service and call `close()` in fixture cleanup to
+retain redacted logs and remove the project's containers.
 
 ## Checks that hold across the move
 
@@ -61,6 +82,15 @@ Two journeys that use the apps stay in aweb's gate and run against published
 images by digest: the CLI's Library journey and Folio's document-change and
 browser-wake acceptance. They test aweb's client, server and channel-core
 against a real app.
+
+## Running the suites locally
+
+The suites need PostgreSQL and Redis. Each run creates and drops its own test
+databases through pgdbm's fixtures; name the server with `TEST_DB_HOST`,
+`TEST_DB_PORT`, `TEST_DB_USER` and `TEST_DB_PASSWORD`. Give each person or
+agent running suites on a shared host a Redis database number of their own, in
+`REDIS_URL` (for example `redis://localhost:6379/8`): runs write keys there,
+and the server-compatibility suite deletes the keys its stack leaves behind.
 
 ## Temporary copies, deleted when the contracts package publishes
 

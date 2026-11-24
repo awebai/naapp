@@ -32,18 +32,21 @@ def configured(tmp_path, spec):
     return path
 
 
-def test_runtime_is_explicit_and_detached_from_caller_mutation(tmp_path):
+def test_runtime_reads_each_explicit_pin(tmp_path):
     spec = runtime_spec(tmp_path)
+    spec["unpacker"]["sha256"] = "b" * 64
+    spec["supervisor"]["sha256"] = "c" * 64
     path = configured(tmp_path, spec)
     config = RunnerConfig.load(path)
     runtime = config.runtime()
     assert runtime.engine.path == Path(sys.executable)
     assert runtime.engine.sha256 == "a" * 64
+    assert runtime.unpacker.path == Path(sys.executable)
+    assert runtime.unpacker.sha256 == "b" * 64
     assert runtime.supervisor.path == Path(sys.executable)
+    assert runtime.supervisor.sha256 == "c" * 64
     assert runtime.images == tmp_path / "images"
     assert runtime.workspace == tmp_path / "memory"
-    spec["engine"]["sha256"] = "b" * 64
-    assert config.runtime() == runtime
 
 
 def test_exec_configuration_does_not_invent_an_oci_runtime(tmp_path):

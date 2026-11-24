@@ -74,23 +74,23 @@ production operation; do not describe the public health response as region attes
 
 ## Build
 
-Library depends on the awid and naapp-lib of the aweb checkout it lives in
-(`[tool.uv.sources]` in `pyproject.toml` names `../../awid` and `../../naapp-lib`). The
-Docker build therefore needs the **repository root** as its context; a context of
-`naapp/library` cannot see those directories.
+Library depends on the naapp-lib of the checkout it lives in (`[tool.uv.sources]` in
+`pyproject.toml` names `../../naapp-lib`); awid-service comes from PyPI, at the version
+`uv.lock` pins. The Docker build therefore needs the **repository root** as its context; a
+context of `naapp/library` cannot see `naapp-lib`.
 
 ```sh
-docker build -f naapp/library/Dockerfile .    # from the aweb repository root
+docker build -f naapp/library/Dockerfile .    # from the repository root
 ```
 
-The Dockerfile copies only the paths the service needs: `awid/` and `naapp-lib/`, and
+The Dockerfile copies only the paths the service needs: `naapp-lib/`, and
 Library's `pyproject.toml`, `uv.lock`, `README.md`, `src/` and `skills/`.
-Those trees are copied whole, so `naapp/library/Dockerfile.dockerignore` is what keeps
+That tree is copied whole, so `naapp/library/Dockerfile.dockerignore` is what keeps
 files local to a checkout out of the build context and the image: `.env` files,
 virtualenvs, bytecode, tool caches, `.aw` identity homes (aw's signing key, encryption keys
 and team certificates), and `*.key` and `*.pem` files. `/app` mirrors the repository
-layout (`/app/naapp/library`, `/app/awid`, `/app/naapp-lib`), so the path sources resolve
-in the image as they do in a checkout.
+layout (`/app/naapp/library`, `/app/naapp-lib`), so the path source resolves
+in the image as it does in a checkout.
 
 ### Render settings
 
@@ -111,7 +111,7 @@ this build, `make prod-status` fails closed and names the fields that differ. Th
 The settings change and the first deploy of a commit with this Dockerfile go together:
 
 1. Before the change, a build of any commit with this Dockerfile under the
-   `naapp/library` root directory fails at the first `COPY awid/...`. A failed build does
+   `naapp/library` root directory fails at the first `COPY naapp-lib/...`. A failed build does
    not replace the running deploy.
 2. After the change, a build of an older commit whose Dockerfile expects the
    `naapp/library` context fails the same way. Rollback across the change therefore uses
@@ -127,7 +127,7 @@ The settings change and the first deploy of a commit with this Dockerfile go tog
    Artifact rollback does not reverse these build settings: it reuses the existing
    image without rebuilding and leaves future builds on the reviewed repository-root layout.
 4. Verify the new deploy with `make prod-verify` and an authenticated read, which
-   exercises team-certificate verification through the in-repo awid.
+   exercises team-certificate verification through awid-service.
 
 ## Required release record
 

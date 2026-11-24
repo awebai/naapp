@@ -39,9 +39,24 @@ ROOTS = {
 }
 
 # Module-level statements a copied definition relies on without naming them.
-SETUP = {
-    "conftest": ('os.environ.setdefault(',),
-}
+# aweb modules whose top level sets environment defaults with os.environ.setdefault.
+ENVIRONMENT_DEFAULT_MODULES = {"conftest"}
+
+
+def environment_defaults(current) -> dict[str, str]:
+    """The os.environ.setdefault(name, value) calls at the top level of an aweb module."""
+    if current.name not in ENVIRONMENT_DEFAULT_MODULES:
+        return {}
+    defaults = {}
+    for node in current.tree.body:
+        call = node.value if isinstance(node, ast.Expr) else None
+        if (
+            isinstance(call, ast.Call)
+            and ast.unparse(call.func) == "os.environ.setdefault"
+            and len(call.args) == 2
+        ):
+            defaults[ast.literal_eval(call.args[0])] = ast.literal_eval(call.args[1])
+    return defaults
 
 BUILTIN_FIXTURES = {"monkeypatch", "tmp_path", "tmp_path_factory", "request", "capsys", "caplog"}
 
@@ -209,11 +224,10 @@ def render_module(tag: str, current: Module, chosen, imports) -> str:
         '"""',
         "# ruff: noqa",
     ]
-    setup = [line for prefix in SETUP.get(current.name, ()) for line in current.source.splitlines() if line.startswith(prefix)]
+    # aweb's module-level environment defaults, recorded as data: the suite's
+    # conftest applies them only while its own tests run, never at import.
+    defaults = environment_defaults(current)
     statements = list(imports.get(current.name, []))
-    for used in sorted(set().union(*(referenced(ast.parse(line)) for line in setup)) if setup else ()):
-        if used in current.imports and current.imports[used] not in statements:
-            statements.append(current.imports[used])
     # Imports are not part of a copied definition: they are written in canonical
     # form and order, so a regenerated module is byte-identical.
     if any(isinstance(n, ast.ImportFrom) and n.module == "__future__" for n in current.tree.body):
@@ -223,7 +237,7 @@ def render_module(tag: str, current: Module, chosen, imports) -> str:
         names = ", ".join(original if original == bound else f"{original} as {bound}" for original, bound in sorted(pairs))
         lines.append(f"from {IMPORT_PREFIX}.{module_name(source)} import {names}")
     record = []
-    blocks = list(setup)
+    blocks = [f"ENVIRONMENT_DEFAULTS = {defaults!r}"] if defaults else []
     for _, node in nodes:
         text = current.text(node)
         blocks.append(text)

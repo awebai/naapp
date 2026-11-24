@@ -125,7 +125,13 @@ async def forget_teams(redis: Redis, teams: set[str]) -> None:
     expires by itself."""
     for team_id in teams:
         name, domain = team_id.split(":", 1)
-        stale = [key async for key in redis.scan_iter(match=f"*:{domain}/{name}*")]
+        # The team's own keys: its name ends the key or a ':' follows it, so a
+        # team whose name merely starts with this one keeps its keys.
+        stale = [
+            key
+            for pattern in (f"*:{domain}/{name}", f"*:{domain}/{name}:*")
+            async for key in redis.scan_iter(match=pattern)
+        ]
         if stale:
             await redis.delete(*stale)
 

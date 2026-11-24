@@ -188,6 +188,17 @@ async def race(world: World, first, second) -> list[Any]:
         await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def test_a_member_of_another_team_removes_nobody(world: World):
+    await held_reader(world)
+    scope, reader = await held_reader(world, OTHER_READER)
+    with pytest.raises(RemovalRefused) as refused:
+        await world.removals.remove(
+            principal=member("another-team"), grant=world.grant, scope=scope
+        )
+    assert (refused.value.code, refused.value.status) == ("reader_unknown", 404)
+    assert await holder(world, scope) == reader
+
+
 async def test_concurrent_member_removals_leave_a_reader(world: World):
     first, _ = await held_reader(world)
     second, _ = await held_reader(world, OTHER_READER)

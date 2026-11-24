@@ -35,9 +35,7 @@ services:
     networks:
       default:
         aliases: ["${NAAPP_E2E_PROJECT:-folio-e2e}-awid.test"]
-    build:
-      context: ${FOLIO_E2E_AWEB_CONTEXT:-../..}
-      dockerfile: awid/Dockerfile
+    image: ghcr.io/awebai/awid:0.5.40@sha256:0839d39c97a21de121b6431c93452856967bb92692a633ee821b004c52b87b6b
     environment:
       AWID_DATABASE_URL: postgresql://folio:folio@postgres:5432/folio
       AWID_REDIS_URL: redis://redis:6379/0

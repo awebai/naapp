@@ -24,9 +24,7 @@ services:
       retries: 30
 
   awid:
-    build:
-      context: ${LIBRARY_E2E_AWEB_CONTEXT:-../..}
-      dockerfile: awid/Dockerfile
+    image: ghcr.io/awebai/awid:0.5.40@sha256:0839d39c97a21de121b6431c93452856967bb92692a633ee821b004c52b87b6b
     environment:
       AWID_DATABASE_URL: postgresql://library:library@postgres:5432/library
       AWID_REDIS_URL: redis://redis:6379/0

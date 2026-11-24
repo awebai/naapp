@@ -28,12 +28,11 @@ on:
 permissions:
   contents: read
 
-# Every commit on main keeps its own run to the end: one group per commit, since
-# a group also cancels its waiting run when another queues. Elsewhere a newer
-# run replaces an older one.
+# A newer run on the same ref replaces the running one, on main as elsewhere:
+# the latest commit's run is the one that counts.
 concurrency:
-  group: naapp-ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: naapp-ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   plan:

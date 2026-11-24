@@ -170,14 +170,12 @@ async def test_a_new_version_of_the_secret_never_reuses_an_old_token(tmp_path: P
 async def test_another_scope_never_reuses_a_token(tmp_path: Path) -> None:
     async with running_upstream(tmp_path) as upstream:
         tokens = ProcessTokenCache()
-        await _call(upstream, tokens)
-        await tokens.put(
-            TokenKey(**{**_key(upstream).__dict__, "scope": "admin"}),
-            "a-token-for-another-scope",
-            datetime.now(UTC) + timedelta(hours=1),
-        )
-        call = await _call(upstream, tokens)
-        assert call.result.status == 200
+        assert (await _call(upstream, tokens)).result.status == 200
+        with pytest.raises(TokenExchangeFailed):
+            await _call(upstream, tokens, kind_params=_kind_params(upstream, scope="write:things"))
+        assert (await _call(upstream, tokens)).result.status == 200
+
+        assert upstream.paths == ["/oauth2/token", "/oauth2/echo", "/oauth2/token", "/oauth2/echo"]
         assert upstream.issued() == 1
 
 

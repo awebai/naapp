@@ -1,7 +1,9 @@
-"""Library builds and tests against the awid and naapp-lib of the checkout it lives in."""
+"""Library builds and tests against the naapp-lib of the checkout it lives in and the awid release its lock pins."""
 
 from __future__ import annotations
 
+import tomllib
+from importlib.metadata import version
 from pathlib import Path
 
 _LIBRARY_ROOT = Path(__file__).resolve().parents[1]
@@ -22,11 +24,11 @@ def test_aweb_naapp_imports_from_this_checkouts_naapp_lib() -> None:
     )
 
 
-def test_awid_imports_from_this_checkouts_awid() -> None:
-    import awid
-
-    source = _REPO_ROOT / "awid" / "src"
-    assert _imported_from(awid.__file__, source), f"awid was imported from {awid.__file__}, not from {source}"
+def test_awid_is_the_release_the_lock_pins() -> None:
+    lock = tomllib.loads((_LIBRARY_ROOT / "uv.lock").read_text(encoding="utf-8"))
+    (locked,) = [package for package in lock["package"] if package["name"] == "awid-service"]
+    assert locked["source"] == {"registry": "https://pypi.org/simple"}
+    assert version("awid-service") == locked["version"]
 
 
 def test_the_lock_fetches_no_dependency_from_git() -> None:

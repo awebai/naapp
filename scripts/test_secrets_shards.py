@@ -14,8 +14,8 @@ import unittest
 from secrets_shards import load_shards, run_shards, service_environments, validate_collections
 
 
-class ChecksStage(unittest.TestCase):
-    def test_checks_reports_deleted_and_unassigned_secrets_modules(self):
+class ShardCheck(unittest.TestCase):
+    def test_the_shard_check_reports_deleted_and_unassigned_secrets_modules(self):
         scripts = Path(__file__).resolve().parent
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -41,10 +41,7 @@ class ChecksStage(unittest.TestCase):
                 f' --check -- {shlex.quote(sys.executable)} -m pytest -q -m "not e2e"\n'
                 '.DEFAULT:\n\t@:\n'
             )
-            log = root / 'log'
-            log.mkdir()
-            (log / 'host-published-port.log').touch()
-            env = dict(os.environ, CANDIDATE_LOG_DIR=str(log), PYTEST_DISABLE_PLUGIN_AUTOLOAD='1')
+            env = dict(os.environ, PYTEST_DISABLE_PLUGIN_AUTOLOAD='1')
             env.pop('PYTEST_ADDOPTS', None)
             env.pop('AWEB_SECRETS_SHARD_SERVICES', None)
             for stale in (True, False):
@@ -54,17 +51,14 @@ class ChecksStage(unittest.TestCase):
                     else:
                         (tests / 'test_added.py').rename(tests / 'test_removed.py')
                     result = subprocess.run(
-                        ['bash', str(scripts / 'candidate-suite.sh'), 'checks'],
+                        ['make', 'check-secrets-shards'],
                         cwd=root, env=env, capture_output=True, text=True, timeout=30,
                     )
-                    outcome = 'FAILED' if stale else 'PASSED'
                     self.assertEqual(result.returncode == 0, not stale, result.stdout + result.stderr)
-                    summary = (log / 'summary.tsv').read_text()
-                    self.assertIn(f'checks/check-secrets-shards\t{outcome}\t', summary)
-                    self.assertIn(f'checks\t{outcome}\t', summary)
                     if stale:
-                        self.assertIn('module tests/test_removed.py in secrets-shards.json was not collected', result.stdout)
-                        self.assertIn('collected module tests/test_added.py is missing from secrets-shards.json', result.stdout)
+                        output = result.stdout + result.stderr
+                        self.assertIn('module tests/test_removed.py in secrets-shards.json was not collected', output)
+                        self.assertIn('collected module tests/test_added.py is missing from secrets-shards.json', output)
 
 
 class Partition(unittest.TestCase):

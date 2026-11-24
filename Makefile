@@ -19,7 +19,7 @@ AW_DIR ?= $(abspath .tools/bin)
 SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_served_manifest_digests \
 	test_secrets_shards test_shipping
 
-.PHONY: affected sync lint test test-scripts production-awid-sync browsers aw \
+.PHONY: affected sync lint test test-scripts production-awid-sync browsers renderer-deps test-renderer aw \
 	check-library-aatk check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets release-checks \
 	release-candidate release-publish
 
@@ -81,11 +81,16 @@ browsers:
 			(cd $$package && uv run --frozen --no-sync playwright install --with-deps --only-shell chromium); \
 		fi; \
 	done
-ifneq ($(filter naapp-lib,$(PACKAGES)),)
-	# The page renderer's tests drive the Chromium of the renderer's own npm lock.
+
+# The page renderer's npm lock and the Chromium of its own Playwright, which
+# naapp-lib's store/renderer browser test and the renderer's tests drive.
+renderer-deps:
 	npm ci --ignore-scripts --no-audit --no-fund --prefix naapp-lib/renderer
 	naapp-lib/renderer/node_modules/.bin/playwright install --with-deps --only-shell chromium
-endif
+
+# The page renderer's own tests (Node, then Playwright against the gallery).
+test-renderer:
+	cd naapp-lib/renderer && $(TEST_EGRESS_RUNNER) npm test
 
 aw:
 	scripts/install-aw.sh $(AW_DIR)

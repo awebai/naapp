@@ -238,10 +238,10 @@ and a loopback HTTP host. It loads the packaged renderer, types an unsaved form
 draft, commits an unrelated record through `PageStore.mutate`, and refreshes the
 validated snapshot and per-widget projections. It asserts that the new record is
 visible while the draft, focus, selection and scroll position survive. It runs
-with naapp-lib's tests (`make test PACKAGES=naapp-lib`), which also run the
-renderer's own `npm test`; `make browsers PACKAGES=naapp-lib` installs the
-renderer's npm lock and its Chromium first. Without Node or those packages the
-test fails and says what to install. To run it alone from the repository root,
+with naapp-lib's tests (`make test PACKAGES=naapp-lib`) after `make
+renderer-deps` installs the renderer's npm lock and its Chromium; `make
+test-renderer` runs the renderer's own tests. Without Node or those packages
+the test fails and says what to install. To run it alone from the repository root,
 with a test database named by TEST_DB_HOST and TEST_DB_PORT:
 
 ```sh

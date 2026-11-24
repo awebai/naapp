@@ -144,14 +144,20 @@ jobs:
         run: make sync
 
       # The runtime's console tests exercise real WebAuthn in Chromium.
-      # The page renderer's tests run on Node, from the renderer's npm lock.
+      - name: Install the test browser
+        run: make browsers
+
+      # The page renderer runs in the rest shard only, which holds the
+      # store/renderer browser test (tests/page_store).
       - name: Set up Node
+        if: matrix.shard == 'rest'
         uses: actions/setup-node@v6
         with:
           node-version: "22"
 
-      - name: Install the test browser
-        run: make browsers
+      - name: Install the page renderer's locked packages and browser
+        if: matrix.shard == 'rest'
+        run: make renderer-deps
 
       - name: Lint and type-check
         run: make lint
@@ -166,6 +172,10 @@ jobs:
       # host to loopback for Chromium and Playwright's driver.
       - name: Run tests offline against real PostgreSQL and Redis
         run: make test
+
+      - name: Run the page renderer's tests
+        if: matrix.shard == 'rest'
+        run: make test-renderer
 
   folio:
     name: Folio lint and tests

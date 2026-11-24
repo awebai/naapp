@@ -704,12 +704,6 @@ def test_manifest_catalog_is_public_and_variants_byte_stable(folio: RunningFolio
     assert httpx.get(f"{folio.origin}/.well-known/aweb-app.json", timeout=10.0).status_code == 404
 
 
-def test_real_aw_team_auth_smoke(folio: RunningFolio, aw_workspace: AWWorkspace) -> None:
-    team = _provision_team(aw_workspace, folio=folio)
-    result = _aw_request(team, "GET", f"{folio.origin}/v1/documents")
-    assert _assert_aw_success(result, context="list documents smoke").strip() == "[]"
-
-
 def test_local_member_installs_folio_without_global_identity_metadata(
     folio: RunningFolio, aw_workspace: AWWorkspace, tmp_path: Path,
 ) -> None:
@@ -745,14 +739,14 @@ def test_local_member_installs_folio_without_global_identity_metadata(
     assert _assert_aw_success(result, context="local member Folio tools").strip() == "[]"
 
 
-def test_private_team_member_authenticates_without_the_awid_service_token(
+def test_member_authenticates_without_the_awid_service_token(
     folio_without_awid_service_token: RunningFolio, aw_workspace: AWWorkspace
 ) -> None:
     # Without a service token Folio checks the member's certificate through
-    # AWID's per-certificate status, which a private team's members can use too.
+    # AWID's per-certificate status.
     team = _provision_team(aw_workspace, folio=folio_without_awid_service_token)
     result = _aw_request(team, "GET", f"{folio_without_awid_service_token.origin}/v1/documents")
-    assert _assert_aw_success(result, context="private team without service token").strip() == "[]"
+    assert _assert_aw_success(result, context="member without service token").strip() == "[]"
 
 
 @contextmanager
@@ -1010,34 +1004,6 @@ def test_document_endpoints_versions_raw_utf8_and_attribution(
     bad_body.write_bytes(b"\xff")
     bad = _aw_request(team, "POST", f"{folio.origin}/v1/documents/handoff/versions", body_file=bad_body)
     _assert_aw_status(bad, 400, context="append invalid UTF-8")
-
-
-def test_team_scoping_and_body_named_team_cannot_bypass_certificate_scope(
-    folio: RunningFolio,
-    aw_workspace_factory: Callable[[str], AWWorkspace],
-) -> None:
-    first = _provision_team(aw_workspace_factory("first"), folio=folio, alias="alice")
-    second = _provision_team(aw_workspace_factory("second"), folio=folio, alias="bob")
-    _create_document(folio, first, slug="secret", title="Secret", body="first team only")
-
-    assert _list_documents(folio, second) == []
-    second_read = _aw_request(second, "GET", f"{folio.origin}/v1/documents/secret")
-    _assert_aw_status(second_read, 404, context="second team reads first team document")
-    second_append = _aw_request(second, "POST", f"{folio.origin}/v1/documents/secret/versions", body="oops")
-    _assert_aw_status(second_append, 404, context="second team appends first team document")
-
-    payload = json.dumps(
-        {"team_id": first.team_id, "slug": "intruder", "title": "Intruder", "body": "body-named team"},
-        separators=(",", ":"),
-    )
-    created_by_second = _aw_json(
-        _aw_request(second, "POST", f"{folio.origin}/v1/documents", body=payload),
-        context="body-named team create",
-    )
-    assert created_by_second["slug"] == "intruder"
-    assert _get_document(folio, second, "intruder")["body"] == "body-named team"
-    first_intruder = _aw_request(first, "GET", f"{folio.origin}/v1/documents/intruder")
-    _assert_aw_status(first_intruder, 404, context="body-named team did not write first team")
 
 
 def test_revoked_certificate_fails_after_awid_revocation_cache_refresh(

@@ -11,7 +11,6 @@ from aweb.migrations import apply_native_migrations
 from awid.db_config import build_database_config
 from dataclasses import dataclass, field
 from pgdbm import AsyncDatabaseManager, DatabaseConfig
-import os
 import pytest_asyncio
 
 AWEB_TAG = 'server-v1.27.53'
@@ -26,16 +25,7 @@ COPIED = {
 }
 
 
-os.environ.setdefault("APP_ENV", "testing")
-
-
-os.environ.setdefault("ENVIRONMENT", "testing")
-
-
-os.environ.setdefault("AWEB_INTERNAL_AUTH_SECRET", "test-internal-auth-secret")
-
-
-os.environ.setdefault("AWID_SERVICE_TOKEN", "aweb-server-tests-service-token-32-bytes")
+ENVIRONMENT_DEFAULTS = {'APP_ENV': 'testing', 'ENVIRONMENT': 'testing', 'AWEB_INTERNAL_AUTH_SECRET': 'test-internal-auth-secret', 'AWID_SERVICE_TOKEN': 'aweb-server-tests-service-token-32-bytes'}
 
 
 @dataclass(frozen=True)

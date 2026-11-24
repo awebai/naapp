@@ -1,31 +1,38 @@
 """Freeze existing bytes and validation, including use without app dependencies."""
 
+import json
 import subprocess
 import sys
 
 import pytest
 
-from aweb_secrets_values import CAPTURE_FIELDS, ValueInvalid, decode_value, encode_value
+from aweb_secrets_values import ValueInvalid, decode_value, encode_value
+
+CANONICAL_VALUES = {
+    "bearer": b'{"value":"fixture"}',
+    "header": b'{"value":"fixture"}',
+    "query": b'{"value":"fixture"}',
+    "basic": b'{"password":"fixture","username":"fixture"}',
+    "oauth2-client-credentials": b'{"client_id":"fixture","client_secret":"fixture"}',
+    "aws-sigv4": (
+        b'{"access_key_id":"fixture","secret_access_key":"fixture","session_token":"fixture"}'
+    ),
+}
 
 
-@pytest.mark.parametrize("kind", CAPTURE_FIELDS)
-def test_every_kind_uses_the_same_bytes_and_round_trips(kind):
-    required, optional = CAPTURE_FIELDS[kind]
-    value = {name: "fixture" for name in sorted(required | optional)}
-    encoded = encode_value(kind, value)
-    assert (
-        encoded
-        == ("{" + ",".join('"' + name + '":"fixture"' for name in sorted(value)) + "}").encode()
-    )
-    assert decode_value(kind, encoded) == value
+@pytest.mark.parametrize("kind", CANONICAL_VALUES)
+def test_every_kind_preserves_canonical_bytes_and_round_trips(kind):
+    expected = CANONICAL_VALUES[kind]
+    value = dict(reversed(tuple(json.loads(expected).items())))
+    assert encode_value(kind, value) == expected
+    assert decode_value(kind, expected) == value
 
 
 def test_existing_unicode_bytes_and_optional_fields_are_preserved():
     assert encode_value("bearer", {"value": "é"}) == b'{"value":"\\u00e9"}'
-    assert decode_value("basic", b'{"username":"","password":"fixture"}') == {
-        "username": "",
-        "password": "fixture",
-    }
+    basic = {"username": "", "password": "fixture"}
+    assert encode_value("basic", basic) == b'{"password":"fixture","username":""}'
+    assert decode_value("basic", b'{"username":"","password":"fixture"}') == basic
     assert decode_value(
         "aws-sigv4", b'{"access_key_id":"fixture","secret_access_key":"fixture"}'
     ) == {"access_key_id": "fixture", "secret_access_key": "fixture"}
@@ -34,10 +41,11 @@ def test_existing_unicode_bytes_and_optional_fields_are_preserved():
 @pytest.mark.parametrize(
     "raw",
     [
-        b'{"value":"one","value":"two"}',
+        b'{"value":"untrusted-codec-field","value":"two"}',
         b'{"value":42}',
         b'{"value":""}',
-        b'{"value":"fixture","extra":"fixture"}',
+        b'{"value":"untrusted-codec-field","extra":"extra"}',
+        b"{",
         b"{}",
         b"null",
         b"[]",
@@ -48,7 +56,8 @@ def test_existing_unicode_bytes_and_optional_fields_are_preserved():
 def test_invalid_material_is_not_retained_in_errors(raw):
     with pytest.raises(ValueInvalid) as error:
         decode_value("bearer", raw)
-    assert str(error.value) == "the secret value does not match its kind"
+    assert "untrusted-codec-field" not in str(error.value)
+    assert "untrusted-codec-field" not in repr(error.value)
     assert error.value.__cause__ is None
 
 

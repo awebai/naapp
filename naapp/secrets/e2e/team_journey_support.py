@@ -11,18 +11,13 @@ import hashlib
 import json
 import re
 import secrets
-import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
 import pexpect
-
-
-def docker(*args: str, timeout: int = 120, input: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["docker", *args], text=True, capture_output=True, timeout=timeout, input=input, check=False)
-
+from aweb_naapp_testing.compose_lane import await_awid_txt, docker
 
 # AWID's did_key limit (awid/ratelimit.py _BUCKET_DEFAULTS): 60 reads a minute
 # per client address, counted in a fixed window keyed by its start.
@@ -55,18 +50,6 @@ def aw_refused(container: str, *args: str, env: dict[str, str] | None = None) ->
     result = docker("exec", *extra, container, "aw", "--json", *args, timeout=300)
     assert result.returncode != 0, result.stdout
     return first_json(result.stdout)["error"]["code"]
-
-
-def await_awid_txt(machine: str, domain: str, controller_did: str) -> None:
-    """Wait, bounded, until the machine's resolver sees the published
-    controller: the zone is reloaded once a second, so a lookup made at once
-    can still return the previous record."""
-    for _ in range(30):
-        answer = docker("exec", machine, "nslookup", "-type=txt", f"_awid.{domain}")
-        if controller_did in answer.stdout:
-            return
-        time.sleep(0.5)
-    raise AssertionError(f"_awid.{domain} never named {controller_did}")
 
 
 class Holder:
@@ -286,14 +269,6 @@ class Holding:
     team_id: str
     role: str
     principal: str
-
-
-def read_only_psql(user: str, database: str, select: str) -> list[str]:
-    """The psql arguments that run one SELECT, as `user`, in a repeatable-read,
-    read-only transaction and print only its rows: separate commands in one
-    session."""
-    return ["psql", "-U", user, "-d", database, "-At", "-q", "-v", "ON_ERROR_STOP=1",
-            "-c", "BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY", "-c", select, "-c", "COMMIT"]
 
 
 SNAPSHOT_LITERAL = re.compile(r"[A-Za-z0-9:._@/+=-]+")

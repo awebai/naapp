@@ -690,11 +690,13 @@ async def test_parallel_decisions_record_exactly_one(world: World):
     assert (await world.audit.kinds()).count("approval_decided") == 1
 
 
-async def until_waiting_on_a_lock(w: World) -> None:
+async def until_waiting_on_a_lock(w: World, blocker: int) -> None:
     async def observe() -> None:
         while not await w.store.db.fetch_value(
-            "SELECT count(*) FROM pg_stat_activity "
-            "WHERE datname = current_database() AND wait_event_type = 'Lock'"
+            "SELECT EXISTS (SELECT 1 FROM pg_stat_activity "
+            "WHERE datname = current_database() AND wait_event_type = 'Lock' "
+            "AND $1 = ANY(pg_blocking_pids(pid)))",
+            blocker,
         ):
             await asyncio.sleep(0.02)
 
@@ -714,6 +716,7 @@ async def test_a_decision_that_passed_its_link_before_the_winner_committed_is_li
     loser = None
     try:
         async with world.store.db.transaction() as winner:
+            blocker = await winner.fetch_value("SELECT pg_backend_pid()")
             await world.approvals.decide(
                 approval.approval_id,
                 Decision.APPROVE,
@@ -731,7 +734,7 @@ async def test_a_decision_that_passed_its_link_before_the_winner_committed_is_li
                     link_token=link,
                 )
             )
-            await until_waiting_on_a_lock(world)
+            await until_waiting_on_a_lock(world, blocker)
             assert not loser.done()
         assert await refusal(asyncio.wait_for(loser, 10)) is Refusal.LINK_UNAVAILABLE
     finally:
@@ -858,8 +861,9 @@ async def test_a_second_task_decision_is_not_pending_in_either_order(
                 tx=winner,
             )
             if loser_waits:
+                blocker = await winner.fetch_value("SELECT pg_backend_pid()")
                 loser = asyncio.create_task(second())
-                await until_waiting_on_a_lock(world)
+                await until_waiting_on_a_lock(world, blocker)
         if loser is None:
             loser = asyncio.create_task(second())
         assert await refusal(asyncio.wait_for(loser, 10)) is Refusal.NOT_PENDING
@@ -870,12 +874,20 @@ async def test_a_second_task_decision_is_not_pending_in_either_order(
 
 async def test_an_admission_held_open_blocks_a_second_approval_of_the_same_request(world: World):
     first, second = await approved(world), await approved(world)
-    async with world.store.db.transaction() as caller:
-        await world.approvals.admit(first.approval_id, REQUEST, "op-1", tx=caller)
-        competing = asyncio.create_task(world.approvals.admit(second.approval_id, REQUEST, "op-2"))
-        await asyncio.sleep(0.3)
-        assert not competing.done()
-    assert await refusal(competing) is Refusal.UNRECONCILED_DISPATCH
+    competing = None
+    try:
+        async with world.store.db.transaction() as caller:
+            blocker = await caller.fetch_value("SELECT pg_backend_pid()")
+            await world.approvals.admit(first.approval_id, REQUEST, "op-1", tx=caller)
+            competing = asyncio.create_task(world.approvals.admit(second.approval_id, REQUEST, "op-2"))
+            await until_waiting_on_a_lock(world, blocker)
+            assert not competing.done()
+        assert await refusal(asyncio.wait_for(competing, 10)) is Refusal.UNRECONCILED_DISPATCH
+    finally:
+        if competing is not None:
+            if not competing.done():
+                competing.cancel()
+            await asyncio.gather(competing, return_exceptions=True)
 
 
 # The caller's transaction

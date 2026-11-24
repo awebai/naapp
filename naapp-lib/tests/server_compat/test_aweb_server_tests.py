@@ -49,7 +49,7 @@ def test_every_copied_definition_matches_its_recorded_source(name: str) -> None:
     module = importlib.import_module(f"tests.server_compat.aweb_server_tests.{name}")
     definitions = _definitions(PACKAGE / f"{name}.py")
     recorded = dict(module.COPIED)
-    copied = {key: text for key, text in definitions.items() if key not in {"AWEB_TAG", "AWEB_PATH", "AWEB_BLOB", "COPIED"}}
+    copied = {key: text for key, text in definitions.items() if key not in {"AWEB_TAG", "AWEB_PATH", "AWEB_BLOB", "COPIED", "ENVIRONMENT_DEFAULTS"}}
     texts = {text for text in copied.values()}
     digests = {hashlib.sha256(text.encode()).hexdigest() for text in texts}
     assert digests == set(recorded.values()), (

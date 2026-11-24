@@ -100,15 +100,18 @@ def test_invalid_assignments_do_not_poison_journal(tmp_path):
 
 
 def test_assignment_size_is_raw_bytes(tmp_path):
-    good = VECTORS["assignments"][0]
+    good = next(vector for vector in VECTORS["assignments"] if vector["name"] == "valid")
+    now = datetime.fromisoformat(good["now"])
     kwargs = {k: good["runner"][k] for k in ("origin", "runner_id", "service_kid")}
+    journal = Journal(tmp_path / "journal.sqlite3", clock=now.timestamp)
+    # JSON whitespace changes the wire size without changing any signed fields.
+    body = good["body_json"].encode().ljust(1024 * 1024)
+    assert len(body) == 1024 * 1024
+
     with pytest.raises(Refused, match="assignment_invalid"):
-        verify_assignment(
-            b" " * (1024 * 1024 + 1),
-            **kwargs,
-            now=datetime.fromisoformat(good["now"]),
-            journal=Journal(tmp_path / "journal.sqlite3"),
-        )
+        verify_assignment(body + b" ", **kwargs, now=now, journal=journal)
+    assignment = verify_assignment(body, **kwargs, now=now, journal=journal)
+    assert assignment.dispatch_id == good["expected"]["dispatch_id"]
 
 
 @pytest.mark.parametrize("value", [float("nan"), 1.0, 2**53, "\ud800", {"\ud800": 1}])

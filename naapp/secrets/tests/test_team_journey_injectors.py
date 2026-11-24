@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import pytest
+from aweb_naapp_testing.compose_lane import read_only_psql
 from team_journey_support import (
     ANSWER_WITNESS_PORT,
     AnswerDrop,
@@ -19,7 +20,6 @@ from team_journey_support import (
     assert_unchanged,
     credential_sha256,
     designation_snapshot,
-    read_only_psql,
     receiver_snapshot,
     signed_act,
 )

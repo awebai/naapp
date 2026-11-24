@@ -28,13 +28,24 @@ import shutil
 import subprocess
 import time
 from collections.abc import Iterator
-from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 
 import pexpect
 import pytest
 from aweb_naapp.roles import holding_scope
-from aweb_naapp_testing.network import make_certificates
+from aweb_naapp_testing.compose_lane import (
+    CA_PATH,
+    DEFAULT_SUBNET,
+    REGISTRY_ORIGIN,
+    TEAM_SERVER_ORIGIN,
+    ComposeLane,
+    await_awid_txt,
+    identity_folder,
+)
+from aweb_naapp_testing.compose_lane import (
+    docker as _docker,
+)
 from nacl.signing import SigningKey
 from team_journey_support import (
     Designation,
@@ -50,11 +61,8 @@ from team_journey_support import (
     first_json,
     install_app,
     publish_team_server,
-    read_only_psql,
 )
 from team_journey_support import Holder as SharedHolder
-from team_journey_support import await_awid_txt as shared_await_awid_txt
-from team_journey_support import docker as _docker
 
 pytestmark = pytest.mark.e2e
 
@@ -65,8 +73,8 @@ TEAM = "h"
 # The lane's own app id: only the hosted origin may serve the hosted id "secrets".
 APP_ID = "lane-secrets"
 TEAM_ID = f"{TEAM}:{DOMAIN}"
-REGISTRY = "http://awid.svc.test:8010"
-AWEB = "https://aweb.svc.test"
+REGISTRY = REGISTRY_ORIGIN
+AWEB = TEAM_SERVER_ORIGIN
 API = "https://api.secrets.svc.test"
 CONSOLE = "https://console.secrets.svc.test"
 ROLE = "secrets.owner"
@@ -75,7 +83,7 @@ LOGS_APP_ID = "lane-logs"
 READER_ROLE = "logs.reader"
 LOGS_API = "https://api.logs.svc.test"
 LOGS_CONSOLE = "https://console.logs.svc.test"
-LANE_SUBNET = "172.31.240.0/24"
+LANE_SUBNET = DEFAULT_SUBNET
 # The lane's Secrets keeps its records in this schema of the lane's database.
 SECRETS_SCHEMA = "secrets"
 # The notice contact the owner designates the holder with.
@@ -91,12 +99,11 @@ LOGS_COMPOSE_ENV = {
     "LOGS_EMAIL_SMTP_HOST": "mail.svc.test",
     "LOGS_EMAIL_SMTP_PORT": "1025",
     "LOGS_EMAIL_FROM": "logs@svc.test",
-    "LOGS_EMAIL_CA_FILE": "/runtime/tls/ca.pem",
+    "LOGS_EMAIL_CA_FILE": CA_PATH,
     "LOGS_EGRESS_DENIED_NETWORKS": "[]",
 }
 # What the TLS front serves, and the service behind each host.
 UPSTREAMS = {
-    "aweb.svc.test": "aweb:8000",
     "api.secrets.svc.test": "secrets:8770",
     "console.secrets.svc.test": "secrets:8770",
     "api.logs.svc.test": "logs:8765",
@@ -104,30 +111,7 @@ UPSTREAMS = {
 }
 
 
-def front_caddyfile(upstreams: dict[str, str], cert: str, key: str) -> str:
-    """The TLS front's configuration: each host on 443 with the lane's
-    certificate, proxied to its service with the public Host kept."""
-    return "{\n  auto_https off\n}\n" + "".join(
-        f"{host}:443 {{\n  tls /tls/{cert} /tls/{key}\n  reverse_proxy {target}\n}}\n"
-        for host, target in upstreams.items()
-    )
-
-
-def write_tls(runtime: Path, hosts: list[str]) -> tuple[str, str]:
-    """The lane's certificate for every host, and the TLS mail transport's
-    copy of it; all public to the lane's containers. Returns the
-    certificate's and key's file names."""
-    (runtime / "tls").mkdir()
-    tls = make_certificates(runtime / "tls", hosts, [])
-    shutil.copyfile(tls.cert_file, runtime / "tls" / "smtp.pem")
-    shutil.copyfile(tls.key_file, runtime / "tls" / "smtp-key.pem")
-    for path in (runtime / "tls").iterdir():
-        path.chmod(0o644)
-    (runtime / "tls").chmod(0o755)
-    return tls.cert_file.name, tls.key_file.name
-
-
-def write_secrets_env(lane) -> None:
+def write_secrets_env(lane: ComposeLane) -> None:
     """The app's settings file. Compose checks every service's env_file when
     any service starts, so it is written before the lane's first service."""
     (lane.runtime / "secrets.env").write_text("".join(f"{k}={v}\n" for k, v in secrets_env().items()))
@@ -174,103 +158,10 @@ def secrets_env() -> dict[str, str]:
     }
 
 
-def machine_dir(name: str) -> str:
-    """A machine's HOME and working directory, as the machine sees it."""
-    return f"/runtime/{name}"
-
-
-def identity_folder(name: str) -> str:
-    """The identity folder aw selects in a machine: its working directory's .aw."""
-    return f"{machine_dir(name)}/.aw"
-
-
-@dataclass
-class Lane:
-    project: str
-    runtime: Path
-    env: dict[str, str]
-
-    def compose(self, *args: str, timeout: int = 900) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["docker", "compose", "-p", self.project, "-f", str(APP_DIR / "docker-compose.e2e.yml"),
-             "--profile", "logs", *args],
-            cwd=APP_DIR, env=self.env, text=True, capture_output=True, timeout=timeout, check=False,
-        )
-
-    def up(self, *services: str) -> None:
-        result = self.compose("up", "-d", "--build", "--wait", *services)
-        if result.returncode != 0:
-            # The services' own last words, before the fixture's down -v.
-            logs = self.compose("logs", "--no-color", "--tail", "60", *services)
-            raise AssertionError(result.stderr[-4000:] + "\n--- service logs ---\n" + logs.stdout + logs.stderr)
-
-    def machine(self, name: str) -> str:
-        """Start a cli container as one person's machine; its HOME is /runtime/<name>."""
-        container = f"{self.project}-{name}"
-        (self.runtime / name).mkdir(mode=0o700)
-        # The machine runs as the host user who owns the runtime directory, so
-        # aw accepts the homes the test prepares there and the test can read
-        # what aw writes. dbus needs that user in the passwd database.
-        uid, gid = os.getuid(), os.getgid()
-        accounts = self.runtime / "accounts"
-        if not accounts.exists():
-            accounts.mkdir(mode=0o755)
-            accounts.chmod(0o755)  # mkdir's mode is masked by the launching umask
-            (accounts / "passwd").write_text(f"root:x:0:0:root:/root:/bin/sh\nlane:x:{uid}:{gid}:lane:/runtime:/bin/sh\n")
-            (accounts / "group").write_text(f"root:x:0:\nlane:x:{gid}:\n")
-            for path in accounts.iterdir():
-                path.chmod(0o644)
-        result = self.compose(
-            "run", "-d", "--name", container, "--user", f"{uid}:{gid}",
-            "-v", f"{accounts / 'passwd'}:/etc/passwd:ro", "-v", f"{accounts / 'group'}:/etc/group:ro",
-            "-e", f"HOME={machine_dir(name)}", "-w", machine_dir(name), "cli",
-        )
-        assert result.returncode == 0, result.stdout + result.stderr
-        return container
-
-
-def write_front(runtime: Path, caddyfile: str) -> None:
-    """The lane's front configuration: public, whatever the launching umask."""
-    (runtime / "front").mkdir()
-    (runtime / "front").chmod(0o755)
-    (runtime / "front" / "Caddyfile").write_text(caddyfile)
-    (runtime / "front" / "Caddyfile").chmod(0o644)
-
-
-def write_dns(runtime: Path) -> None:
-    """The lane's DNS server configuration: public, read by the DNS image's
-    non-root user whatever the launching shell's umask."""
-    (runtime / "dns").mkdir()
-    (runtime / "dns").chmod(0o755)
-    corefile = runtime / "dns" / "Corefile"
-    corefile.write_text(
-        f"{DOMAIN}:53 {{\n  errors\n  file /zones/{DOMAIN}.zone {DOMAIN} {{ reload 1s }}\n}}\n"
-        ".:53 {\n  errors\n  forward . 127.0.0.11\n}\n"
-    )
-    corefile.chmod(0o644)
-
-
-def publish_awid_txt(lane: Lane, controller_did: str) -> None:
-    zone = lane.runtime / "dns" / f"{DOMAIN}.zone"
-    serial = int(time.time())
-    zone.with_suffix(".tmp").write_text(
-        f"$ORIGIN {DOMAIN}.\n$TTL 1\n"
-        f"@ IN SOA ns.{DOMAIN}. hostmaster.{DOMAIN}. ({serial} 1 1 1 1)\n"
-        f"@ IN NS ns.{DOMAIN}.\nns IN A 127.0.0.1\n"
-        f'_awid IN TXT "awid=v1; controller={controller_did}; registry={REGISTRY};"\n'
-    )
-    zone.with_suffix(".tmp").chmod(0o644)
-    zone.with_suffix(".tmp").replace(zone)
-
-
-def await_awid_txt(machine: str, controller_did: str) -> None:
-    shared_await_awid_txt(machine, DOMAIN, controller_did)
-
-
 class Holder(SharedHolder):
     """The holder's machine, with the holder's own browser for this journey."""
 
-    def __init__(self, lane: Lane, container: str) -> None:
+    def __init__(self, lane: ComposeLane, container: str) -> None:
         super().__init__(container, DOMAIN)
         self.lane = lane
 
@@ -333,43 +224,46 @@ class Holder(SharedHolder):
         return output + rest
 
 
-@pytest.fixture(scope="module")
-def lane(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Lane]:
+@pytest.fixture
+def lane(tmp_path_factory: pytest.TempPathFactory, request: pytest.FixtureRequest) -> Iterator[ComposeLane]:
     if os.environ.get("SECRETS_E2E") != "1":
         pytest.skip("make e2e only")
     project = os.environ.get("NAAPP_E2E_PROJECT", "secrets-owner-acts-e2e")
     runtime = tmp_path_factory.mktemp("owner-acts")
-    runtime.chmod(0o755)
     commit = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, text=True, capture_output=True, check=True).stdout.strip()
-    lane = Lane(project, runtime, {**os.environ, "SECRETS_E2E_RUNTIME": str(runtime), "SECRETS_E2E_SOURCE_COMMIT": commit,
-                                       "SECRETS_E2E_AWID_SERVICE_TOKEN": secrets.token_hex(32), **LOGS_COMPOSE_ENV})
-
-    write_dns(runtime)
-    publish_awid_txt(lane, "did:key:z6MkpendingpendingpendingpendingpendingpendingpendingP")
-    cert, key = write_tls(runtime, [*UPSTREAMS, "mail.svc.test"])
-    write_front(runtime, front_caddyfile(UPSTREAMS, cert, key))
+    lane = ComposeLane(
+        project, runtime, APP_DIR / "docker-compose.e2e.yml",
+        env={
+            **LOGS_COMPOSE_ENV,
+            "NAAPP_E2E_POSTGRES_USER": "secrets",
+            "NAAPP_E2E_POSTGRES_DB": "secrets",
+            "NAAPP_E2E_POSTGRES_PASSWORD": "disposable",
+            "SECRETS_E2E_SOURCE_COMMIT": commit,
+        },
+        profiles=("logs", "browser"),
+        subnet=LANE_SUBNET,
+    )
+    tls = lane.prepare(
+        domain=DOMAIN,
+        upstreams=UPSTREAMS,
+        app_origins=(API, LOGS_API),
+        controller_did="did:key:z6MkpendingpendingpendingpendingpendingpendingP",
+        extra_tls_hosts=("mail.svc.test",),
+        extra_front_aliases=("signer.svc.test", "human.svc.test"),
+    )
+    shutil.copyfile(tls.cert_file, runtime / "tls" / "smtp.pem").chmod(0o644)
+    shutil.copyfile(tls.key_file, runtime / "tls" / "smtp-key.pem").chmod(0o644)
     write_secrets_env(lane)
     try:
-        lane.up("dns")
-        dns = lane.compose("ps", "-q", "dns").stdout.strip()
-        ip = _docker("inspect", "-f", "{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}", dns).stdout.strip()
-        assert ip, "no DNS address"
-        lane.env["SECRETS_E2E_DNS_IP"] = ip
-        lane.up("postgres", "redis", "awid", "aweb", "smtp", "front")
-        result = lane.compose("--profile", "browser", "build", "cli", "browser")
-        assert result.returncode == 0, result.stdout + result.stderr
-        _docker("tag", f"{project}-browser", f"{project}-browser")
+        lane.start_core()
+        lane.up("smtp")
+        lane.checked(lane.compose("build", "cli", "browser"), "build lane clients")
         yield lane
     finally:
-        # Every service's own record of the run, kept beside the runtime.
-        logs = lane.compose("logs", "--no-color", "--timestamps")
-        (runtime / "compose.log").write_text(logs.stdout + logs.stderr)
-        lane.compose("--profile", "browser", "down", "-v", "--remove-orphans")
-        for name in ("controller", "holder"):
-            _docker("rm", "-f", f"{project}-{name}")
+        request.node.add_report_section("teardown", "lane Compose", lane.close())
 
 
-def grant_install_owner(lane: Lane, did_key: str) -> None:
+def grant_install_owner(lane: ComposeLane, did_key: str) -> None:
     """The server operator's local bootstrap of the team's first installation
     owner. Membership grants no install authority; only this does."""
     granted = lane.compose("exec", "-T", "aweb", "aweb", "install-admin", "grant", "--team-id", TEAM_ID,
@@ -377,7 +271,7 @@ def grant_install_owner(lane: Lane, did_key: str) -> None:
     assert granted.returncode == 0, granted.stdout + granted.stderr
 
 
-def admit_app_member(lane: Lane, controller: str, name: str, home: Path) -> tuple[str, Path]:
+def admit_app_member(lane: ComposeLane, controller: str, name: str, home: Path) -> tuple[str, Path]:
     """One app as an ordinary member of the team: its key, the owner's
     add-member, and the member's own fetch of its certificate with its key
     alone, as any member does, in an identity home of its own under the
@@ -402,17 +296,20 @@ def admit_app_member(lane: Lane, controller: str, name: str, home: Path) -> tupl
     return pem, home / fetched["cert_path"]
 
 
-def write_service_member(lane: Lane, controller: str) -> None:
+def write_service_member(lane: ComposeLane, controller: str) -> None:
     """The app's own team member credential (no AWID service token), and its config."""
     keys = lane.runtime / "keys"
     keys.mkdir(mode=0o755)
     keys.chmod(0o755)  # mkdir's mode is masked by the launching umask
     pem, certificate = admit_app_member(lane, controller, "secrets-service", keys / "service-home")
+    lane.redact(pem)
     (keys / "member.pem").write_text(pem)
     shutil.copyfile(certificate, keys / "member-cert.json")
     for name in ("custody", "request", "params", "response", "runner", "smtp", "manifest", "event", "delivery", "grant", "resolve"):
         # The app's shared key-file format: 64 hex characters, each independent.
-        (keys / name).write_text(secrets.token_hex(32) + "\n")
+        value = secrets.token_hex(32)
+        lane.redact(value)
+        (keys / name).write_text(value + "\n")
     # The lane's CA for hook deliveries and team-server reads.
     shutil.copyfile(lane.runtime / "tls" / "ca.pem", keys / "hook-ca.pem")
     for path in keys.iterdir():
@@ -420,7 +317,7 @@ def write_service_member(lane: Lane, controller: str) -> None:
     write_secrets_env(lane)
 
 
-def write_logs_files(lane: Lane, controller: str) -> None:
+def write_logs_files(lane: ComposeLane, controller: str) -> None:
     """The lane's Logs files, which the base service names: its member key
     and certificate, its own keys, its mail credentials and the URLs of its
     content and purge-ledger databases, each its own database."""
@@ -428,26 +325,31 @@ def write_logs_files(lane: Lane, controller: str) -> None:
     files.mkdir(mode=0o755)
     files.chmod(0o755)  # mkdir's mode is masked by the launching umask
     pem, certificate = admit_app_member(lane, controller, "logs-service", lane.runtime / "logs-member")
+    lane.redact(pem)
     (files / "awid-member-key").write_text(pem)
     shutil.copyfile(certificate, files / "awid-member-certificate")
     for name in ("logs-chain", "logs-resolve", "logs-grants", "logs-governance"):
-        (files / name).write_text(secrets.token_hex(32) + "\n")
+        value = secrets.token_hex(32)
+        lane.redact(value)
+        (files / name).write_text(value + "\n")
     (files / "smtp-username").write_text("logs-service")
-    (files / "smtp-password").write_text(secrets.token_urlsafe(16))
+    password = secrets.token_urlsafe(16)
+    lane.redact(password)
+    (files / "smtp-password").write_text(password)
     (files / "database-url").write_text("postgresql://secrets:disposable@postgres:5432/logs\n")
     (files / "purge-ledger-database-url").write_text("postgresql://secrets:disposable@postgres:5432/logsledger\n")
     for path in files.iterdir():
         path.chmod(0o644)
 
 
-def create_logs_databases(lane: Lane) -> None:
+def create_logs_databases(lane: ComposeLane) -> None:
     for database in ("logs", "logsledger"):
         created = lane.compose("exec", "-T", "postgres", "psql", "-U", "secrets", "-d", "secrets", "-v",
                                "ON_ERROR_STOP=1", "-c", f"CREATE DATABASE {database}")
         assert created.returncode == 0, created.stdout + created.stderr
 
 
-def start_apps(lane: Lane, controller: str) -> None:
+def start_apps(lane: ComposeLane, controller: str) -> None:
     """The lane's Secrets and Logs, with their members, files and databases,
     behind the TLS front."""
     write_service_member(lane, controller)
@@ -456,7 +358,7 @@ def start_apps(lane: Lane, controller: str) -> None:
     lane.up("secrets", "logs")
 
 
-def install_apps(lane: Lane, controller: str, owner_did_key: str) -> None:
+def install_apps(lane: ComposeLane, controller: str, owner_did_key: str) -> None:
     """The owner publishes the team's coordination server, the operator
     grants the owner installation, and the owner installs Secrets and Logs
     from their internal origins."""
@@ -466,22 +368,14 @@ def install_apps(lane: Lane, controller: str, owner_did_key: str) -> None:
     install_app(controller, LOGS_API)
 
 
-def secrets_query(lane: Lane):
-    def query(select: str) -> str:
-        result = lane.compose("exec", "-T", "postgres", *read_only_psql("secrets", "secrets", select))
-        assert result.returncode == 0, result.stdout + result.stderr
-        return result.stdout.strip()
-    return query
-
-
-def test_the_owner_designates_a_human_holder_registered_on_another_machine(lane: Lane) -> None:
+def test_the_owner_designates_a_human_holder_registered_on_another_machine(lane: ComposeLane) -> None:
     controller = lane.machine("controller")
     holder = Holder(lane, lane.machine("holder"))
 
     # Setup authority: the namespace, its root human (the holder) and the team.
     prepared = aw(holder.container, "id", "namespace", "prepare-controller", "--domain", DOMAIN, "--registry", REGISTRY)
-    publish_awid_txt(lane, prepared["controller_did"])
-    await_awid_txt(holder.container, prepared["controller_did"])
+    lane.publish_awid_txt(DOMAIN, prepared["controller_did"])
+    await_awid_txt(holder.container, DOMAIN, prepared["controller_did"])
     child = holder.spawn("--json", "id", "human", "init", "--domain", DOMAIN, "--as-root")
     output = holder.answer_passphrases(child)
     child.close()
@@ -552,7 +446,7 @@ def test_the_owner_designates_a_human_holder_registered_on_another_machine(lane:
                       generation=installed["generation"], team_id=TEAM_ID, role=ROLE, principal=principal)
     designation = Designation(holding=holding, audience=CONSOLE,
                               credential_sha256=credential_sha256(exported["credential"]), contact=CONTACT)
-    query = secrets_query(lane)
+    query = partial(lane.query, "secrets", "secrets")
     baseline = designation_snapshot(query, holding, schema=SECRETS_SCHEMA)
 
     # The owner signs only for that exact credential: the fingerprint matches.
@@ -580,7 +474,7 @@ def test_the_owner_designates_a_human_holder_registered_on_another_machine(lane:
 
 
 def signs_in_again_after_a_reissue(
-    lane: Lane, controller: str, holder: Holder, human: dict, hooks: dict
+    lane: ComposeLane, controller: str, holder: Holder, human: dict, hooks: dict
 ) -> None:
     """A Logs reader and Secrets owner whose member certificate was reissued is
     refused by each app's passkey login until its own aw signs it in once there."""

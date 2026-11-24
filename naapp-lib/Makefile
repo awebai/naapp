@@ -7,5 +7,6 @@ lint:
 	uv run ruff check .
 	uv run mypy src
 
+# NAAPP_LIB_TESTS narrows a run to one shard of the suite; by default it runs all of it.
 test:
-	uv run pytest -q
+	uv run pytest -q $(NAAPP_LIB_TESTS)

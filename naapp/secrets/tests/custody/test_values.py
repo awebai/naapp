@@ -19,13 +19,6 @@ def test_app_imports_reexport_the_single_standalone_codec() -> None:
 
 
 @pytest.mark.parametrize("kind", CAPTURE_FIELDS)
-async def test_values_round_trip_with_the_kinds_fields(kind: str) -> None:
-    required, optional = CAPTURE_FIELDS[kind]
-    value = {name: os.urandom(24).hex() for name in required | optional}
-    assert decode_value(kind, encode_value(kind, value)) == value
-
-
-@pytest.mark.parametrize("kind", CAPTURE_FIELDS)
 @pytest.mark.parametrize("defect", ["missing", "extra", "non_string", "empty"])
 def test_invalid_values_are_refused_without_carrying_the_value(kind: str, defect: str) -> None:
     required, _ = CAPTURE_FIELDS[kind]
@@ -44,17 +37,6 @@ def test_invalid_values_are_refused_without_carrying_the_value(kind: str, defect
         encode_value(kind, value)
     assert canary not in str(refused.value)
     assert canary not in repr(refused.value)
-
-
-@pytest.mark.parametrize("encoded", [b"{", b"[]", b"null", b"\xff", b'{"value":"a","value":"b"}'])
-def test_decode_refuses_malformed_or_ambiguous_values(encoded: bytes) -> None:
-    with pytest.raises(ValueInvalid):
-        decode_value("bearer", encoded)
-
-
-def test_basic_can_have_an_empty_username() -> None:
-    value = {"username": "", "password": os.urandom(24).hex()}
-    assert decode_value("basic", encode_value("basic", value)) == value
 
 
 @pytest.mark.parametrize("source", ["new_ingest", "previously_stored"])

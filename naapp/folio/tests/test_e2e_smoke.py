@@ -616,10 +616,6 @@ def _grant_install_admin(team: E2ETeam, env: dict[str, str]) -> None:
     assert operator.returncode == 0, operator.stdout + operator.stderr
 
 
-def _provision_real_team_certificate(workspace: AWWorkspace) -> str:
-    return _provision_team(workspace).team_id
-
-
 def _create_document(folio: RunningFolio, team: E2ETeam, *, slug: str, title: str, body: str) -> dict[str, Any]:
     payload = json.dumps({"slug": slug, "title": title, "body": body}, separators=(",", ":"))
     result = _aw_request(team, "POST", f"{folio.origin}/v1/documents", body=payload)

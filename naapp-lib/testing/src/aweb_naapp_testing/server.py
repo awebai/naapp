@@ -24,9 +24,9 @@ for example the release production runs (``production_registry``).
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, field
 
 import httpx
 import pytest_asyncio
@@ -45,6 +45,7 @@ from redis.asyncio import Redis
 from aweb_naapp.runtime.team_auth import AWIDTeamCache
 from aweb_naapp.runtime.team_server import TeamServerDirectory
 from aweb_naapp_testing import Member
+from aweb_naapp_testing.redis_database import redis_test_url
 
 
 @dataclass
@@ -53,11 +54,15 @@ class Coordination:
 
     registry: Registry
     server: Server
+    # Every team a test brought to the server, whose cached state the server's
+    # AWID client keeps in the Redis other runs share until it is forgotten.
+    teams: set[str] = field(default_factory=set)
 
     async def add_member(
         self, member: Member, *, namespace_controller: SigningKey | None = None
     ) -> None:
         """Registers the member's team, if new, and its certificate in AWID."""
+        self.teams.add(member.team_id)
         name, domain = member.team_id.split(":", 1)
         known = await self.registry.db.fetch_value(
             "SELECT 1 FROM {{tables.teams}} WHERE domain = $1 AND name = $2", domain, name
@@ -70,6 +75,7 @@ class Coordination:
 
     async def publish_server(self, member: Member) -> None:
         """Publishes the server as the member's team server, signed by the team key."""
+        self.teams.add(member.team_id)
         await self.registry.publish_team_server(
             member.team_id, member.team_key, server_url=self.server.url
         )
@@ -77,6 +83,7 @@ class Coordination:
     async def connect(self, member: Member) -> dict:
         """Connects the member through the server's own ``POST /v1/connect``,
         which provisions its team and agent there; returns the server's answer."""
+        self.teams.add(member.team_id)
         body = json.dumps({"hostname": "naapp-test"}).encode()
         headers = member.headers(aud=self.server.url, method="POST", path="/v1/connect", body=body)
         async with self.server.client() as client:
@@ -112,6 +119,17 @@ class Coordination:
         )
 
 
+async def forget_teams(redis: Redis, teams: set[str]) -> None:
+    """Remove what the server's AWID client cached for ``teams``. The cache
+    generation of a shared domain stays: other runs read it now, and it
+    expires by itself."""
+    for team_id in teams:
+        name, domain = team_id.split(":", 1)
+        stale = [key async for key in redis.scan_iter(match=f"*:{domain}/{name}*")]
+        if stale:
+            await redis.delete(*stale)
+
+
 def awid_dns(registry: Registry):
     """The `_awid` lookup ``registry`` itself uses: its test override, or no
     record at all (tests never reach real DNS)."""
@@ -125,28 +143,39 @@ def awid_dns(registry: Registry):
 @pytest_asyncio.fixture
 async def coordination_registry(test_db_factory) -> AsyncIterator[Registry]:
     awid_db = await test_db_factory.create_db(suffix="coordination_awid")
-    async with Redis.from_url(
-        os.environ.get("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True
-    ) as redis:
+    async with Redis.from_url(redis_test_url(), decode_responses=True) as redis:
         async with running_registry(awid_db.config.get_dsn(), redis=redis) as registry:
             yield registry
+
+
+@asynccontextmanager
+async def coordination_server(
+    registry: Registry, test_db_factory, monkeypatch
+) -> AsyncIterator[Coordination]:
+    """A coordination server on its own test database, reading ``registry``."""
+    monkeypatch.setenv("AWEB_DATABASE_URL", "postgresql://unused/aweb")
+    monkeypatch.setenv("AWID_SERVICE_TOKEN", SERVICE_TOKEN)
+    monkeypatch.setenv("AWID_REGISTRY_URL", REGISTRY_URL)
+    server_db = await test_db_factory.create_db(suffix="coordination_aweb")
+    async with Redis.from_url(redis_test_url(), decode_responses=True) as redis:
+        coordination = None
+        try:
+            async with running_server(
+                server_db.config.get_dsn(),
+                redis,
+                awid_transport=registry.transport,
+                domain_verifier=awid_dns(registry),
+            ) as server:
+                coordination = Coordination(registry=registry, server=server)
+                yield coordination
+        finally:
+            if coordination is not None:
+                await forget_teams(redis, coordination.teams)
 
 
 @pytest_asyncio.fixture
 async def coordination(
     test_db_factory, monkeypatch, coordination_registry
 ) -> AsyncIterator[Coordination]:
-    monkeypatch.setenv("AWEB_DATABASE_URL", "postgresql://unused/aweb")
-    monkeypatch.setenv("AWID_SERVICE_TOKEN", SERVICE_TOKEN)
-    monkeypatch.setenv("AWID_REGISTRY_URL", REGISTRY_URL)
-    server_db = await test_db_factory.create_db(suffix="coordination_aweb")
-    async with Redis.from_url(
-        os.environ.get("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True
-    ) as redis:
-        async with running_server(
-            server_db.config.get_dsn(),
-            redis,
-            awid_transport=coordination_registry.transport,
-            domain_verifier=awid_dns(coordination_registry),
-        ) as server:
-            yield Coordination(registry=coordination_registry, server=server)
+    async with coordination_server(coordination_registry, test_db_factory, monkeypatch) as served:
+        yield served

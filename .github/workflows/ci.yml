@@ -97,6 +97,7 @@ jobs:
           - shard: rest
             tests: --ignore=tests/runtime
     env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp-lib
       NAAPP_LIB_TESTS: ${{ matrix.tests }}
       TEST_DB_HOST: localhost
@@ -161,6 +162,14 @@ jobs:
       - name: Run tests offline against real PostgreSQL and Redis
         run: make test
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   folio:
     name: Folio lint and tests
     needs: plan
@@ -168,6 +177,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/folio
       TEST_DB_HOST: localhost
       TEST_DB_PORT: "5432"
@@ -224,6 +234,14 @@ jobs:
       - name: Run unit and contract tests
         run: make test
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   folio-e2e:
     name: Folio real-stack e2e
     needs: plan
@@ -231,6 +249,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
+      PYTEST_ADDOPTS: --junitxml=${{ github.workspace }}/junit/folio-e2e.xml
       PACKAGES: naapp/folio
     steps:
       - name: Checkout
@@ -258,6 +277,14 @@ jobs:
       - name: Run real-stack e2e
         run: make e2e-folio
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   library:
     name: Library lint and tests
     needs: plan
@@ -265,6 +292,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/library
     services:
       postgres:
@@ -303,6 +331,14 @@ jobs:
       - name: Run unit and contract tests
         run: make test
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   library-e2e:
     name: Library real-stack e2e
     needs: plan
@@ -310,6 +346,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
+      PYTEST_ADDOPTS: --junitxml=${{ github.workspace }}/junit/library-e2e.xml
       PACKAGES: naapp/library
     steps:
       - name: Checkout
@@ -334,6 +371,14 @@ jobs:
       - name: Run real-stack e2e
         run: make e2e-library
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   logs:
     name: Logs lint and tests
     needs: plan
@@ -341,6 +386,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/logs
     services:
       postgres:
@@ -394,6 +440,14 @@ jobs:
       - name: Run unit and contract tests
         run: make test
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   secrets:
     name: Secrets lint and tests
     needs: plan
@@ -401,6 +455,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/secrets
       UV_MANAGED_PYTHON: "true"
     services:
@@ -502,6 +557,14 @@ jobs:
           PYTEST_ADDOPTS: -rs
         run: make test
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   secrets-e2e:
     name: Secrets owner-acts journey
     needs: plan
@@ -509,6 +572,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
+      PYTEST_ADDOPTS: --junitxml=${{ github.workspace }}/junit/secrets-e2e.xml
       PACKAGES: naapp/secrets
     steps:
       - name: Checkout
@@ -529,6 +593,14 @@ jobs:
       - name: Run the owner-acts journey
         run: make e2e-secrets
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   secrets-runner:
     name: Secrets runner lint and tests
     needs: plan
@@ -536,6 +608,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/secrets/runner
     steps:
       - name: Checkout
@@ -557,6 +630,14 @@ jobs:
       - name: Run tests
         run: make test
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   secrets-values:
     name: Secrets values codec lint and tests
     needs: plan
@@ -564,6 +645,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/secrets/values
     steps:
       - name: Checkout
@@ -584,6 +666,14 @@ jobs:
 
       - name: Run tests
         run: make test
+
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
 
   result:
     name: naapp CI

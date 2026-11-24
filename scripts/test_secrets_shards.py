@@ -11,7 +11,7 @@ import sys
 import tempfile
 import unittest
 
-from secrets_shards import load_shards, run_shards, service_environments, validate_collections
+from secrets_shards import junit_environment, load_shards, run_shards, service_environments, validate_collections
 
 
 class ShardCheck(unittest.TestCase):
@@ -133,6 +133,22 @@ raise SystemExit(23 if port == '5432' else 0)
                 self.assertIn(module, log)
             self.assertIn('Secrets shard 1 exit 23', stdout.getvalue())
             self.assertIn('Secrets shard 2 exit 0', stdout.getvalue())
+
+
+class JUnitReports(unittest.TestCase):
+    def test_each_shard_writes_its_own_report_and_collection_writes_none(self):
+        env = {'PYTEST_ADDOPTS': '-rs --junitxml=/reports/naapp_secrets.xml', 'OTHER': 'kept'}
+        self.assertEqual(junit_environment(env, 'shard-1')['PYTEST_ADDOPTS'],
+                         '-rs --junitxml=/reports/naapp_secrets-shard-1.xml')
+        self.assertEqual(junit_environment(env, 'shard-2')['PYTEST_ADDOPTS'],
+                         '-rs --junitxml=/reports/naapp_secrets-shard-2.xml')
+        self.assertEqual(junit_environment(env, None)['PYTEST_ADDOPTS'], '-rs')
+        self.assertEqual(junit_environment(env, None)['OTHER'], 'kept')
+
+    def test_an_environment_without_a_report_is_unchanged(self):
+        env = {'PYTEST_ADDOPTS': '-rs'}
+        self.assertEqual(junit_environment(env, 'shard-1'), env)
+        self.assertEqual(junit_environment({}, 'shard-1'), {})
 
 
 if __name__ == '__main__':

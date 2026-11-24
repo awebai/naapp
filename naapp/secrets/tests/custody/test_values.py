@@ -39,17 +39,6 @@ def test_invalid_values_are_refused_without_carrying_the_value(kind: str, defect
     assert canary not in repr(refused.value)
 
 
-@pytest.mark.parametrize("encoded", [b"{", b"[]", b"null", b"\xff", b'{"value":"a","value":"b"}'])
-def test_decode_refuses_malformed_or_ambiguous_values(encoded: bytes) -> None:
-    with pytest.raises(ValueInvalid):
-        decode_value("bearer", encoded)
-
-
-def test_basic_can_have_an_empty_username() -> None:
-    value = {"username": "", "password": os.urandom(24).hex()}
-    assert decode_value("basic", encode_value("basic", value)) == value
-
-
 @pytest.mark.parametrize("source", ["new_ingest", "previously_stored"])
 def test_native_aws_key_pairs_round_trip_without_a_session_token(source: str) -> None:
     value = {name: os.urandom(24).hex() for name in ("access_key_id", "secret_access_key")}

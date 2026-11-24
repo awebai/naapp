@@ -228,10 +228,12 @@ async def test_small_broker_request_completes_while_maximum_response_is_processe
     monkeypatch.setattr(responses, "has_credential_shape", hold_large_scan)
     async with asyncio.TaskGroup() as tasks:
         large = tasks.create_task(_send(upstream, request("ch_large")))
+        inspecting = tasks.create_task(entered.wait())
         try:
-            async with asyncio.timeout(12):
-                await entered.wait()
-                small = await _send(upstream, request("ch_small"))
+            # The transport owns the download deadline. Start the peer at scanner entry.
+            await asyncio.wait((inspecting, large), return_when=asyncio.FIRST_COMPLETED)
+            assert not large.done(), "large request finished before the scanner rendezvous"
+            small = await _send(upstream, request("ch_small"))
             assert small.result.body == small_body
             assert not large.done()
         finally:

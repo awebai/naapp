@@ -167,15 +167,14 @@ async def test_the_token_is_stored_only_as_a_hash(
     async with await _client(console.sessions()) as client:
         cookie, csrf = await _login(client, owners)
     token = cookie.split("=", 1)[1]
-    rows = await console.db.fetch_all("SELECT * FROM {{tables.console_sessions}}")
+    [row] = await console.db.fetch_all("SELECT * FROM {{tables.console_sessions}}")
     stored = b"".join(
-        value if isinstance(value, bytes) else str(value).encode()
-        for row in rows
-        for value in row.values()
+        value if isinstance(value, bytes) else str(value).encode() for value in row.values()
     )
     assert token.encode() not in stored
     assert csrf.encode() not in stored
-    assert hashlib.sha256(token.encode()).digest() in stored
+    assert row["token_sha256"] == hashlib.sha256(token.encode()).digest()
+    assert row["csrf_sha256"] == hashlib.sha256(csrf.encode()).digest()
 
 
 async def test_an_expired_session_is_refused(console: Console, owners: dict[str, Owner]) -> None:

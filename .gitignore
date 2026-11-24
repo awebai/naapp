@@ -1,0 +1,20 @@
+node_modules/
+dist/
+.cache/
+*.tgz
+.DS_Store
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+*.py[cod]
+*.egg-info/
+.venv/
+.aw/
+
+# Secrets — never commit
+.env
+.env.*
+**/.env
+**/.env.*

@@ -15,7 +15,7 @@ PRODUCTION_AWID_PROJECT := scripts/test-egress/production-awid
 # The aw release the e2e journeys run, installed by scripts/install-aw.sh.
 AW_DIR ?= $(abspath .tools/bin)
 
-SCRIPT_TESTS := test_affected_packages test_served_manifest_digests test_secrets_shards
+SCRIPT_TESTS := test_affected_packages test_ci_result test_served_manifest_digests test_secrets_shards
 
 .PHONY: affected sync lint test test-scripts production-awid-sync browsers aw \
 	check-library-aatk check-secrets-shards e2e-folio e2e-library e2e-secrets

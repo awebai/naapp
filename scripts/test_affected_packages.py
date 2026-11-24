@@ -51,6 +51,12 @@ class Affected(unittest.TestCase):
         )
         self.assertEqual(json.loads(result.stdout), ['naapp/folio', 'naapp/library'])
 
+    def test_the_command_selects_every_package_when_asked_for_all(self):
+        result = subprocess.run(
+            [sys.executable, str(SCRIPT), '--all'], input='', capture_output=True, text=True, check=True,
+        )
+        self.assertEqual(json.loads(result.stdout), sorted(EVERY))
+
     def test_every_package_is_a_project_of_this_repository(self):
         root = SCRIPT.parents[1]
         for package in PACKAGES:

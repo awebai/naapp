@@ -2,6 +2,7 @@
 """Which packages a change selects for testing.
 
 Usage: git diff --name-only BASE...HEAD | scripts/affected_packages.py
+       scripts/affected_packages.py --all
 
 Prints the selected packages as a JSON list. A changed path belongs to the
 innermost package that contains it. A package is selected when a changed path
@@ -76,6 +77,11 @@ def affected(paths: list[str]) -> set[str]:
 
 
 def main() -> None:
+    if sys.argv[1:] == ['--all']:
+        print(json.dumps(sorted(PACKAGES)))
+        return
+    if sys.argv[1:]:
+        raise SystemExit(f'usage: {sys.argv[0]} [--all] < changed paths')
     paths = [line.strip() for line in sys.stdin if line.strip()]
     print(json.dumps(sorted(affected(paths))))
 

@@ -234,6 +234,10 @@ jobs:
       - name: Install locked dependencies
         run: make sync
 
+      # The smoke drives Folio's present pages in Chromium.
+      - name: Install the test browser
+        run: make browsers
+
       - name: Install the pinned aw release
         run: make aw
 

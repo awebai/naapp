@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build-once, inspect, publish-exact-bytes for the PyPI lanes (server, awid).
+# Build-once, inspect, publish-exact-bytes for the PyPI lanes.
 #
 #   inspect-staged    --dist <dir> --package <name> --version <X.Y.Z>
 #       Refuses unless the dist holds EXACTLY one sdist and one wheel for

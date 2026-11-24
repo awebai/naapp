@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 import tomllib
@@ -11,12 +10,14 @@ from pathlib import Path
 
 SEMVER = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 PYTHON_VERSION = rf"{SEMVER}(?:rc[1-9][0-9]*)?"
-NPM_VERSION = rf"{SEMVER}(?:-rc\.[1-9][0-9]*)?"
 TAG_PATTERN = re.compile(
-    rf"^(?:(server-v|awid-service-v|aweb-naapp-v|aweb-secrets-runner-v|awid-v)({PYTHON_VERSION})"
-    rf"|(aw-v)({NPM_VERSION})"
-    rf"|(channel-v|pi-v|skills-v|a2a-gw-v|secrets-v|logs-v)({SEMVER}))$"
+    rf"^(?:(aweb-naapp-v|aweb-secrets-runner-v)({PYTHON_VERSION})"
+    rf"|(secrets-v|logs-v|folio-v|library-v)({SEMVER}))$"
 )
+# Lanes that exist but publish nothing yet, with the reason.
+CLOSED_LANES = {
+    "aweb-naapp-v": "aweb publishes aweb-naapp and aweb-naapp-testing until the cutover",
+}
 
 
 class VersionRefusal(RuntimeError):
@@ -37,18 +38,21 @@ def tag_parts(tag: str) -> tuple[str, str]:
     if not matched:
         raise VersionRefusal(f"unsupported release tag {tag!r}")
     groups = matched.groups()
-    return next((groups[i], groups[i + 1]) for i in (0, 2, 4) if groups[i])
+    return next((groups[i], groups[i + 1]) for i in (0, 2) if groups[i])
+
+
+def require_open_lane(prefix: str) -> None:
+    if prefix in CLOSED_LANES:
+        raise VersionRefusal(f"the {prefix} lane is closed: {CLOSED_LANES[prefix]}")
 
 
 def final_version(version: str) -> str | None:
-    matched = re.fullmatch(rf"({SEMVER})(?:rc[1-9][0-9]*|-rc\.[1-9][0-9]*)", version)
+    matched = re.fullmatch(rf"({SEMVER})rc[1-9][0-9]*", version)
     return matched.group(1) if matched else None
 
 
-def valid_version(path: str, value: object) -> bool:
-    return isinstance(value, str) and re.fullmatch(
-        PYTHON_VERSION if path.endswith(".toml") else NPM_VERSION, value
-    ) is not None
+def valid_version(value: object) -> bool:
+    return isinstance(value, str) and re.fullmatch(PYTHON_VERSION, value) is not None
 
 
 def _git(root: Path, *args: str) -> str:
@@ -60,7 +64,7 @@ def _git(root: Path, *args: str) -> str:
 
 def _read(root: Path, revision: str, path: str) -> dict:
     raw = _git(root, "show", f"{revision}:{path}")
-    return tomllib.loads(raw) if path.endswith(".toml") or path.endswith("uv.lock") else json.loads(raw)
+    return tomllib.loads(raw)
 
 
 def require_runner_values(root: Path, revision: str) -> None:

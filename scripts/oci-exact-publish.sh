@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build-once, inspect, publish-exact-bytes for the awid image (Option A):
+# Build-once, inspect, publish-exact-bytes for the app images:
 # the multi-platform image is built to an OCI archive WITHOUT any registry
 # push; this script binds its complete identity, and continuation transfers
 # those exact bytes with skopeo.

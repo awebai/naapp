@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Publish one already-tested OSS tag, without release branches or GitHub Actions."""
+"""Publish one already-tested naapp tag, without release branches or GitHub Actions."""
 
 from __future__ import annotations
 
 import argparse
-from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import os
@@ -13,7 +12,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import time
 import tomllib
 import urllib.error
 import urllib.parse
@@ -21,42 +19,31 @@ import urllib.request
 from pathlib import Path
 
 from release_versions import (
-    SEMVER,
     VersionRefusal as PublishRefusal,
     final_version,
+    require_open_lane,
     require_runner_values,
     tag_parts,
     valid_version,
 )
 
 MANIFESTS = {
-    "server-v": "server/pyproject.toml",
-    "awid-service-v": "awid/pyproject.toml",
     "aweb-naapp-v": "naapp-lib/pyproject.toml",
-    "awid-v": "awid/pyproject.toml",
-    "channel-v": "channel/package.json",
-    "pi-v": "pi-extension/package.json",
-    "skills-v": "packages/claude-skills/package.json",
     "secrets-v": "naapp/secrets/pyproject.toml",
     "logs-v": "naapp/logs/pyproject.toml",
+    "folio-v": "naapp/folio/pyproject.toml",
+    "library-v": "naapp/library/pyproject.toml",
     "aweb-secrets-runner-v": "naapp/secrets/runner/pyproject.toml",
 }
-# Each PyPI lane: whether it depends on the in-repo awid-service, which must be
-# public first, and the (package, directory) pairs it publishes, in order. A
+# Each PyPI lane: the (package, directory) pairs it publishes, in order. A
 # lane's packages share the tag's version.
 PYPI_LANES = {
-    "server-v": (True, (("aweb", "server"),)),
-    "awid-service-v": (False, (("awid-service", "awid"),)),
-    "aweb-naapp-v": (True, (("aweb-naapp", "naapp-lib"), ("aweb-naapp-testing", "naapp-lib/testing"))),
-    "aweb-secrets-runner-v": (False, (
+    "aweb-naapp-v": (("aweb-naapp", "naapp-lib"), ("aweb-naapp-testing", "naapp-lib/testing")),
+    "aweb-secrets-runner-v": (
         ("aweb-secrets-values", "naapp/secrets/values"),
         ("aweb-secrets-runner", "naapp/secrets/runner"),
-    )),
-}
-NPM_LANES = {
-    "channel-v": ("channel", "@awebai/claude-channel", "channel"),
-    "pi-v": ("pi-extension", "@awebai/pi", "pi"),
-    "skills-v": ("packages/claude-skills", "@awebai/claude-skills", "skills"),
+    ),
+    "secrets-v": (("aweb-naapp-journey-support", "naapp/secrets/e2e"),),
 }
 
 
@@ -68,17 +55,13 @@ def run(
     input_text: str | None = None,
     timeout: int = 7200,
 ) -> str:
-    # npm's background self-update lookup is not part of publication. Cover
-    # direct build commands and nested scripts, regardless of caller config.
-    environment = dict(os.environ if env is None else env)
-    environment.update(NPM_CONFIG_UPDATE_NOTIFIER="false", npm_config_update_notifier="false")
     completed = subprocess.run(
         argv,
         cwd=root,
         text=True,
         input=input_text,
         capture_output=capture,
-        env=environment,
+        env=env,
         timeout=timeout,
         check=False,
     )
@@ -88,36 +71,23 @@ def run(
     return completed.stdout.strip() if capture else ""
 
 
-def manifest_version(root: Path, path: str) -> str:
-    if path.endswith(".toml"):
-        with (root / path).open("rb") as handle:
-            value = tomllib.load(handle)["project"]["version"]
-    else:
-        value = json.loads((root / path).read_text(encoding="utf-8"))["version"]
-    if not valid_version(path, value):
-        raise PublishRefusal(f"{path} has invalid version {value!r}")
-    return value
-
-
 def manifest_version_at(root: Path, source_sha: str, path: str) -> str:
     raw = run(root, "git", "show", f"{source_sha}:{path}", timeout=60)
-    if path.endswith(".toml"):
-        value = tomllib.loads(raw)["project"]["version"]
-    else:
-        value = json.loads(raw)["version"]
-    if not valid_version(path, value):
+    value = tomllib.loads(raw)["project"]["version"]
+    if not valid_version(value):
         raise PublishRefusal(f"{path} at {source_sha} has invalid version {value!r}")
     return value
 
 
 def tag_identity(root: Path, tag: str) -> tuple[str, str, str]:
     prefix, version = tag_parts(tag)
+    require_open_lane(prefix)
     try:
         source_sha = run(root, "git", "rev-parse", f"{tag}^{{commit}}", timeout=60)
     except PublishRefusal as error:
         raise PublishRefusal(f"local candidate tag {tag} is absent") from error
     manifests = [MANIFESTS[prefix]] if prefix in MANIFESTS else []
-    manifests += [f"{directory}/pyproject.toml" for _, directory in PYPI_LANES.get(prefix, (False, ()))[1]]
+    manifests += [f"{directory}/pyproject.toml" for _, directory in PYPI_LANES.get(prefix, ())]
     for manifest in dict.fromkeys(manifests):
         if manifest_version_at(root, source_sha, manifest) != version:
             raise PublishRefusal(
@@ -151,24 +121,10 @@ def sha256(path: Path) -> str:
 
 
 def publish_pypi(root: Path, prefix: str, version: str) -> None:
-    needs_awid, packages = PYPI_LANES[prefix]
+    packages = PYPI_LANES[prefix]
     token = os.environ.get("UV_PUBLISH_TOKEN", "").strip()
     if not token:
         raise PublishRefusal("UV_PUBLISH_TOKEN is required")
-    if needs_awid:
-        awid_version = manifest_version(root, "awid/pyproject.toml")
-        deadline = time.monotonic() + 180
-        while True:
-            status, _ = request_json(
-                f"https://pypi.org/pypi/awid-service/{awid_version}/json"
-            )
-            if status == 200:
-                break
-            if time.monotonic() >= deadline:
-                raise PublishRefusal(
-                    f"awid-service {awid_version} is not publicly available before {prefix} publication"
-                )
-            time.sleep(6)
     for package, directory in packages:
         with tempfile.TemporaryDirectory(prefix="aweb-pypi-") as temporary:
             dist = Path(temporary)
@@ -222,231 +178,11 @@ def publish_pypi(root: Path, prefix: str, version: str) -> None:
             )
 
 
-def build_npm_lane(root: Path, prefix: str) -> tuple[str, str, str]:
-    directory, package, profile = NPM_LANES[prefix]
-    if prefix in {"channel-v", "pi-v"}:
-        run(root / "channel-core", "npm", "ci", "--no-audit", "--no-fund", capture=False)
-        run(root / "channel-core", "npm", "run", "build", capture=False)
-    if prefix in {"channel-v", "pi-v"}:
-        run(root / directory, "npm", "ci", "--no-audit", "--no-fund", capture=False)
-        run(root / directory, "npm", "run", "build", capture=False)
-    else:
-        run(root / "packages/claude-skills", "npm", "run", "sync-skills", capture=False)
-        run(root / "packages/claude-ai-skills", "./build-zips.sh", capture=False)
-    return directory, package, profile
-
-
-def require_pi_aw_floor(root: Path, timeout_seconds: float = 180) -> str:
-    manifest = json.loads((root / "pi-extension/package.json").read_text(encoding="utf-8"))
-    declared = (manifest.get("dependencies") or {}).get("@awebai/aw")
-    matched = re.fullmatch(rf"\^({SEMVER})", declared or "")
-    if not matched:
-        raise PublishRefusal(
-            f"pi-extension must declare one strict @awebai/aw caret floor, got {declared!r}"
-        )
-    floor = matched.group(1)
-    deadline = time.monotonic() + timeout_seconds
-    url = f"https://registry.npmjs.org/%40awebai%2Faw/{floor}"
-    while True:
-        status, _ = request_json(url)
-        if status == 200:
-            return floor
-        if status != 404:
-            raise PublishRefusal(f"npm returned unexpected HTTP {status} for @awebai/aw@{floor}")
-        if time.monotonic() >= deadline:
-            raise PublishRefusal(
-                f"@awebai/aw@{floor} is not public before Pi publication"
-            )
-        time.sleep(6)
-
-
-@contextmanager
-def _npm_publish_staged(root: Path, directory: str, package: str, profile: str, version: str, *, staged_final: bool = False):
-    """Publish/adopt once; keep the exact archive alive until readback finishes."""
-    token = os.environ.get("NODE_AUTH_TOKEN", "").strip() or os.environ.get("NPM_TOKEN", "").strip()
-    if not token:
-        raise PublishRefusal("NODE_AUTH_TOKEN or NPM_TOKEN is required")
-    environment = {**os.environ, "NODE_AUTH_TOKEN": token, "NPM_TOKEN": token}
-    with tempfile.TemporaryDirectory(prefix="aweb-npm-") as temporary:
-        staging = Path(temporary)
-        run(
-            root,
-            "bash",
-            "scripts/npm-exact-publish.sh",
-            "pack-inspect",
-            "--dir",
-            directory,
-            "--version",
-            version,
-            "--out",
-            str(staging),
-            "--profile",
-            profile,
-            "--source-root",
-            ".",
-        )
-        packages = list(staging.glob("*.tgz"))
-        if len(packages) != 1:
-            raise PublishRefusal("npm staging did not contain exactly one package")
-        archive = packages[0]
-        status, observed = request_json(
-            f"https://registry.npmjs.org/{urllib.parse.quote(package, safe='')}/{version}"
-        )
-        action = "publish"
-        if status == 200:
-            tarball = (observed.get("dist") or {}).get("tarball")
-            if not isinstance(tarball, str) or not tarball:
-                raise PublishRefusal("present npm version has no tarball URL")
-            remote = staging / "remote.tgz"
-            try:
-                with urllib.request.urlopen(tarball, timeout=30) as response:
-                    remote.write_bytes(response.read())
-            except OSError as error:
-                raise PublishRefusal(f"npm tarball observation failed: {error}") from error
-            if sha256(remote) != sha256(archive):
-                raise PublishRefusal(
-                    f"{package}@{version} already exists with different bytes"
-                )
-            action = "adopt"
-        elif status == 404:
-            run(
-                root,
-                "bash",
-                "scripts/npm-exact-publish.sh",
-                "publish-exact",
-                "--tgz",
-                str(archive),
-                *(["--staged-final"] if staged_final else []),
-                capture=False,
-                env=environment,
-            )
-        else:
-            raise PublishRefusal(f"npm registry returned unexpected HTTP {status}")
-        yield archive, action, environment
-
-
-def npm_publish_exact(root: Path, directory: str, package: str, profile: str, version: str, *, staged_final: bool = False) -> None:
-    with _npm_publish_staged(root, directory, package, profile, version, staged_final=staged_final) as staged:
-        archive, action, environment = staged
-        run(
-            root,
-            "bash",
-            "scripts/npm-exact-publish.sh",
-            "verify-published-bounded",
-            "--tgz",
-            str(archive),
-            "--package",
-            package,
-            "--version",
-            version,
-            "--post-action",
-            action,
-            "--dist-tag",
-            "next" if staged_final or "-" in version else "latest",
-            env=environment,
-        )
-
-
-def publish_npm(root: Path, prefix: str, version: str) -> None:
-    if prefix == "pi-v":
-        require_pi_aw_floor(root)
-    directory, package, profile = build_npm_lane(root, prefix)
-    npm_publish_exact(root, directory, package, profile, version)
-    if prefix == "skills-v":
-        print("skill ZIPs are staged locally; hosted release assets can be uploaded later")
-
-
-def write_json_version(path: Path, version: str, git_head: str | None = None) -> None:
-    value = json.loads(path.read_text(encoding="utf-8"))
-    value["version"] = version
-    # npm records no gitHead for a published tarball; the manifest carries it.
-    if git_head is not None:
-        value["gitHead"] = git_head
-    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-
-
-def publish_aw_npm(root: Path, version: str, source_sha: str, *, staged_final: bool = False) -> None:
-    packages = {
-        "linux/amd64": ("aw-linux-x64", "aw", "aweb-a2a-gw"),
-        "linux/arm64": ("aw-linux-arm64", "aw", "aweb-a2a-gw"),
-        "darwin/amd64": ("aw-darwin-x64", "aw", "aweb-a2a-gw"),
-        "darwin/arm64": ("aw-darwin-arm64", "aw", "aweb-a2a-gw"),
-        "windows/amd64": ("aw-windows-x64", "aw.exe", "aweb-a2a-gw.exe"),
-        "windows/arm64": ("aw-windows-arm64", "aw.exe", "aweb-a2a-gw.exe"),
-    }
-    npm_root = root / "cli/go/npm"
-    ldflags = (
-        f"-s -w -X main.version={version} -X main.commit={source_sha} "
-        "-X main.commitRepo=github.com/awebai/aweb -X main.date=1970-01-01T00:00:00Z"
-    )
-    for platform, (package_dir, aw_name, gateway_name) in packages.items():
-        goos, goarch = platform.split("/")
-        binary_dir = npm_root / package_dir / "bin"
-        binary_dir.mkdir(parents=True, exist_ok=True)
-        environment = {**os.environ, "CGO_ENABLED": "0", "GOOS": goos, "GOARCH": goarch}
-        run(
-            root / "cli/go",
-            "go",
-            "build",
-            "-trimpath",
-            "-ldflags",
-            ldflags,
-            "-o",
-            str(binary_dir / aw_name),
-            "./cmd/aw",
-            env=environment,
-            capture=False,
-        )
-        run(
-            root / "cli/go",
-            "go",
-            "build",
-            "-trimpath",
-            "-ldflags",
-            ldflags,
-            "-o",
-            str(binary_dir / gateway_name),
-            "./cmd/aweb-a2a-gw",
-            env=environment,
-            capture=False,
-        )
-        write_json_version(npm_root / package_dir / "package.json", version, source_sha)
-    main_manifest = npm_root / "aw/package.json"
-    value = json.loads(main_manifest.read_text(encoding="utf-8"))
-    value["version"] = version
-    value["gitHead"] = source_sha
-    value["optionalDependencies"] = {
-        name: version for name in sorted(value.get("optionalDependencies", {}))
-    }
-    main_manifest.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
-    # Hold all seven once-staged archives through one verifier invocation.
-    # Publishing/adopting never becomes a retry action on readback uncertainty.
-    with ExitStack() as staging:
-        artifacts = []
-        for package_dir in [item[0] for item in packages.values()] + ["aw"]:
-            package = "@awebai/" + package_dir
-            archive, _, environment = staging.enter_context(_npm_publish_staged(
-                root, str(Path("cli/go/npm") / package_dir), package, "", version,
-                staged_final=staged_final,
-            ))
-            artifacts.extend(("--artifact", f"{package}={archive}"))
-        run(
-            root, "python3", str(npm_root / "readback.py"), *artifacts,
-            "--version", version,
-            "--dist-tag", "next" if staged_final or "-" in version else "latest",
-            "--git-head", source_sha,
-            "--registry", environment.get("NPM_CONFIG_REGISTRY", "https://registry.npmjs.org"),
-            env=environment,
-        )
-    print("npm CLI packages published; hosted binary release assets can be resumed later")
-
-
 OCI_REPOSITORIES = {
-    "server-v": "ghcr.io/awebai/aweb-server",
-    "awid-v": "ghcr.io/awebai/awid",
-    "a2a-gw-v": "ghcr.io/awebai/a2a-gateway",
     "secrets-v": "ghcr.io/awebai/secrets",
     "logs-v": "ghcr.io/awebai/logs",
+    "folio-v": "ghcr.io/awebai/folio",
+    "library-v": "ghcr.io/awebai/library",
 }
 def oci_images(prefix: str) -> tuple[str, ...]:
     """The image repositories published by this tag."""
@@ -457,49 +193,16 @@ def build_oci_archive(
     root: Path, prefix: str, version: str, source_sha: str, archive: Path
 ) -> None:
     """Build the release bytes once; usable by platform qualification without publishing."""
-    if prefix == "server-v":
-        build = [
-            "docker", "buildx", "build", "--file", "server/Dockerfile",
-            "--platform", "linux/amd64,linux/arm64", "--provenance=false", "--sbom=false",
-            "--label", "org.opencontainers.image.title=aweb server",
-            "--label", f"org.opencontainers.image.version={version}",
-            "--label", f"org.opencontainers.image.revision={source_sha}",
-            "--output", f"type=oci,dest={archive}", ".",
-        ]
-    elif prefix == "awid-v":
-        build = [
-            "docker", "buildx", "build", "--file", "awid/Dockerfile.release",
-            "--platform", "linux/amd64,linux/arm64", "--provenance=false", "--sbom=false",
-            "--label", "org.opencontainers.image.title=awid",
-            "--label", "org.opencontainers.image.description=Thin awid.ai registry service wrapper around aweb",
-            "--label", f"org.opencontainers.image.version={version}",
-            "--label", f"org.opencontainers.image.revision={source_sha}",
-            "--output", f"type=oci,dest={archive}", ".",
-        ]
-    elif prefix in {"secrets-v", "logs-v"}:
-        service = "secrets" if prefix == "secrets-v" else "logs"
-        build = [
-            "docker", "buildx", "build", "--file", f"naapp/{service}/Dockerfile",
-            "--platform", "linux/amd64,linux/arm64", "--provenance=false", "--sbom=false",
-            "--build-arg", f"SOURCE_COMMIT={source_sha}",
-            "--label", f"org.opencontainers.image.title=aweb {service}",
-            "--label", f"org.opencontainers.image.version={version}",
-            "--label", f"org.opencontainers.image.revision={source_sha}",
-            "--output", f"type=oci,dest={archive}", ".",
-        ]
-    else:
-        build = [
-            "docker", "buildx", "build", "--file", "cli/go/Dockerfile.a2a-gw",
-            "--platform", "linux/amd64,linux/arm64", "--provenance=false", "--sbom=false",
-            "--build-arg", f"VERSION={version}", "--build-arg", f"RELEASE_TAG=a2a-gw-v{version}",
-            "--build-arg", f"COMMIT={source_sha}", "--build-arg", "COMMIT_REPO=github.com/awebai/aweb",
-            "--build-arg", "DATE=1970-01-01T00:00:00Z",
-            "--label", "org.opencontainers.image.title=aweb A2A Gateway",
-            "--label", "org.opencontainers.image.description=Hosted A2A gateway for aweb agents",
-            "--label", f"org.opencontainers.image.version={version}",
-            "--label", f"org.opencontainers.image.revision={source_sha}",
-            "--output", f"type=oci,dest={archive}", "cli/go",
-        ]
+    app = prefix.removesuffix("-v")
+    build = [
+        "docker", "buildx", "build", "--file", f"naapp/{app}/Dockerfile",
+        "--platform", "linux/amd64,linux/arm64", "--provenance=false", "--sbom=false",
+        "--build-arg", f"SOURCE_COMMIT={source_sha}",
+        "--label", f"org.opencontainers.image.title=aweb {app}",
+        "--label", f"org.opencontainers.image.version={version}",
+        "--label", f"org.opencontainers.image.revision={source_sha}",
+        "--output", f"type=oci,dest={archive}", ".",
+    ]
     run(root, *build, capture=False)
 
 
@@ -634,13 +337,6 @@ def publish(root: Path, tag: str, *, only: str | None = None, recovery: bool = F
         or (only == "oci" and prefix in OCI_REPOSITORIES)
     ):
         raise PublishRefusal(f"{tag} does not publish to {only}")
-    # The annotated release tag carries the choice across the distribution
-    # repository too; an ambient environment override would be lost there.
-    staged_final = False
-    if prefix == "aw-v":
-        channel = run(root, "python3", "cli/go/npm/publication.py", "channel",
-                      "--version", version, "--tag", tag, "--repository", str(root))
-        staged_final = channel == "next" and "-rc." not in version
     with tempfile.TemporaryDirectory(prefix="aweb-publish-") as temporary:
         checkout = Path(temporary) / "source"
         run(root, "git", "worktree", "add", "--detach", str(checkout), source_sha, timeout=120)
@@ -650,10 +346,6 @@ def publish(root: Path, tag: str, *, only: str | None = None, recovery: bool = F
             if prefix in OCI_REPOSITORIES and only != "pypi":
                 publish_oci(checkout, prefix, version, source_sha, recovery=recovery,
                             first_publication=first_publication)
-            elif prefix in NPM_LANES:
-                publish_npm(checkout, prefix, version)
-            elif prefix == "aw-v":
-                publish_aw_npm(checkout, version, source_sha, staged_final=staged_final)
         finally:
             run(root, "git", "worktree", "remove", "--force", str(checkout), timeout=120)
 

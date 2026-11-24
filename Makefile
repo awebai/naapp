@@ -2,7 +2,8 @@
 # calls only these targets. PACKAGES narrows a run to the packages a change
 # affects (scripts/affected_packages.py); by default it is every package.
 
-PACKAGES ?= naapp-lib naapp/folio naapp/library naapp/logs naapp/secrets naapp/secrets/runner naapp/secrets/values
+ALL_PACKAGES := naapp-lib naapp/folio naapp/library naapp/logs naapp/secrets naapp/secrets/runner naapp/secrets/values
+PACKAGES ?= $(ALL_PACKAGES)
 
 # The suites run behind the egress guard, which refuses network access beyond
 # loopback and the reserved test names.
@@ -15,10 +16,12 @@ PRODUCTION_AWID_PROJECT := scripts/test-egress/production-awid
 # The aw release the e2e journeys run, installed by scripts/install-aw.sh.
 AW_DIR ?= $(abspath .tools/bin)
 
-SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_served_manifest_digests test_secrets_shards
+SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_served_manifest_digests \
+	test_secrets_shards test_shipping
 
 .PHONY: affected sync lint test test-scripts production-awid-sync browsers aw \
-	check-library-aatk check-secrets-shards e2e-folio e2e-library e2e-secrets
+	check-library-aatk check-secrets-shards e2e-folio e2e-library e2e-secrets release-checks \
+	release-candidate release-publish
 
 # The packages the change from BASE to HEAD affects, as a JSON list.
 affected:
@@ -89,3 +92,27 @@ e2e-secrets:
 check-secrets-shards:
 	uv sync --frozen --project naapp/secrets
 	$(MAKE) -C naapp/secrets check-shards
+
+# Everything CI runs, for every package: scripts/release_candidate.py tags a
+# commit only after this passes. It needs PostgreSQL and Redis for the suites
+# and Docker for the journeys, as the CI jobs have them.
+release-checks:
+	$(MAKE) sync PACKAGES="$(ALL_PACKAGES)"
+	$(MAKE) lint PACKAGES="$(ALL_PACKAGES)"
+	$(MAKE) test-scripts
+	$(MAKE) check-library-aatk
+	$(MAKE) check-secrets-shards
+	$(MAKE) test PACKAGES="$(ALL_PACKAGES)"
+	$(MAKE) aw
+	$(MAKE) e2e-folio
+	$(MAKE) e2e-library
+	$(MAKE) e2e-secrets
+
+# Runs release-checks on a clean commit of origin/main, then tags it (docs/release.md).
+release-candidate:
+	@test -n "$(TAGS)" || { echo "TAGS is required" >&2; exit 2; }
+	python3 scripts/release_candidate.py $(TAGS)
+
+release-publish:
+	@test -n "$(TAG)" || { echo "TAG is required" >&2; exit 2; }
+	python3 scripts/publish_release.py "$(TAG)"

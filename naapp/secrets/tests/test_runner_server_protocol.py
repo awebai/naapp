@@ -72,13 +72,16 @@ async def test_server_consumes_request_vectors(db, case):
         )
 
 
-def test_server_assignment_matches_s0_signed_bytes():
+@pytest.mark.parametrize(
+    "case",
+    [case for case in VECTOR["assignments"] if "error" not in case["expected"]],
+    ids=lambda case: case["name"],
+)
+def test_server_assignment_matches_s0_signed_bytes(case):
     from nacl.signing import SigningKey
 
     from aweb_secrets.runner_protocol import sign_assignment
-    from tests.test_runner_protocol_vectors import verify_assignment
 
-    case = next(c for c in VECTOR["assignments"] if c["name"] == "valid")
     expected = json.loads(case["body_json"])
     p = expected["assignment"]
     result = sign_assignment(
@@ -94,7 +97,6 @@ def test_server_assignment_matches_s0_signed_bytes():
         expires_at=at(p["expires_at"]),
     )
     assert result == expected
-    assert verify_assignment(dict(case, body_json=json.dumps(result))) == p
 
 
 async def test_only_verified_requests_consume_and_pruning_keeps_skew_pad(db):

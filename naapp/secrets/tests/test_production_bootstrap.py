@@ -661,3 +661,28 @@ async def test_console_pages_offer_retry_and_scoped_sign_in(root, registry, monk
     sign_in = await client.get(console + scoped)
     assert sign_in.status_code == 200
     assert f'id="login" data-scope="{owner.scope}"' in sign_in.text
+
+
+@pytest.fixture
+def prompt_installation_status(monkeypatch):
+    """The coordination server lets Secrets reuse an installation status for
+    one second; the seconds to wait past it."""
+    monkeypatch.setenv("AWEB_APP_GRANT_MAX_AGE_SECONDS", "1")
+    return 1.1
+
+
+async def test_an_owner_signs_in_after_secrets_last_heard_of_its_installation(
+    prompt_installation_status, root
+):
+    # Nothing else happens in between: no owner act or delivery asks the
+    # coordination server about the installation again.
+    _, client, configured, *_ = root
+    owner = await enrolled_owner(root)
+    await asyncio.sleep(prompt_installation_status)
+    human = configured.console_origin
+    options = await client.post(human + "/login/options", json={"scope": owner.scope})
+    assert options.status_code == 200, options.text
+    logged = await client.post(
+        human + "/login", json={"scope": owner.scope, "assertion": owner.device.get(options.json())}
+    )
+    assert logged.status_code == 200, logged.text

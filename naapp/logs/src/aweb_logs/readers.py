@@ -172,6 +172,12 @@ class ReaderDirectory:
                 )
         return readers
 
+    async def team_of(self, scope: str) -> str | None:
+        """The team of the ``logs.reader`` holding recorded for ``scope``,
+        current or ended; None for any other scope. Local reads only."""
+        record = await self.record(scope)
+        return None if record is None else record.team_id
+
     async def record(self, scope: str) -> Reader | None:
         """The ``logs.reader`` holding recorded for ``scope``, current or
         ended, as a reader of its installation and team. It admits nothing."""

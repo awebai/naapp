@@ -16,7 +16,7 @@ from aweb_naapp.console import ConsoleSessions, ContactEnrolment, ScopeMember, s
 from aweb_naapp.runtime import human_member
 from aweb_naapp.runtime.human_member import HumanMemberProof, check_human_member
 from aweb_naapp.runtime.team_auth import AWIDTeamCache
-from tests.console.support import OWNER_A, OWNER_B, Console
+from tests.console.support import OWNER_A, OWNER_B, Console, NoInstallation
 from tests.console.test_console_session import (
     Owner,
     _client,
@@ -44,7 +44,11 @@ class Members:
 
 def _sessions(console: Console, members: Members) -> ConsoleSessions:
     return ConsoleSessions(
-        console.db, passkeys=console.passkeys, scopes=console.admits, member=members
+        console.db,
+        passkeys=console.passkeys,
+        scopes=console.admits,
+        member=members,
+        installations=NoInstallation(),
     )
 
 

@@ -107,6 +107,8 @@ class Deployment:
     # The installed manifest: logs' version 3, which declares its reader role.
     manifest: bytes
     server_db: Any
+    # The coordination server's transport, whose ``down`` cuts logs off from it.
+    server: Any
     db: Any
     humans: HumanNamespace
     devices: dict[str, SoftAuthenticator] = field(default_factory=dict)
@@ -238,6 +240,7 @@ async def deployment(
                         looked_up=looked_up,
                         manifest=manifest,
                         server_db=server_db,
+                        server=coordination.server.transport,
                         db=db,
                         humans=humans,
                     )
@@ -582,3 +585,34 @@ async def test_a_designation_without_logs_governance_target_changes_nothing_unti
         )
         is not None
     )
+
+
+async def test_a_reader_signs_in_and_reads_after_logs_last_heard_of_its_installation(
+    prompt_installation_status: float, deployment: Deployment
+):
+    # Nothing else happens in between: no owner act, delivery or ingest asks the
+    # coordination server about the installation again.
+    scope = await designated_reader(deployment)
+    await asyncio.sleep(prompt_installation_status)
+    assert (await log_in(deployment, scope)).status_code == 200
+    await asyncio.sleep(prompt_installation_status)
+    assert (await deployment.console.get("/v1/events")).status_code == 200
+
+
+async def test_logs_refuses_a_reader_while_it_cannot_hear_of_the_installation(
+    prompt_installation_status: float, deployment: Deployment
+):
+    scope = await designated_reader(deployment)
+    assert (await log_in(deployment, scope)).status_code == 200
+    await asyncio.sleep(prompt_installation_status)
+    deployment.server.down = True
+    try:
+        unavailable = (503, {"detail": "authority_unavailable"})
+        options = await deployment.console.post("/login/options", json={"scope": scope})
+        assert (options.status_code, options.json()) == unavailable
+        read = await deployment.console.get("/v1/events")
+        assert (read.status_code, read.json()) == unavailable
+    finally:
+        deployment.server.down = False
+    # The outage refused those requests only: the session it held still reads.
+    assert (await deployment.console.get("/v1/events")).status_code == 200

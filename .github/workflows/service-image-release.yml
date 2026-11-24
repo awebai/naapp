@@ -2,17 +2,17 @@ name: Publish service image
 
 on:
   push:
-    tags: ["server-v*", "awid-v*", "secrets-v*", "logs-v*"]
+    tags: ["secrets-v*", "logs-v*", "folio-v*", "library-v*"]
   # Publishes an existing tag's image again with main's publisher, for a tag
   # whose own run could not publish it. The image is built from the tag's commit.
   workflow_dispatch:
     inputs:
       tag:
-        description: "Existing release tag (server-v*, awid-v*, secrets-v*, logs-v*)"
+        description: "Existing release tag (secrets-v*, logs-v*, folio-v*, library-v*)"
         required: true
         type: string
       first_publication:
-        description: "An image repository this run creates (e.g. ghcr.io/awebai/aweb-server); empty for none"
+        description: "An image repository this run creates (e.g. ghcr.io/awebai/folio); empty for none"
         required: false
         default: ""
         type: string

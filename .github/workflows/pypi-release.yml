@@ -3,10 +3,9 @@ name: Publish Python package
 on:
   push:
     tags:
-      - "server-v*"
-      - "awid-service-v*"
       - "aweb-naapp-v*"
       - "aweb-secrets-runner-v*"
+      - "secrets-v*"
 
 permissions:
   contents: read

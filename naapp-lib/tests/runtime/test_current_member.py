@@ -171,6 +171,7 @@ async def test_runtime_uses_the_request_verifiers_bounded_cache(registry, member
         NaappSettings(
             _env_file=None, database_url=db.config.get_dsn(), db_schema=db.schema,
             app_id="example", public_origin=ORIGIN, awid_registry_url=REGISTRY_URL,
+            awid_service_token=None,
         ),
         module_name="example", migrations_path=migrations, manifest_path=manifest,
         awid_transport=registry.transport,

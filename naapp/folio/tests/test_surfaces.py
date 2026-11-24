@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import tomllib
+from importlib.metadata import version
 from pathlib import Path
 from uuid import UUID
 
 from aweb_layout import (
     aweb_candidate_roots,
-    aweb_path,
     is_aweb_root,
     searched_roots,
     shadowing_local_source,
@@ -34,21 +35,18 @@ def _override_db_for_path(app, path: str) -> None:
 def test_aweb_naapp_imports_from_this_checkouts_naapp_lib() -> None:
     import aweb_naapp
 
-    source = aweb_path("naapp-lib", "src")
+    source = Path(__file__).resolve().parents[3] / "naapp-lib" / "src"
     assert shadowing_local_source(aweb_naapp.__file__, [source]) == source, (
         f"aweb_naapp was imported from {Path(aweb_naapp.__file__).resolve()}, not from this "
         f"checkout's naapp-lib ({source})"
     )
 
 
-def test_awid_imports_from_this_checkouts_awid() -> None:
-    import awid
-
-    source = aweb_path("awid", "src")
-    assert shadowing_local_source(awid.__file__, [source]) == source, (
-        f"awid was imported from {Path(awid.__file__).resolve()}, not from this "
-        f"checkout's awid ({source})"
-    )
+def test_awid_is_the_release_the_lock_pins() -> None:
+    lock = tomllib.loads((Path(__file__).resolve().parents[1] / "uv.lock").read_text(encoding="utf-8"))
+    (locked,) = [package for package in lock["package"] if package["name"] == "awid-service"]
+    assert locked["source"] == {"registry": "https://pypi.org/simple"}
+    assert version("awid-service") == locked["version"]
 
 
 def test_the_lock_fetches_no_dependency_from_git() -> None:

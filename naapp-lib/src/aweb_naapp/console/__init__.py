@@ -43,7 +43,7 @@ from aweb_naapp.hooks.strictjson import Refused
 from aweb_naapp.runtime.approvals import AuthenticationFailed
 from aweb_naapp.runtime.credential_audit import GovernanceUnavailable
 from aweb_naapp.runtime.human_member import HumanMemberProof
-from aweb_naapp.runtime.installation import InstallationRefused
+from aweb_naapp.runtime.installation import InstallationFence, InstallationRefused
 from aweb_naapp.runtime.passkeys import ContactChangeRefused, EnrolmentRefused, Passkeys
 
 if TYPE_CHECKING:
@@ -194,6 +194,55 @@ ScopeAdmission = Callable[[str], Awaitable[bool]]
 MemberAdmission = Callable[[str], Awaitable[ScopeMember]]
 
 
+class InstallationUnobservable(HTTPException):
+    """A session refusal: the scope's stale installation could not be observed
+    again. It refuses this request only, with the installation's own status
+    and code, and leaves the session open."""
+
+    def __init__(self, refused: InstallationRefused) -> None:
+        super().__init__(status_code=refused.status, detail=refused.code)
+
+
+class ScopeInstallations(Protocol):
+    """The installation behind each console scope, as the app records it.
+
+    An app's scope admission and B3's proof context read the installation
+    record by SQL alone. This says when that record must be observed again
+    first, so a scope is not refused only because nothing else has asked the
+    coordination server about its installation lately."""
+
+    async def stale(self, scope: str) -> str | None:
+        """The team whose installation the app knows ``scope`` by, when that
+        installation is active as last observed but no longer fresh; None for
+        any other scope. Local reads only: a login asks before it meters."""
+        ...
+
+    async def refresh(self, team_id: str) -> None:
+        """Observe the team's installation again. It raises
+        :class:`InstallationRefused` (503) when that cannot be done, which
+        refuses the request."""
+        ...
+
+
+@dataclass(frozen=True)
+class FencedInstallations:
+    """:class:`ScopeInstallations` of an app whose scopes each belong to one
+    team's installation, recorded by its :class:`InstallationFence`;
+    ``team_of`` names the team of a scope the app knows, by local reads."""
+
+    fence: InstallationFence
+    team_of: Callable[[str], Awaitable[str | None]]
+
+    async def stale(self, scope: str) -> str | None:
+        team_id = await self.team_of(scope)
+        if team_id is None or not await self.fence.is_stale(team_id):
+            return None
+        return team_id
+
+    async def refresh(self, team_id: str) -> None:
+        await self.fence.refresh(team_id)
+
+
 class SessionEnded(HTTPException):
     """A definite member refusal that closed the session of ``scope``."""
 
@@ -221,6 +270,11 @@ class ConsoleSessions:
     403 for a holder who is not one, which ends the session, 503 when that
     cannot be read, which refuses the request only, and 403 for any scope it
     does not name.
+
+    ``installations`` says when a scope's installation must be observed again
+    before ``scopes`` is asked, at login and on every cookie request; an
+    installation that cannot be observed refuses the request with 503 and
+    leaves the session open.
     """
 
     def __init__(
@@ -230,6 +284,7 @@ class ConsoleSessions:
         passkeys: Passkeys,
         scopes: ScopeAdmission,
         member: MemberAdmission,
+        installations: ScopeInstallations,
         ttl: timedelta = MAX_SESSION,
         key_bound: Callable[[Request], Awaitable[ConsoleSession]] | None = None,
     ) -> None:
@@ -240,6 +295,7 @@ class ConsoleSessions:
         self.passkeys = passkeys
         self.scopes = scopes
         self.member = member
+        self.installations = installations
         self._key_bound = key_bound
 
     async def open(self, *, subject: str, scope: str, evidence_ref: str) -> IssuedSession:
@@ -301,6 +357,15 @@ class ConsoleSessions:
                 raise self._required()
             return await self._key_bound(request)
         row = await self._cookie_row(request)
+        await self._observe_installation(row["scope"])
+        if not (
+            await self.passkeys.login_evidence_is_current(
+                row["scope"], row["subject"], row["evidence_ref"]
+            )
+            and await self.scopes(row["scope"])
+        ):
+            await self._close(bytes(row["token_sha256"]))
+            raise self._required()
         try:
             member = await self.member(row["scope"])
         except HTTPException as refused:
@@ -319,9 +384,22 @@ class ConsoleSessions:
             member=member,
         )
 
+    async def _observe_installation(self, scope: str) -> None:
+        """Observe the scope's installation again when it is stale, so the
+        scope's admission reads it current. An installation that cannot be
+        observed refuses this request as a session refusal, a 503 that leaves
+        the session open."""
+        team_id = await self.installations.stale(scope)
+        if team_id is None:
+            return
+        try:
+            await self.installations.refresh(team_id)
+        except InstallationRefused as refused:
+            raise InstallationUnobservable(refused) from None
+
     async def _cookie_row(self, request: Request) -> Any:
-        """The open session row of the request's cookie, by local reads only. A
-        state change must also carry its CSRF token."""
+        """The open, unexpired session row of the request's cookie, by local
+        reads only. A state change must also carry the row's CSRF token."""
         token = request.cookies.get(COOKIE_NAME)
         if not token:
             raise self._required()
@@ -334,14 +412,6 @@ class ConsoleSessions:
         )
         if row is None:
             raise self._required()
-        if not (
-            await self.passkeys.login_evidence_is_current(
-                row["scope"], row["subject"], row["evidence_ref"]
-            )
-            and await self.scopes(row["scope"])
-        ):
-            await self._close(bytes(row["token_sha256"]))
-            raise self._required()
         if request.method not in SAFE_METHODS:
             supplied = request.headers.get(CSRF_HEADER, "")
             if not hmac.compare_digest(_sha256(supplied), bytes(row["csrf_sha256"])):
@@ -349,9 +419,10 @@ class ConsoleSessions:
         return row
 
     async def logout(self, request: Request) -> None:
-        """Close the request's own session. A cookie session closes without the
-        membership check, so it can be ended by anyone who holds it, whatever
-        their membership and while that cannot be read."""
+        """Close the request's own session. A cookie session closes on its live
+        row and exact CSRF token alone, by local reads: anyone who holds it can
+        end it, whatever their membership or installation, and while neither
+        can be read."""
         from aweb_naapp.console.handoff_wire import CONSOLE_SIGNATURE_HEADERS
 
         if any(name in request.headers for name in CONSOLE_SIGNATURE_HEADERS):
@@ -529,14 +600,21 @@ def console_login_router(
     is neither metered nor passed to B3. An accepted scope is rate-limited per
     client, and B3 verifies the assertion with user verification required. A
     verified login opens a session for that scope and returns its CSRF token.
+    A scope whose installation is stale is metered first, then its installation
+    is observed again, and only then is the scope admitted.
     """
     router = APIRouter(prefix=prefix, route_class=ConsoleRoute)
     passkeys = sessions.passkeys
 
     async def admit(request: Request, scope: str) -> None:
-        if not await sessions.scopes(scope):
+        stale = await sessions.installations.stale(scope)
+        if stale is None and not await sessions.scopes(scope):
             raise HTTPException(status_code=401, detail=LOGIN_REFUSED)
         await limiter.admit(request, scope)
+        if stale is not None:
+            await sessions.installations.refresh(stale)
+            if not await sessions.scopes(scope):
+                raise HTTPException(status_code=401, detail=LOGIN_REFUSED)
 
     @router.post("/login/options")
     async def login_options(request: Request, body: LoginOptionsRequest) -> dict[str, Any]:

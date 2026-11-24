@@ -125,9 +125,9 @@ class KnownValues:
         if not self._forms:
             return data, 0
         if self._pattern is None:
-            self._pattern = re.compile(
-                b"|".join(b"(" + form.fragment() + b")" for form in self._forms)
-            )
+            # Keep the leading literals visible to the regex search. The empty
+            # group still identifies the matching form for the replacement.
+            self._pattern = re.compile(b"|".join(form.fragment() + b"()" for form in self._forms))
         count = 0
 
         def replace(match: re.Match[bytes]) -> bytes:

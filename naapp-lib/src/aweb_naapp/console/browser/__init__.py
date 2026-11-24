@@ -33,9 +33,10 @@ _ASSETS = files(__package__)
 
 
 @dataclass(frozen=True)
-class MemberRefusal:
-    """What a person reads, and can do, when a member check refuses them. The
-    remedy names the deployment's app id as ``{app_id}``."""
+class SessionRefusal:
+    """What a person reads, and can do, when the session refuses them: the
+    member check, or an installation the console cannot observe. The remedy
+    names the deployment's app id as ``{app_id}``."""
 
     status: int
     message: str
@@ -46,8 +47,8 @@ class MemberRefusal:
 
 # By the refusal's code. An empty link reloads the page that was refused; a
 # definite refusal has closed the session, so sign-in does not lead back to it.
-MEMBER_REFUSALS = {
-    "principal_not_member": MemberRefusal(
+SESSION_REFUSALS = {
+    "principal_not_member": SessionRefusal(
         403,
         "Your current team membership does not open this console.",
         "If you are a member, sign in once from aw with “aw app human {app_id} session”, then "
@@ -55,16 +56,23 @@ MEMBER_REFUSALS = {
         "/login",
         "Go to sign-in",
     ),
-    "principal_not_human": MemberRefusal(
+    "principal_not_human": SessionRefusal(
         403,
         "This console needs a member identity registered as a person’s.",
         "Ask the team’s owner how your identity is registered.",
         "/login",
         "Go to sign-in",
     ),
-    "principal_status_unavailable": MemberRefusal(
+    "principal_status_unavailable": SessionRefusal(
         503,
         "Your team membership cannot be checked right now.",
+        "Try again in a moment.",
+        "",
+        "Try again",
+    ),
+    "authority_unavailable": SessionRefusal(
+        503,
+        "This console cannot reach your team’s server right now.",
         "Try again in a moment.",
         "",
         "Try again",
@@ -72,9 +80,9 @@ MEMBER_REFUSALS = {
 }
 
 
-def member_refusal(error: HTTPException) -> MemberRefusal | None:
-    """The member check's refusal ``error`` is, or None for any other error."""
-    refusal = MEMBER_REFUSALS.get(error.detail) if isinstance(error.detail, str) else None
+def session_refusal(error: HTTPException) -> SessionRefusal | None:
+    """The session refusal ``error`` is, or None for any other error."""
+    refusal = SESSION_REFUSALS.get(error.detail) if isinstance(error.detail, str) else None
     return refusal if refusal is not None and refusal.status == error.status_code else None
 
 
@@ -158,10 +166,10 @@ class ConsoleShell:
                 "data-copy-waiting": copy.waiting,
                 "data-copy-failed": copy.failed,
                 "data-copy-sign-out-failed": copy.sign_out_failed,
-                "data-copy-member-refusals": json.dumps(
+                "data-copy-session-refusals": json.dumps(
                     {
                         code: f"{refusal.message} {self._remedy(refusal)}"
-                        for code, refusal in MEMBER_REFUSALS.items()
+                        for code, refusal in SESSION_REFUSALS.items()
                     }
                 ),
             }
@@ -203,13 +211,13 @@ class ConsoleShell:
             f"{escape(copy.reauth_link)}</a></section>",
         )
 
-    def _remedy(self, refusal: MemberRefusal) -> str:
+    def _remedy(self, refusal: SessionRefusal) -> str:
         return refusal.remedy.replace("{app_id}", self.brand.app_id)
 
     def refused_page(self, error: HTTPException) -> Response:
-        """A browser GET's refusal by the session: a member refusal as a page
+        """A browser GET's refusal by the session: a session refusal as a page
         with its remedy, a 401 as a redirect to sign-in, any other raised again."""
-        refusal = member_refusal(error)
+        refusal = session_refusal(error)
         if refusal is None:
             return _login_redirect(error)
         action_href = refusal.action_href

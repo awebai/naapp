@@ -1,6 +1,7 @@
 """Navigation refusals offer recovery without changing JSON/API refusals."""
 
 import asyncio
+from contextlib import nullcontext
 from uuid import uuid4
 
 import pytest
@@ -8,6 +9,7 @@ from aweb_naapp.console import CONSOLE_HEADERS, COOKIE_NAME
 from playwright.async_api import expect
 
 from tests.console_network import passkey_origin as passkey_origin
+from tests.test_change_sets import unreachable
 from tests.test_console_reconciliation_browser import browser as browser
 from tests.test_console_reconciliation_browser import service as service
 from tests.test_console_reconciliation_browser import signed_in_page
@@ -51,24 +53,29 @@ async def test_refused_navigation_is_an_inert_recovery_page(
                 "reconciliation_not_found",
             )
 
-        before = await snapshot(uses.world.db)
-        api_response = await context.request.get(origin + api)
-        assert api_response.status == status
-        assert await api_response.json() == {"detail": code}
+        # A stale installation is observed again first; refused while its
+        # authority cannot be reached.
+        with unreachable() if case == "authority" else nullcontext():
+            before = await snapshot(uses.world.db)
+            api_response = await context.request.get(origin + api)
+            assert api_response.status == status
+            assert await api_response.json() == {"detail": code}
 
-        response = await page.goto(origin + path)
-        assert response is not None and response.status == status
-        for name, value in CONSOLE_HEADERS.items():
-            assert await response.header_value(name) == value
-        await page.screenshot(path=tmp_path / f"recovery-{case}-{width}.png", full_page=True)
-        await expect(page.locator("#console-recovery")).to_be_visible()
-        await expect(page.locator("#console-recovery-action")).to_have_attribute(
-            "href", "/activity"
-        )
-        await expect(page.locator("#reconciliation-choice")).to_have_count(0)
-        await expect(page.locator(".activity-entry")).to_have_count(0)
-        assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
-        assert await snapshot(uses.world.db) == before
+            response = await page.goto(origin + path)
+            assert response is not None and response.status == status
+            for name, value in CONSOLE_HEADERS.items():
+                assert await response.header_value(name) == value
+            await page.screenshot(path=tmp_path / f"recovery-{case}-{width}.png", full_page=True)
+            await expect(page.locator("#console-recovery")).to_be_visible()
+            # The session's own refusal reloads the refused page; the page's
+            # own refusal leads back to the activity view.
+            await expect(page.locator("#console-recovery-action")).to_have_attribute(
+                "href", "" if case == "authority" else "/activity"
+            )
+            await expect(page.locator("#reconciliation-choice")).to_have_count(0)
+            await expect(page.locator(".activity-entry")).to_have_count(0)
+            assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+            assert await snapshot(uses.world.db) == before
 
 
 @pytest.mark.parametrize("width", [375, 1440])

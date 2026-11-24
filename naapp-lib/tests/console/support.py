@@ -35,6 +35,19 @@ from tests.runtime.approvals.support import AuditOutbox
 from tests.runtime.approvals.test_passkeys import Contacts
 
 HUMAN = "https://console.example"
+
+
+class NoInstallation:
+    """The installations of a console whose scopes belong to no app
+    installation: none is ever stale, so none is observed."""
+
+    async def stale(self, scope: str) -> str | None:
+        return None
+
+    async def refresh(self, team_id: str) -> None:
+        raise AssertionError("a scope of no installation is never refreshed")
+
+
 OWNER_A = "app.owner.a"
 OWNER_B = "app.owner.b"
 
@@ -58,7 +71,12 @@ class Console:
 
     def sessions(self, ttl: timedelta = MAX_SESSION) -> ConsoleSessions:
         return ConsoleSessions(
-            self.db, passkeys=self.passkeys, scopes=self.admits, member=self.member, ttl=ttl
+            self.db,
+            passkeys=self.passkeys,
+            scopes=self.admits,
+            member=self.member,
+            installations=NoInstallation(),
+            ttl=ttl,
         )
 
     async def enrol(self, scope: str, contact: str | None = None) -> tuple[str, SoftAuthenticator]:

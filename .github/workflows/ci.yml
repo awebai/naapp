@@ -80,14 +80,25 @@ jobs:
       - name: Test the selection, digests, shards and test infrastructure
         run: make test-scripts
 
+  # Two shards that together are the whole suite: tests/runtime, and every
+  # other test. Either shard failing fails the job.
   naapp-lib:
-    name: naapp-lib lint and tests
+    name: naapp-lib lint and tests (${{ matrix.shard }})
     needs: plan
     if: contains(fromJSON(needs.plan.outputs.packages), 'naapp-lib')
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - shard: runtime
+            tests: tests/runtime
+          - shard: rest
+            tests: --ignore=tests/runtime
     env:
       PACKAGES: naapp-lib
+      NAAPP_LIB_TESTS: ${{ matrix.tests }}
       TEST_DB_HOST: localhost
       TEST_DB_PORT: "5432"
       TEST_DB_USER: postgres

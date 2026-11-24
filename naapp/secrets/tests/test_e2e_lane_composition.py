@@ -3,27 +3,37 @@ before any container starts (docker-compose.e2e.yml and the lane fixtures)."""
 
 import json
 import re
+from subprocess import CompletedProcess
 from urllib.parse import urlsplit
 
+import pytest
 import yaml
+from aweb_naapp_testing.compose_lane import (
+    BASE_COMPOSE,
+    ComposeLane,
+    front_caddyfile,
+    identity_folder,
+    machine_dir,
+)
+from cryptography import x509
 
 from tests.test_e2e_owner_acts import (
+    API,
     APP_DIR,
     AWEB,
     CONSOLE,
+    DOMAIN,
     LANE_SUBNET,
     LOGS_API,
     LOGS_COMPOSE_ENV,
     LOGS_CONSOLE,
     REGISTRY,
     UPSTREAMS,
-    front_caddyfile,
-    identity_folder,
-    machine_dir,
     secrets_env,
 )
 
 LANE = yaml.safe_load((APP_DIR / "docker-compose.e2e.yml").read_text())
+COMMON = yaml.safe_load(BASE_COMPOSE.read_text())
 LOGS_BASE = (APP_DIR.parent / "logs" / "compose.logs.yaml").read_text()
 REQUIRED = re.compile(r"\$\{([A-Z0-9_]+):\?")
 
@@ -40,7 +50,7 @@ def test_the_lanes_logs_is_the_deployments_base_with_its_files_read_only():
     logs = LANE["services"]["logs"]
     assert logs["extends"] == {"file": "../logs/compose.logs.yaml", "service": "logs"}
     assert logs["profiles"] == ["logs"]
-    assert "${SECRETS_E2E_RUNTIME:?}/logs:/run/secrets/logs:ro" in logs["volumes"]
+    assert "${NAAPP_E2E_RUNTIME:?}/logs:/run/secrets/logs:ro" in logs["volumes"]
     # Only the disposable registry and private CA differ from the base service.
     assert logs["environment"] == {
         "APP_ENV": "development",
@@ -61,25 +71,44 @@ def test_the_lanes_logs_uses_the_lanes_registry_and_mail_and_an_id_of_its_own():
     assert json.loads(env["LOGS_EGRESS_DENIED_NETWORKS"]) == []
 
 
-def test_the_front_serves_logs_and_aweb_installs_it_from_its_internal_origin():
-    front = LANE["services"]["front"]["networks"]["default"]["aliases"]
-    assert {"api.logs.svc.test", "console.logs.svc.test"} <= set(front)
-    origins = json.loads(LANE["services"]["aweb"]["environment"]["AWEB_APP_INTERNAL_ORIGINS"])
-    assert LOGS_API in origins
+@pytest.fixture
+def prepared_lane(tmp_path):
+    lane = ComposeLane(
+        "test-lane", tmp_path, APP_DIR / "docker-compose.e2e.yml",
+        env={"NAAPP_E2E_AWID_SERVICE_TOKEN": "unused-placeholder"},
+        subnet=LANE_SUBNET,
+    )
+    lane.prepare(
+        domain=DOMAIN,
+        upstreams=UPSTREAMS,
+        app_origins=(API, LOGS_API),
+        controller_did="did:key:placeholder",
+    )
+    return lane
+
+
+def test_the_front_serves_logs_and_aweb_installs_it_from_its_internal_origin(prepared_lane):
+    override = json.loads((prepared_lane.runtime / "lane.override.json").read_text())
+    aliases = override["services"]["front"]["networks"]["default"]["aliases"]
+    assert {"api.logs.svc.test", "console.logs.svc.test"} <= set(aliases)
+    assert json.loads(prepared_lane.env["NAAPP_E2E_APP_ORIGINS"]) == [API, LOGS_API]
     assert UPSTREAMS["api.logs.svc.test"] == UPSTREAMS["console.logs.svc.test"] == "logs:8765"
 
 
-def test_the_team_server_origin_resolves_only_to_the_lanes_tls_front():
-    aweb = LANE["services"]["aweb"]
-    front = LANE["services"]["front"]
+def test_the_team_server_origin_resolves_only_to_the_lanes_tls_front(prepared_lane):
+    aweb = COMMON["services"]["aweb"]
+    front = COMMON["services"]["front"]
     origin = urlsplit(AWEB)
+    override = json.loads((prepared_lane.runtime / "lane.override.json").read_text())
     assert origin.scheme == "https" and origin.port is None
     assert aweb["environment"]["AWEB_PUBLIC_ORIGIN"] == AWEB
-    assert origin.hostname in front["networks"]["default"]["aliases"]
+    assert origin.hostname in override["services"]["front"]["networks"]["default"]["aliases"]
     assert origin.hostname not in aweb.get("networks", {}).get("default", {}).get("aliases", [])
-    assert UPSTREAMS[origin.hostname] == f"aweb:{aweb['environment']['AWEB_PORT']}"
+    assert f"reverse_proxy aweb:{aweb['environment']['AWEB_PORT']}" in (
+        prepared_lane.runtime / "front" / "Caddyfile"
+    ).read_text()
     assert set(front["depends_on"]) == {"aweb"}
-    assert LANE["services"]["cli"]["environment"]["SSL_CERT_FILE"] == "/runtime/tls/ca.pem"
+    assert COMMON["services"]["cli"]["environment"]["SSL_CERT_FILE"] == "/runtime/tls/ca.pem"
     assert secrets_env()["SSL_CERT_FILE"] == secrets_env()["SECRETS_HOOK_CA_FILE"]
 
 
@@ -101,9 +130,12 @@ def test_secrets_sends_its_governance_and_use_events_to_the_lanes_logs():
     assert env["SECRETS_CONSOLE_ORIGIN"] == CONSOLE
 
 
-def test_the_lane_subnet_is_the_one_the_compose_file_fixes():
-    subnet = LANE["networks"]["default"]["ipam"]["config"][0]["subnet"]
-    assert subnet == "${SECRETS_E2E_SUBNET:-" + LANE_SUBNET + "}"
+def test_the_lane_subnet_is_the_one_the_compose_file_fixes(prepared_lane):
+    config = json.loads((prepared_lane.runtime / "lane.override.json").read_text())
+    network = config["networks"]["default"]
+    assert network["internal"] is True
+    assert network["ipam"]["config"] == [{"subnet": LANE_SUBNET}]
+    assert prepared_lane.env["NAAPP_E2E_SUBNET"] == LANE_SUBNET
 
 
 def test_the_owners_identity_is_issued_into_the_folder_the_controller_machine_selects():
@@ -113,3 +145,47 @@ def test_the_owners_identity_is_issued_into_the_folder_the_controller_machine_se
     assert machine_dir("controller") == "/runtime/controller"
     assert identity_folder("controller") == machine_dir("controller") + "/.aw"
     assert identity_folder("controller") != identity_folder("holder")
+
+
+def test_variants_have_independent_routes_on_the_same_lane(tmp_path):
+    lane = ComposeLane("variant-lane", tmp_path, APP_DIR / "docker-compose.e2e.yml")
+    routes = {
+        "library-token.svc.test": "library-token:8000",
+        "library-private.svc.test": "library-private:8000",
+    }
+    origins = [f"https://{host}" for host in routes]
+    tls = lane.prepare(
+        domain=DOMAIN,
+        upstreams=routes,
+        app_origins=origins,
+        controller_did="did:key:placeholder",
+    )
+
+    certificate = x509.load_pem_x509_certificate(tls.cert_file.read_bytes())
+    names = certificate.extensions.get_extension_for_class(x509.SubjectAlternativeName).value
+    assert set(names.get_values_for_type(x509.DNSName)) == {*routes, "aweb.svc.test"}
+    config = json.loads((tmp_path / "lane.override.json").read_text())
+    aliases = config["services"]["front"]["networks"]["default"]["aliases"]
+    assert set(aliases) == {*routes, "aweb.svc.test"}
+    caddyfile = (tmp_path / "front" / "Caddyfile").read_text()
+    for host, target in routes.items():
+        assert f"{host}:443 {{\n  tls " in caddyfile
+        assert f"  reverse_proxy {target}\n" in caddyfile
+    assert json.loads(lane.env["NAAPP_E2E_APP_ORIGINS"]) == origins
+
+
+def test_lane_command_failure_redacts_configured_tokens_and_keys(prepared_lane):
+    private_line = "disposable-test-key-content"
+    key = f"-----BEGIN PRIVATE KEY-----\n{private_line}\n-----END PRIVATE KEY-----"
+    prepared_lane.redact(key)
+    result = CompletedProcess(
+        ["docker"], 1, stdout="registry token: unused-placeholder\n",
+        stderr=f"separate key line: {private_line}\n{key}\n",
+    )
+
+    with pytest.raises(AssertionError) as error:
+        prepared_lane.checked(result, "start registry")
+    assert str(error.value) == (
+        "start registry: registry token: [redacted]\n"
+        "separate key line: [redacted]\n[redacted]\n"
+    )

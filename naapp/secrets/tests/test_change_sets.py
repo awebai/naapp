@@ -12,8 +12,8 @@ import json
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -46,7 +46,7 @@ from aweb_naapp.runtime.approvals import (
     DeliveryStatus,
     PgApprovalStore,
 )
-from aweb_naapp.runtime.authorization import Grant
+from aweb_naapp.runtime.authorization import Grant, GrantUnavailable
 from aweb_naapp.runtime.clock import seconds_to_ns
 from aweb_naapp.runtime.credential_audit import CredentialAudit
 from aweb_naapp.runtime.installation import (
@@ -110,9 +110,23 @@ CAROL = PrincipalKey(
 APP_ID = "secrets"
 
 
+@contextmanager
+def unreachable() -> Iterator[None]:
+    """The installation authority cannot be reached inside the block: every
+    fence that observes :class:`Installations` is refused."""
+    Installations.reachable = False
+    try:
+        yield
+    finally:
+        Installations.reachable = True
+
+
 class Installations:
     """The installation's grant, as the app-to-team-server source reports it:
     fresh for 55 seconds from each observation, inside the fence's 60."""
+
+    # Whether the authority answers; :func:`unreachable` turns it off.
+    reachable = True
 
     def __init__(self, *, team_id: str = TEAM, app_id: str = APP_ID) -> None:
         self.team_id = team_id
@@ -132,6 +146,8 @@ class Installations:
         return self.grant if team_id == self.team_id else None
 
     async def status_for(self, team_id: str) -> SimpleNamespace | None:
+        if not Installations.reachable:
+            raise GrantUnavailable("the installation authority cannot be reached")
         if team_id != self.team_id:
             return None
         grant = self.grant

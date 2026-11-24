@@ -4,6 +4,9 @@ export default defineConfig({
   testDir: "./tests",
   testMatch: "**/*.spec.mjs",
   workers: 1,
+  // No git metadata: on a CI pull request Playwright would fetch the base
+  // commit, a network call the test egress guard refuses.
+  captureGitInfo: { commit: false, diff: false },
   use: { baseURL: `http://127.0.0.1:${port}`, ignoreHTTPSErrors: true },
   webServer: {
     command: `../.venv/bin/python -m aweb_naapp.pages.gallery --port ${port}`,

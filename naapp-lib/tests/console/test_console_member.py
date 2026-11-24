@@ -19,6 +19,7 @@ from aweb_naapp.runtime.team_auth import AWIDTeamCache
 from tests.console.support import OWNER_A, OWNER_B, Console, NoInstallation
 from tests.console.test_console_session import (
     Owner,
+    _blocked_by,
     _client,
     _login,
     _session,
@@ -26,7 +27,6 @@ from tests.console.test_console_session import (
 )
 
 TEAM = "people:example.com"
-WINDOW_NS = 61 * 1_000_000_000
 
 
 @dataclass
@@ -154,23 +154,26 @@ async def test_a_proof_that_expires_during_a_lock_wait_refuses_the_effect(
             return await session_is_current(tx, session, hold=True)
 
     assert await effect()
-    async with console.db.transaction() as tx:
-        await tx.execute(
-            "SELECT 1 FROM {{tables.console_sessions}} WHERE token_sha256=$1 FOR UPDATE",
-            session.token_sha256,
-        )
-        waiting = asyncio.create_task(effect())
-        async with asyncio.timeout(10):
-            while not await console.db.fetch_value(
-                "SELECT EXISTS(SELECT 1 FROM pg_stat_activity"
-                " WHERE datname=current_database() AND wait_event_type='Lock')"
-            ):
-                assert not waiting.done()
-                await asyncio.sleep(0.01)
-        now = human_member.monotonic_ns
-        monkeypatch.setattr(human_member, "monotonic_ns", lambda: now() + WINDOW_NS)
-    with pytest.raises(HTTPException) as refused:
-        await waiting
+    waiting = None
+    try:
+        async with console.db.transaction() as tx:
+            holder = await tx.fetch_value("SELECT pg_backend_pid()")
+            await tx.execute(
+                "SELECT 1 FROM {{tables.console_sessions}} WHERE token_sha256=$1 FOR UPDATE",
+                session.token_sha256,
+            )
+            waiting = asyncio.create_task(effect())
+            assert await _blocked_by(console, holder), "the effect did not wait on the session row"
+            assert not waiting.done()
+            assert proof.is_fresh()
+            monkeypatch.setattr(human_member, "monotonic_ns", lambda: proof.fresh_until + 1)
+        with pytest.raises(HTTPException) as refused:
+            await asyncio.wait_for(waiting, 5)
+    finally:
+        if waiting is not None:
+            if not waiting.done():
+                waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
     assert (refused.value.status_code, refused.value.detail) == (
         503,
         "principal_status_unavailable",

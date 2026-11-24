@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import tomllib
 from pathlib import Path
 
@@ -7,21 +8,31 @@ import pytest
 import yaml
 
 _REPO_ROOT = Path(__file__).parents[1]
-_AWEB_ROOT = Path(__file__).parents[3]
+_ROOT = Path(__file__).parents[3]
 
 
 def _workflow() -> dict:
-    # Library's CI lives at the AWEB repository root, not at Library's own root.
-    # GitHub Actions reads .github/workflows only at the root of the repository
-    # it is running in, so after the subtree move a workflow under
-    # naapp/library/.github/workflows never runs at all. Asserting against a
-    # file in that location would guard a workflow that cannot fire - the exact
-    # shape this programme keeps finding.
-    path = _AWEB_ROOT / ".github" / "workflows" / "library-ci.yml"
-    assert path.is_file(), "Library has no pull-request CI workflow at the aweb root"
+    # Library's CI is the repository's CI, at the repository root: GitHub
+    # Actions reads .github/workflows only there, so a workflow under
+    # naapp/library/.github/workflows never runs at all.
+    path = _ROOT / ".github" / "workflows" / "ci.yml"
+    assert path.is_file(), "the repository has no pull-request CI workflow at its root"
     loaded = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
     assert isinstance(loaded, dict)
     return loaded
+
+
+def _recipe(target: str) -> str:
+    """The recipe of one target of the root Makefile, every CI step's entry point."""
+    makefile = (_ROOT / "Makefile").read_text(encoding="utf-8")
+    match = re.search(rf"^{re.escape(target)}:[^\n]*\n((?:\t[^\n]*\n?)+)", makefile, re.MULTILINE)
+    assert match, f"the root Makefile has no {target} target"
+    return match.group(1)
+
+
+def _commands(*jobs: str) -> str:
+    workflow = _workflow()
+    return "\n".join(step.get("run", "") for job in jobs for step in workflow["jobs"][job]["steps"])
 
 
 def test_library_has_no_buried_workflow_that_cannot_run() -> None:
@@ -32,7 +43,7 @@ def test_library_has_no_buried_workflow_that_cannot_run() -> None:
     """
     buried = _REPO_ROOT / ".github" / "workflows"
     assert not buried.exists(), (
-        f"{buried} cannot be reached by GitHub Actions - Library's CI belongs at the aweb root"
+        f"{buried} cannot be reached by GitHub Actions - Library's CI belongs at the repository root"
     )
 
 
@@ -55,16 +66,9 @@ def test_make_test_uses_the_locked_uv_environment() -> None:
 
 
 def test_ci_provides_postgres_so_database_tests_cannot_skip() -> None:
-    workflow = _workflow()
-    assert workflow["env"]["LIBRARY_REQUIRE_TEST_DATABASE"] == "1"
-
-    assert any("postgres" in job.get("services", {}) for job in workflow["jobs"].values())
-    commands = "\n".join(
-        step.get("run", "")
-        for job in workflow["jobs"].values()
-        for step in job["steps"]
-    )
-    assert "systemctl restart docker" not in commands
+    assert "LIBRARY_REQUIRE_TEST_DATABASE=1" in _recipe("test")
+    assert "postgres" in _workflow()["jobs"]["library"]["services"]
+    assert "systemctl restart docker" not in _commands("library", "library-e2e")
 
 
 def test_ci_break_glass_requires_visible_protection_restoration() -> None:
@@ -142,126 +146,59 @@ def test_ci_runs_every_make_gate_on_main_pull_request_and_manual_retry() -> None
 
     assert set(workflow["on"]) == {"push", "pull_request", "workflow_dispatch"}
     assert workflow["on"]["push"] == {"branches": ["main"]}
-    steps = [step for job in workflow["jobs"].values() for step in job["steps"]]
-    commands = "\n".join(step.get("run", "") for step in steps)
-    for target in ("lint", "aatk-spec-check", "test", "e2e"):
+    commands = _commands("library", "library-e2e")
+    for target in ("lint", "check-library-aatk", "test", "e2e-library"):
         assert f"make {target}" in commands
+    assert "naapp/library aatk-spec-check" in _recipe("check-library-aatk")
+    assert "naapp/library e2e" in _recipe("e2e-library")
 
 
-@pytest.mark.parametrize("filename", ["folio-ci.yml", "library-ci.yml"])
-def test_ci_builds_the_aw_client_from_the_checkout(filename: str) -> None:
-    workflow = yaml.load(
-        (_AWEB_ROOT / ".github" / "workflows" / filename).read_text(encoding="utf-8"),
-        Loader=yaml.BaseLoader,
-    )
-    steps = workflow["jobs"]["quality"]["steps"]
-    commands = "\n".join(step.get("run", "") for step in steps)
-    setup_go = [step for step in steps if step.get("uses", "").startswith("actions/setup-go@")]
+def test_ci_runs_the_e2e_with_the_pinned_aw_release() -> None:
+    """The e2e runs the aw release scripts/install-aw.sh pins, never a build.
 
-    assert "AW_VERSION" not in workflow.get("env", {})
-    assert setup_go[0]["with"]["go-version-file"] == "cli/go/go.mod"
-    assert "make -C cli/go build" in commands
-    assert 'cli/go" >> "$GITHUB_PATH"' in commands
-    assert "scripts/check-naapp-e2e-aw.sh" in commands
-    assert "npm install" not in commands
-
-
-def test_ci_builds_the_e2e_stack_from_the_commit_under_test() -> None:
-    """The e2e must build awid from THIS checkout, never from a pinned copy.
-
-    Before the subtree move Library was its own repository, so a pinned
-    external aweb was the only way to get awid and pinning it was correct.
-    Now aweb is the repository being tested, and a pinned copy would mean a
-    pull request that changes awid/ gets a green Library e2e built against
-    some other awid. Measured cost of exactly that mistake elsewhere in this
-    repo: the deleted hosted comprehensive gate pinned awebai/library at a rev
-    missing 13 files and differing in 22 more, so its e2e built a Library with
-    no AATK in it.
+    The journey's real client is a released aw, so the e2e proves Library
+    against what users install.
     """
     workflow = _workflow()
-    steps = [step for job in workflow["jobs"].values() for step in job["steps"]]
-    checkouts = [step for step in steps if step.get("uses", "").startswith("actions/checkout@")]
-
-    foreign = [
-        step for step in checkouts
-        if (step.get("with") or {}).get("repository") not in (None, "", "${{ github.repository }}")
-    ]
-    assert not foreign, (
-        "the e2e stack must be built from the commit under test; "
-        f"found external checkout(s): {[s.get('with', {}).get('repository') for s in foreign]}"
-    )
-
-    # docker-compose.e2e.yml defaults this to ../aweb, a sibling-checkout path
-    # that resolves to naapp/aweb from here and does not exist. It has to be
-    # set explicitly, and it has to point at the checkout root.
-    contexts = [
-        (step.get("env") or {}).get("LIBRARY_E2E_AWEB_CONTEXT")
-        for step in steps
-        if (step.get("env") or {}).get("LIBRARY_E2E_AWEB_CONTEXT")
-    ]
-    assert contexts, "the e2e step must set LIBRARY_E2E_AWEB_CONTEXT"
-    assert all("github.workspace" in context for context in contexts), contexts
+    steps = workflow["jobs"]["library-e2e"]["steps"]
+    commands = [step.get("run", "") for step in steps]
+    assert commands.index("make aw") < commands.index("make e2e-library")
+    assert not any(step.get("uses", "").startswith("actions/setup-go@") for step in steps)
+    assert "go build" not in "\n".join(commands)
+    assert "scripts/install-aw.sh" in _recipe("aw")
+    assert "scripts/check-naapp-e2e-aw.sh" in _recipe("e2e-library")
 
 
-def test_cli_e2e_builds_library_from_the_commit_under_test() -> None:
-    """The CLI real-stack e2e builds this Library, not the old standalone repository.
+def test_the_e2e_stack_runs_published_awid_by_digest() -> None:
+    """The e2e stack's registry is a published awid image pinned by digest.
 
-    Library builds from the repository root against the in-repo awid and naapp-lib,
-    so a separately checked-out Library would test other code. A change to Library
-    or naapp-lib must also trigger the workflow.
+    awid is aweb's, released from aweb; a tag can move under a run, a digest
+    cannot. No other repository is checked out to build it.
     """
-    path = _AWEB_ROOT / ".github" / "workflows" / "cli-e2e.yml"
-    workflow = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
-    steps = [step for job in workflow["jobs"].values() for step in job["steps"]]
-    repositories = [
-        (step.get("with") or {}).get("repository")
-        for step in steps
+    steps = [step for job in _workflow()["jobs"].values() for step in job["steps"]]
+    foreign = [
+        step for step in steps
         if step.get("uses", "").startswith("actions/checkout@")
+        and (step.get("with") or {}).get("repository") not in (None, "", "${{ github.repository }}")
     ]
-    assert "awebai/library" not in repositories, repositories
-    assert not any("LIBRARY_E2E_LIBRARY_CONTEXT" in (step.get("env") or {}) for step in steps)
-    triggers = workflow["on"]["pull_request"]["paths"]
-    assert {"naapp/library/**", "naapp-lib/**"} <= set(triggers), triggers
+    assert not foreign, f"found external checkout(s): {[s.get('with', {}).get('repository') for s in foreign]}"
+
+    compose = yaml.safe_load((_REPO_ROOT / "docker-compose.e2e.yml").read_text(encoding="utf-8"))
+    image = compose["services"]["awid"].get("image", "")
+    assert re.fullmatch(r"ghcr\.io/awebai/awid:[0-9.]+@sha256:[0-9a-f]{64}", image), image
+    assert "build" not in compose["services"]["awid"]
 
 
 def test_ci_also_covers_naapp_lib() -> None:
-    """naapp-lib is a dependency of both movers and had no CI before the move.
-
-    Guarded here rather than in naapp-lib's own suite for two reasons: both jobs
-    live in this one workflow file, so a single guard over that file is the right
-    granularity; and naapp-lib's dev dependencies are pytest, ruff and mypy with
-    no yaml, so asserting there would mean adding a dependency and touching its
-    lockfile for one test. The coupling is deliberate and stated - if naapp-lib
-    is ever extracted, this assertion moves with its job.
-    """
-    workflow = _workflow()
-    jobs = workflow["jobs"]
-    assert "naapp-lib" in jobs, (
-        "naapp-lib had no CI before the subtree move; leaving it uncovered in a "
-        "repo that has CI is aweb-aavw criterion 5's recorded decision, and that "
-        "decision was to cover it"
-    )
-    steps = jobs["naapp-lib"]["steps"]
-    commands = "\n".join(step.get("run", "") for step in steps)
-    assert "uv sync --locked" in commands
-    assert "uv run pytest" in commands
-    assert "uv run ruff check" in commands
-    assert "uv run mypy" in commands
-    # Every run step must NAME naapp-lib. Allowing None here would have let the
-    # field be deleted entirely and still pass - caught by mutation, not review:
-    # removing `working-directory` ran the steps at the repository root against
-    # aweb's own pyproject, and the permissive form stayed green. Keying on
-    # "naapp-lib or absent" instead of "naapp-lib" is the same defect charlie
-    # measured in folio's guard, which keys on a spelling rather than a property.
-    for step in steps:
-        if step.get("run"):
-            assert step.get("working-directory") == "naapp-lib", step
+    """naapp-lib is a dependency of both Folio and Library, with a job of its own."""
+    job = _workflow()["jobs"]["naapp-lib"]
+    assert job["env"]["PACKAGES"] == "naapp-lib"
+    commands = _commands("naapp-lib")
+    for target in ("sync", "lint", "test"):
+        assert f"make {target}" in commands
 
 
-@pytest.mark.parametrize(
-    ("filename", "job"), [("folio-ci.yml", "quality"), ("library-ci.yml", "naapp-lib")]
-)
-def test_ci_runs_naapp_lib_tests_the_way_the_release_gate_does(filename: str, job: str) -> None:
+def test_ci_runs_naapp_lib_tests_the_way_the_release_gate_does() -> None:
     """naapp-lib's suite runs behind the test egress guard, with Redis.
 
     The guard forwards the governance browser's RP host to loopback for both
@@ -269,46 +206,31 @@ def test_ci_runs_naapp_lib_tests_the_way_the_release_gate_does(filename: str, jo
     A bare run fails both at setup, so CI would be red for its own reasons
     rather than the code's.
     """
-    workflow = yaml.load(
-        (_AWEB_ROOT / ".github" / "workflows" / filename).read_text(encoding="utf-8"),
-        Loader=yaml.BaseLoader,
-    )
-    definition = workflow["jobs"][job]
-    runs = [
-        step
-        for step in definition["steps"]
-        if step.get("working-directory") == "naapp-lib"
-        and any(command in step.get("run", "") for command in ("make test", "pytest"))
-    ]
-    assert len(runs) == 1, runs
-    assert runs[0]["run"].startswith("python3 ../scripts/test-egress/native.py -- "), runs[0]
-    assert "redis" in definition.get("services", {}), definition.get("services")
-    environment = {**definition.get("env", {}), **runs[0].get("env", {})}
-    assert environment.get("REDIS_URL") == "redis://localhost:6379/0"
+    assert "$(TEST_EGRESS_RUNNER)" in _recipe("test")
+    makefile = (_ROOT / "Makefile").read_text(encoding="utf-8")
+    assert "TEST_EGRESS_RUNNER ?= python3 $(abspath scripts/test-egress/native.py) --" in makefile
+    job = _workflow()["jobs"]["naapp-lib"]
+    assert "redis" in job["services"]
+    assert job["env"]["REDIS_URL"] == "redis://localhost:6379/0"
 
 
-def test_ci_runs_library_targets_from_the_subtree_path() -> None:
-    """make runs in naapp/library, not at the aweb root, or it runs aweb's Makefile.
+def test_ci_runs_library_targets_on_library() -> None:
+    """Library's jobs run the root targets for naapp/library and nothing else.
 
-    Scoped to the library job on purpose. Iterating every job would force any
-    future job that legitimately runs make elsewhere into naapp/library, which
-    is an assertion about jobs this test knows nothing about.
-
-    The command test is on the first token rather than `"make " in run`: that
-    substring also matches "cmake --build". Only over-constraining, and there is
-    no cmake here, but a containment test keyed on a command name is the shape
-    that has cost this repo repeatedly - a denylist matching by spelling instead
-    of by position is the same defect measured in folio's Makefile guard.
+    Every step runs make at the repository root, whose lint and test recipes
+    enter each package in PACKAGES; a job that ran them elsewhere, or for other
+    packages, would leave Library untested while reading as covered.
     """
-    steps = _workflow()["jobs"]["quality"]["steps"]
-    for step in steps:
-        commands = step.get("run", "").splitlines()
-        for line in commands:
-            words = line.split()
-            if words[:1] != ["make"]:
-                continue
-            directory = Path(step.get("working-directory", "."))
-            if "-C" in words:
-                directory /= words[words.index("-C") + 1]
-            if any(target in words for target in ("lint", "aatk-spec-check", "test", "e2e")):
-                assert directory == Path("naapp/library"), step
+    workflow = _workflow()
+    for name in ("library", "library-e2e"):
+        job = workflow["jobs"][name]
+        assert job["env"]["PACKAGES"] == "naapp/library"
+        assert "'naapp/library'" in job["if"]
+        for step in job["steps"]:
+            for line in step.get("run", "").splitlines():
+                words = line.split()
+                if words[:1] == ["make"]:
+                    assert "working-directory" not in step, step
+                    assert "-C" not in words, step
+    for target in ("lint", "test"):
+        assert "$(MAKE) -C $$package" in _recipe(target)

@@ -1,10 +1,10 @@
 """The single required check passes only when every selected job succeeded."""
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 
 from ci_result import ALWAYS, JOBS, problems
 

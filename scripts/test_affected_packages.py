@@ -1,9 +1,9 @@
 """Which packages a change selects for testing, on this repository's own layout."""
 import json
-from pathlib import Path
 import subprocess
 import sys
 import unittest
+from pathlib import Path
 
 from affected_packages import PACKAGES, affected
 

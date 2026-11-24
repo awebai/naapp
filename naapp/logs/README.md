@@ -90,6 +90,30 @@ recorded when no hook target would admit it ([hook events](../../docs/hook-event
 **Open (aweb-acgh.16.23):** no route delivers these acts yet; owner-act
 delivery covers only the app-role and credential acts.
 
+A legal hold is disclosed in the chain: setting and releasing it append logs'
+own governance entries in the transaction that applies the act. The stored
+verify report (`aweb_logs.ledger.verify_epoch`) lists them under `holds`, next
+to the purged ranges. Each hold has its `hold_id`, `hold_scope`, `actor_ref`
+for an actor hold, the `chain_epoch` and `team_seq` of the entry that set it
+(`set`), and those of its release (`released`, or null while it is active).
+logs sets a hold id once per team, so the id names one hold.
+
+A hold set in an earlier epoch and still active when the epoch starts is
+reported too, so verifying only the current epoch does not miss it. Holds are
+read only from the chain, never from logs' other records, and only a retained
+`post-governance-hook` entry produced by its own epoch's logs origin, whose
+signature verifies, counts; a hold act from any other producer is never a
+hold. Only an existing epoch is verified, so the epochs before it are closed,
+and their governance entries, which no purge reaches, are read through their
+own index before the team's head lock is taken. The report re-checks each of
+those entries' signatures but not the earlier epochs' links: deleted entries
+of an earlier epoch are caught only by verifying that epoch against a
+checkpoint kept outside logs, the one whose hash the next genesis records.
+
+**Open (aweb-acgh.16.24):** the Go chain verifier does not report holds, and
+an export bundle does not carry the earlier epochs' governance entries, so
+`aw audit verify --bundle` reports no holds.
+
 ## Restoring the content database
 
 Every purge first commits a tombstone for each event it purges to the purge

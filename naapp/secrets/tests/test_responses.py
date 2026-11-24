@@ -9,6 +9,7 @@ import json
 import secrets
 
 import pytest
+from aweb_secrets_values import credential_shapes
 
 from aweb_secrets.redaction import KnownValues
 from aweb_secrets.responses import handle_response
@@ -46,6 +47,27 @@ def test_an_ordinary_response_is_returned_whole() -> None:
     assert result.undeclared_credential is False
     assert result.truncated is False
     assert result.upstream_bytes == len(body)
+
+
+def test_expiry_in_final_projection_redaction_is_not_a_credential_finding(monkeypatch) -> None:
+    known = _known()
+    redact_json = known.redact_json
+    now = 0.0
+    monkeypatch.setattr(credential_shapes, "monotonic", lambda: now)
+
+    def redact_and_advance(data):
+        nonlocal now
+        result = redact_json(data)
+        if "/password" in json.loads(data):
+            now = 100.0
+        return result
+
+    monkeypatch.setattr(known, "redact_json", redact_and_advance)
+    result = _handle(b'{"password":"generated"}', projection=["/password"], known=known)
+    assert result.disposition == "withheld"
+    assert result.withheld_reason == "response_scan_unavailable"
+    assert result.body is None
+    assert not result.undeclared_credential
 
 
 def test_only_allowed_headers_without_credential_shapes_pass() -> None:

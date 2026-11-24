@@ -1,11 +1,14 @@
 """Owner-defined broker response limits reach the real DNS/TLS egress path."""
 
+import asyncio
 import copy
 import json
+from threading import Event
 
 import pytest
 from fastapi import Response
 
+from aweb_secrets import responses
 from aweb_secrets.change import ChangeRefused, covered_bytes, parse_change, validate_change
 from aweb_secrets.console_forms.grants import _configuration
 from aweb_secrets.destination import DestinationInvalid, DestinationRecord
@@ -183,3 +186,55 @@ async def test_configured_operation_limit_controls_actual_upstream_bytes(
     assert result.truncated is cut
     assert result.upstream_bytes == (maximum if cut else len(raw))
     assert result.body == (raw[:maximum] if cut else raw)
+
+
+async def test_small_broker_request_completes_while_maximum_response_is_processed(
+    upstream, monkeypatch
+):
+    small_body = b'{"data":"ready"}'
+    opening, closing = b'{"data":"', b'"}'
+    large_body = opening + b"." * (CEILING - len(opening) - len(closing)) + closing
+
+    @upstream.app.post("/concurrent-response/{charge}")
+    async def response(charge: str):
+        return Response(
+            large_body if charge == "ch_large" else small_body, media_type="application/json"
+        )
+
+    operation = _template(
+        upstream,
+        url={"host": NAME, "port": upstream.port, "path": "/concurrent-response/{charge}"},
+        response={"projection": None, "max_bytes": CEILING, "content_types": ["application/json"]},
+    )
+
+    def request(charge):
+        return render_operation(
+            operation,
+            {"charge": charge, "amount_minor_units": 1, "currency": "EUR"},
+            headers=[],
+            idempotency_key=charge,
+        )
+
+    loop = asyncio.get_running_loop()
+    entered, release = asyncio.Event(), Event()
+    scan = responses.has_credential_shape
+
+    def hold_large_scan(body, **kwargs):
+        if len(body) == CEILING:
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(10), "peer did not release the large scanner"
+        return scan(body, **kwargs)
+
+    monkeypatch.setattr(responses, "has_credential_shape", hold_large_scan)
+    async with asyncio.TaskGroup() as tasks:
+        large = tasks.create_task(_send(upstream, request("ch_large")))
+        try:
+            async with asyncio.timeout(12):
+                await entered.wait()
+                small = await _send(upstream, request("ch_small"))
+            assert small.result.body == small_body
+            assert not large.done()
+        finally:
+            release.set()
+
+    assert large.result().result.body == large_body

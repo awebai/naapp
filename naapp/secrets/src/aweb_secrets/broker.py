@@ -25,6 +25,7 @@ is used for a secret custody would not open.
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from collections.abc import Mapping, Sequence
@@ -41,12 +42,14 @@ from aweb_naapp.egress import (
     EgressRefused,
     HeaderRules,
 )
+from aweb_secrets_values.credential_shapes import CredentialScan, CredentialScanUnavailable
 
 from aweb_secrets.credential_shapes import is_credential_shaped_value
 from aweb_secrets.injection import Injection, inject
 from aweb_secrets.operation_request import OperationRequest
 from aweb_secrets.redaction import KnownValues
 from aweb_secrets.response_audit import ResponseAudit, ResponseKey, ResponseKeyInvalid
+from aweb_secrets.response_capacity import ResponseReservation
 from aweb_secrets.responses import BrokeredResult, handle_response
 from aweb_secrets.tokens import TokenCache, TokenKey
 
@@ -79,6 +82,20 @@ class BrokeredCall:
     recorded_url: str
     known: KnownValues = field(repr=False)
     audit: ResponseAudit
+
+
+class BrokerInspectionCancelled(asyncio.CancelledError):
+    """The request was cancelled after egress returned a definite response."""
+
+    def __init__(self, result: BrokeredResult, audit: ResponseAudit) -> None:
+        super().__init__()
+        self.result = result
+        self.audit = audit
+
+
+def _observe_worker(worker: asyncio.Future[BrokeredResult]) -> None:
+    if not worker.cancelled():
+        worker.exception()
 
 
 def _required(values: Mapping[str, str], name: str) -> str:
@@ -124,7 +141,9 @@ async def _exchange(
             body=urlencode(form).encode(),
         )
     except (EgressNotSent, EgressOutcomeUnknown) as error:
-        raise TokenExchangeFailed(f"the token endpoint could not be reached ({type(error).__name__})") from None
+        raise TokenExchangeFailed(
+            f"the token endpoint could not be reached ({type(error).__name__})"
+        ) from None
     if response.status != 200 or response.truncated:
         raise TokenExchangeFailed(f"the token endpoint answered {response.status}")
     try:
@@ -204,6 +223,8 @@ async def broker(
     tokens: TokenCache | None = None,
     secret: SecretVersion | None = None,
     content_types: Sequence[str] | None = None,
+    send_timeout: asyncio.Timeout | None = None,
+    reservation: ResponseReservation | None = None,
 ) -> BrokeredCall:
     """Send one request with ``value`` injected; ``headers`` are the agent's.
 
@@ -251,18 +272,50 @@ async def broker(
         body=body,
         bounds=bounds,
     )
-    result = handle_response(
-        status=response.status,
-        headers=response.headers,
-        body=response.body,
-        truncated=response.truncated,
-        max_bytes=max_bytes,
-        projection=projection,
-        known=injection.known,
-        token_issuing=token_issuing,
-        content_types=content_types,
-    )
+    scan_budget = None
+    if send_timeout is not None:
+        # Egress has completed. Inspection may use the remaining dispatch
+        # time, but expiring now withholds the result of a known effect.
+        send_until = send_timeout.when()
+        if send_until is not None:
+            scan_budget = send_until - asyncio.get_running_loop().time()
+        send_timeout.reschedule(None)
+    scan = CredentialScan() if scan_budget is None else CredentialScan.within(scan_budget)
+    cancelled = False
+    try:
+        scan.check()
+        worker = asyncio.create_task(
+            asyncio.to_thread(
+                handle_response,
+                status=response.status,
+                headers=response.headers,
+                body=response.body,
+                truncated=response.truncated,
+                max_bytes=max_bytes,
+                projection=projection,
+                known=injection.known,
+                token_issuing=token_issuing,
+                content_types=content_types,
+                scan=scan,
+            )
+        )
+        worker.add_done_callback(_observe_worker)
+        if reservation is not None:
+            reservation.retain_until(worker)
+        async with asyncio.timeout(scan.remaining()):
+            result = await asyncio.shield(worker)
+            scan.check()
+    except (TimeoutError, CredentialScanUnavailable, asyncio.CancelledError) as exc:
+        cancelled = isinstance(exc, asyncio.CancelledError)
+        result = BrokeredResult.withheld(
+            status=response.status,
+            reason="response_scan_unavailable",
+            truncated=response.truncated,
+            upstream_bytes=len(response.body),
+        )
     audit = response_key.record(response.body, upstream_truncated=response.truncated, result=result)
+    if cancelled:
+        raise BrokerInspectionCancelled(result, audit)
     return BrokeredCall(
         result=result, recorded_url=injection.recorded_url, known=injection.known, audit=audit
     )
@@ -280,6 +333,8 @@ async def broker_operation(
     token_destination: Destination | None = None,
     tokens: TokenCache | None = None,
     secret: SecretVersion | None = None,
+    send_timeout: asyncio.Timeout | None = None,
+    reservation: ResponseReservation | None = None,
 ) -> BrokeredCall:
     """Send a rendered named operation with ``value`` injected, bounded and
     handled as its template says. Token issuance is allowed only with
@@ -287,7 +342,9 @@ async def broker_operation(
     Refusal precedes even an OAuth token exchange."""
     if request.token_issuing and request.result_handling != "withhold":
         raise EgressRefused(
-            "token_issuing_denied", "result_handling", "token issuance requires supported result handling"
+            "token_issuing_denied",
+            "result_handling",
+            "token issuance requires supported result handling",
         )
     return await broker(
         egress,
@@ -310,4 +367,6 @@ async def broker_operation(
         tokens=tokens,
         secret=secret,
         content_types=request.content_types,
+        send_timeout=send_timeout,
+        reservation=reservation,
     )

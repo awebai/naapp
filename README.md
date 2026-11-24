@@ -39,6 +39,22 @@ commits that touch the changed paths.
   releases from PyPI, pinned by each project's `uv.lock`.
 - Tests that run `aw` use the release that `scripts/install-aw.sh` installs,
   checked against its recorded sha256.
+- The `test_production_awid` tests run the AWID release production runs, which
+  `scripts/test-egress/production-awid` pins. Move that pin when production
+  moves.
+- The e2e stacks run the published awid and aweb server images, pinned by
+  digest in each app's `docker-compose.e2e.yml`. Secrets' federation CLI has no
+  published image and is built from aweb's source at the commit this
+  repository was extracted from.
+
+## Checks that hold across the move
+
+`scripts/test_served_manifest_digests.py` checks that each app serves the
+manifest bytes it served in aweb. Installations pin an app by its manifest
+digest, so a change there needs every installation to re-pin.
+
+The suites run behind the egress guard in `scripts/test-egress/native.py`,
+which refuses network access beyond loopback and the reserved test names.
 
 ## Temporary copies, deleted when the contracts package publishes
 

@@ -9,3 +9,4 @@ lint:
 
 test:
 	uv run pytest -q
+	cd renderer && npm test

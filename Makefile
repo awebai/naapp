@@ -81,6 +81,11 @@ browsers:
 			(cd $$package && uv run --frozen --no-sync playwright install --with-deps --only-shell chromium); \
 		fi; \
 	done
+ifneq ($(filter naapp-lib,$(PACKAGES)),)
+	# The page renderer's tests drive the Chromium of the renderer's own npm lock.
+	npm ci --ignore-scripts --no-audit --no-fund --prefix naapp-lib/renderer
+	naapp-lib/renderer/node_modules/.bin/playwright install --with-deps --only-shell chromium
+endif
 
 aw:
 	scripts/install-aw.sh $(AW_DIR)

@@ -33,6 +33,29 @@ async def db(test_db_factory):
     return database
 
 
+def test_every_refusal_code_of_the_contract_has_a_case():
+    request_codes = {
+        case["expected"]["error"] for case in VECTOR["requests"] if "error" in case["expected"]
+    }
+    assignment_codes = {
+        case["expected"]["error"] for case in VECTOR["assignments"] if "error" in case["expected"]
+    }
+    assert request_codes == {
+        "runner_request_invalid",
+        "runner_unknown",
+        "runner_request_binding_mismatch",
+        "runner_request_stale",
+        "runner_request_replayed",
+    }
+    assert assignment_codes == {
+        "assignment_invalid",
+        "assignment_wrong_runner",
+        "assignment_binding_mismatch",
+        "assignment_expired",
+        "assignment_replayed",
+    }
+
+
 @pytest.mark.parametrize("case", VECTOR["requests"], ids=lambda case: case["name"])
 async def test_server_consumes_request_vectors(db, case):
     from aweb_naapp.hooks.strictjson import decode_base64url

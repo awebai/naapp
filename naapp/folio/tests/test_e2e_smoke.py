@@ -606,7 +606,7 @@ def _publish_team_server(team: E2ETeam, origin: str) -> None:
 
 
 def _grant_install_admin(team: E2ETeam, env: dict[str, str]) -> None:
-    project = Path(__file__).resolve().parents[3] / "server"
+    project = Path(__file__).resolve().parents[1]
     started = time.monotonic()
     try:
         operator = subprocess.run(
@@ -793,8 +793,8 @@ def _running_coordination_server(
             AWID_REGISTRY_URL=AWID_URL,
             AWID_SERVICE_TOKEN=AWID_SERVICE_TOKEN,
         )
-        # Use the locked server source environment, not an installed aweb artifact.
-        project = Path(__file__).resolve().parents[3] / "server"
+        # Run the aweb server release that Folio's own lock pins.
+        project = Path(__file__).resolve().parents[1]
         runner = tmp_path / "installation-server.py"
         runner.write_text(
             "import sys\n"

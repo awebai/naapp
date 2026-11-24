@@ -31,33 +31,22 @@ class E2EStack:
     awid_url: str
     postgres_url: str
     compose: list[str]
-    redis_url: str | None = None
-
-
-def candidate_hostname(project: str, service: str) -> str:
-    helper = Path(__file__).resolve().parents[3] / "scripts/candidate-network.py"
-    return subprocess.check_output([sys.executable, str(helper), "hostname", project, service], text=True).strip()
 
 
 def e2e_stack(env: Mapping[str, str]) -> E2EStack:
     """The docker-compose stack `make e2e` brings up, as the NAAPP_E2E_* names place it.
 
-    Host runs use the published ports. A candidate runner joins this stack's
-    network and uses its real service endpoints, avoiding Desktop's host port path.
+    Runs use the stack's published ports.
     """
     host = env.get("NAAPP_E2E_HOST", "127.0.0.1")
     project = env.get("NAAPP_E2E_PROJECT", "folio-e2e")
     awid_port = env.get("NAAPP_E2E_AWID_PORT", "18010")
     postgres_port = env.get("NAAPP_E2E_POSTGRES_PORT", "55432")
-    container_network = env.get("NAAPP_E2E_CONTAINER_NETWORK") == "1"
     return E2EStack(
         host=host,
-        awid_url=(f"http://{candidate_hostname(project, 'awid')}:8010" if container_network
-                  else f"http://{host}:{awid_port}"),
-        postgres_url=(f"postgresql://folio:folio@{candidate_hostname(project, 'postgres')}:5432/folio" if container_network
-                      else f"postgresql://folio:folio@{host}:{postgres_port}/folio"),
+        awid_url=f"http://{host}:{awid_port}",
+        postgres_url=f"postgresql://folio:folio@{host}:{postgres_port}/folio",
         compose=["docker", "compose", "-p", project, "-f", "docker-compose.e2e.yml"],
-        redis_url=f"redis://{candidate_hostname(project, 'redis')}:6379/0" if container_network else None,
     )
 
 
@@ -781,10 +770,8 @@ def _running_coordination_server(
         listener.listen()
         port = listener.getsockname()[1]
         origin = f"http://127.0.0.1:{port}"
-        redis_url = STACK.redis_url
-        if redis_url is None:
-            redis_port = _compose("port", "redis", "6379").stdout.strip().rsplit(":", 1)[1]
-            redis_url = f"redis://{STACK.host}:{redis_port}/0"
+        redis_port = _compose("port", "redis", "6379").stdout.strip().rsplit(":", 1)[1]
+        redis_url = f"redis://{STACK.host}:{redis_port}/0"
         env = {k: v for k, v in os.environ.items() if not k.startswith(("AWEB_", "AW_", "AWID_"))}
         env.update(
             AWEB_DATABASE_URL=POSTGRES_URL,

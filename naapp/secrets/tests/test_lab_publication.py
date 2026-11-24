@@ -101,20 +101,30 @@ def write_home(home, member, registry, server, *, file_key=True):
 def human_fixture_binary(tmp_path_factory):
     root = Path(__file__).resolve().parents[3]
     binary = tmp_path_factory.mktemp("lab-human-fixture") / "human-fixture"
-    subprocess.run(
-        [
-            "go",
-            "build",
-            "-o",
-            str(binary),
-            str(Path(__file__).parent / "testdata/lab_human_fixture.go"),
-        ],
-        cwd=root / "cli/go",
-        env={**os.environ, "GOMAXPROCS": "2"},
+    aw_version = subprocess.run(
+        [str(root / "scripts/install-aw.sh"), "--version"],
         check=True,
         capture_output=True,
-        timeout=120,
-    )
+        text=True,
+    ).stdout.strip()
+    # The fixture uses aw's Go packages, so it builds in a module that requires
+    # the aw release the rest of these tests run.
+    module = tmp_path_factory.mktemp("lab-human-fixture-module")
+    shutil.copy(Path(__file__).parent / "testdata/lab_human_fixture.go", module / "main.go")
+    for command in (
+        ["go", "mod", "init", "labhumanfixture"],
+        ["go", "get", f"github.com/awebai/aw@v{aw_version}"],
+        ["go", "mod", "tidy"],
+        ["go", "build", "-o", str(binary), "."],
+    ):
+        subprocess.run(
+            command,
+            cwd=module,
+            env={**os.environ, "GOMAXPROCS": "2"},
+            check=True,
+            capture_output=True,
+            timeout=120,
+        )
     return binary
 
 

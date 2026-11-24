@@ -15,16 +15,14 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture(scope="module")
 def aw_binary(tmp_path_factory):
-    binary = tmp_path_factory.mktemp("secrets-aw") / "aw"
+    directory = tmp_path_factory.mktemp("secrets-aw")
     subprocess.run(
-        ["go", "build", "-o", str(binary), "./cmd/aw"],
-        cwd=ROOT / "cli/go",
-        env={**os.environ, "GOMAXPROCS": "2"},
+        [str(ROOT / "scripts/install-aw.sh"), str(directory)],
         check=True,
         capture_output=True,
         timeout=120,
     )
-    return binary
+    return directory / "aw"
 
 
 @pytest.fixture

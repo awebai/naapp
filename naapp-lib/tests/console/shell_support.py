@@ -30,6 +30,7 @@ from aweb_naapp.console.browser import (
     SignInCopy,
 )
 from aweb_naapp.runtime.origins import split_origins
+from tests.console.support import NoInstallation
 from tests.runtime.credential_audit.support import World
 
 STYLESHEET = "body { margin: 0; }\nmain { max-width: 40rem; margin: auto; padding: 1rem; }\n"
@@ -116,7 +117,11 @@ async def shell_app(world: World, *, human_origin: str, agent_origin: str) -> Sh
         return ContactEnrolment()
 
     sessions = ConsoleSessions(
-        world.db, passkeys=world.passkeys, scopes=admitted, member=member
+        world.db,
+        passkeys=world.passkeys,
+        scopes=admitted,
+        member=member,
+        installations=NoInstallation(),
     )
     limiter = LoginLimiter(
         world.db, client_identity=ClientIdentity(), limit=50, window=timedelta(minutes=1)

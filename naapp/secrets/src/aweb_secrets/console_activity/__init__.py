@@ -14,7 +14,7 @@ from urllib.parse import quote, urlencode
 from uuid import UUID
 
 from aweb_naapp.console import ConsoleRoute, ConsoleSession
-from aweb_naapp.console.browser import member_refusal
+from aweb_naapp.console.browser import session_refusal
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 
@@ -173,7 +173,7 @@ def console_activity_router(*, services: ConsoleActivity) -> APIRouter:
             async with _errors(services.console, current):
                 result, team_id = await services.page(current, before=before, limit=count)
         except HTTPException as refused:
-            if refused.status_code == 401 or member_refusal(refused) is not None:
+            if refused.status_code == 401 or session_refusal(refused) is not None:
                 return shell.refused_page(refused)
             return shell.recovery_page(
                 refused,

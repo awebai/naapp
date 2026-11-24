@@ -115,7 +115,7 @@
       sessionStorage.setItem(csrfKey, result.csrf_token);
       window.location.replace("/");
     } catch (error) {
-      const refusals = JSON.parse(config.copyMemberRefusals);
+      const refusals = JSON.parse(config.copySessionRefusals);
       notice.textContent = Object.hasOwn(refusals, error.detail)
         ? refusals[error.detail] : config.copyFailed;
     } finally {

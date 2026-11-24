@@ -25,6 +25,7 @@ from typing import Any, Literal, Protocol
 from aweb_naapp.console import (
     ConsoleRoute,
     ConsoleSession,
+    InstallationUnobservable,
     KeyBoundConsoleSession,
     session_is_current,
 )
@@ -592,7 +593,7 @@ def console_changes_router(services: ConsoleChanges, *, prefix: str = "") -> API
                 if not isinstance(current, KeyBoundConsoleSession):
                     current = await services.console.sessions.current(request)
                 return await services.confirmation_result(confirmation, current)
-            except InstallationRefused:
+            except (InstallationRefused, InstallationUnobservable):
                 return JSONResponse(applied_receipt)
             except HTTPException as refused:
                 if refused.status_code not in {401, 403} and not (

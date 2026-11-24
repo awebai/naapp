@@ -213,9 +213,20 @@ async def test_team_auth_is_refused_on_the_console(
 
 
 async def test_the_console_is_not_served_on_the_agent_origin(console: Console) -> None:
-    async with _client(_app(console, _limiter(console)), AGENT) as client:
+    subject, device = await console.enrol(OWNER_A)
+    app = _app(console, _limiter(console))
+    async with _client(app, AGENT) as client:
         response = await client.post("/login/options", json={"scope": OWNER_A})
     assert response.status_code == 404
+    assert response.json() == {"detail": "Not Found"}
+    assert "set-cookie" not in response.headers
+
+    async with _client(app) as client:
+        login = await _login(client, device, OWNER_A)
+        assert login.status_code == 200
+        whoami = await client.get("/whoami", headers={"Cookie": _cookie(login)})
+    assert whoami.status_code == 200
+    assert whoami.json() == {"subject": subject, "scope": OWNER_A}
 
 
 async def test_login_responses_carry_the_console_headers(console: Console) -> None:

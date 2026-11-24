@@ -14,6 +14,7 @@ import asyncpg
 import pytest
 from pgdbm import AsyncDatabaseManager, AsyncMigrationManager
 from pgdbm.core import TransactionManager
+from pgdbm.errors import QueryError
 
 from aweb_naapp.dispatch import (
     MIGRATIONS_MODULE,
@@ -552,8 +553,10 @@ async def test_the_exemption_is_the_new_dispatchs_own(
 async def test_an_exempt_dispatch_is_not_blocked_by_an_unknown_one(
     db: AsyncDatabaseManager, machine: Dispatches, recorder: Recorder
 ) -> None:
-    await _unknown(db, recorder)
-    await _admitted(db, machine, retry_exempt=True)
+    unknown_id = await _unknown(db, recorder)
+    dispatch_id = await _admitted(db, machine, retry_exempt=True)
+    assert (await _state(db, machine, unknown_id)).state is State.OUTCOME_UNKNOWN
+    assert (await _state(db, machine, dispatch_id)).state is State.ADMITTED
 
 
 async def _sweep_soon(recorder: Recorder) -> Dispatches:
@@ -756,11 +759,15 @@ async def test_a_dispatching_row_always_has_a_sweep_time(
     db: AsyncDatabaseManager, machine: Dispatches
 ) -> None:
     dispatch_id = await _admitted(db, machine)
-    with pytest.raises(Exception, match="check"):
+    with pytest.raises(QueryError) as refused:
         await db.execute(
             "UPDATE {{tables.dispatches}} SET state = 'dispatching' WHERE dispatch_id = $1",
             dispatch_id,
         )
+    violation = refused.value.__cause__
+    assert isinstance(violation, asyncpg.CheckViolationError)
+    assert violation.constraint_name == "dispatches_check"
+    assert (await _state(db, machine, dispatch_id)).state is State.ADMITTED
 
 
 @pytest.mark.parametrize(

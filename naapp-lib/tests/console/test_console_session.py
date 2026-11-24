@@ -246,15 +246,34 @@ async def test_console_responses_carry_the_console_headers(
 async def test_ended_sessions_are_dropped_as_new_ones_open(
     console: Console, owners: dict[str, Owner]
 ) -> None:
-    async with await _client(console.sessions(ttl=timedelta(seconds=1))) as client:
-        expired, _ = await _login(client, owners)
-        closing, csrf = await _login(client, owners)
-        await client.post("/logout", headers={"Cookie": closing, "X-CSRF-Token": csrf})
-        await asyncio.sleep(1.2)
+    async with await _client(console.sessions()) as client:
+        closing_cookie, csrf = await _login(client, owners)
+        closing = await _session(console, closing_cookie)
+        async with await _client(console.sessions(ttl=timedelta(seconds=1))) as short:
+            expiring_cookie, _ = await _login(short, owners)
+            expiring = await _session(console, expiring_cookie)
+
+        logout = await client.post("/logout", headers={"Cookie": closing_cookie, "X-CSRF-Token": csrf})
+        assert logout.status_code == 200
+        async with asyncio.timeout(5):
+            while not await console.db.fetch_value(
+                "SELECT NOW() >= $1::timestamptz", expiring.expires_at
+            ):
+                await asyncio.sleep(0.01)
+        ended = await console.db.fetch_all(
+            "SELECT token_sha256, closed_at IS NOT NULL AS closed, expires_at <= NOW() AS expired "
+            "FROM {{tables.console_sessions}}"
+        )
+        assert {(row["token_sha256"], row["closed"], row["expired"]) for row in ended} == {
+            (closing.token_sha256, True, False),
+            (expiring.token_sha256, False, True),
+        }
+
         current, _ = await _login(client, owners)
+        session = await _session(console, current)
         assert (await client.get("/whoami", headers={"Cookie": current})).status_code == 200
-    rows = await console.db.fetch_value("SELECT count(*) FROM {{tables.console_sessions}}")
-    assert rows == 1
+    rows = await console.db.fetch_all("SELECT token_sha256 FROM {{tables.console_sessions}}")
+    assert [row["token_sha256"] for row in rows] == [session.token_sha256]
 
 
 async def test_opening_a_session_does_not_wait_on_a_locked_ended_one(
@@ -262,15 +281,23 @@ async def test_opening_a_session_does_not_wait_on_a_locked_ended_one(
 ) -> None:
     async with await _client(console.sessions()) as client:
         cookie, csrf = await _login(client, owners)
-        await client.post("/logout", headers={"Cookie": cookie, "X-CSRF-Token": csrf})
-        tx_context = console.db.transaction()
-        tx = await tx_context.__aenter__()
-        await tx.execute("SELECT * FROM {{tables.console_sessions}} FOR UPDATE")
-        try:
+        ended = await _session(console, cookie)
+        logout = await client.post("/logout", headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert logout.status_code == 200
+        async with console.db.transaction() as tx:
+            closed_at = await tx.fetch_value(
+                "SELECT closed_at FROM {{tables.console_sessions}} "
+                "WHERE token_sha256=$1 FOR UPDATE",
+                ended.token_sha256,
+            )
+            assert closed_at is not None
             current, _ = await asyncio.wait_for(_login(client, owners), timeout=5)
-        finally:
-            await tx_context.__aexit__(None, None, None)
         assert (await client.get("/whoami", headers={"Cookie": current})).status_code == 200
+        # Opening a session can now reclaim the previously locked row.
+        await _login(client, owners)
+    assert await console.db.fetch_value(
+        "SELECT 1 FROM {{tables.console_sessions}} WHERE token_sha256=$1", ended.token_sha256
+    ) is None
 
 
 async def test_a_failing_prune_does_not_fail_opening_a_session(

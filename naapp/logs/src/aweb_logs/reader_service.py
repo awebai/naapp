@@ -18,6 +18,7 @@ from aweb_naapp import ratelimit
 from aweb_naapp.console import (
     ClientIdentity,
     ConsoleSessions,
+    FencedInstallations,
     LoginLimiter,
     apply_console_migrations,
     console_login_router,
@@ -100,6 +101,7 @@ def reader_sessions(
         scopes=directory.is_current_reader,
         # Every scope a reader signs in to is a holding.
         member=handoffs.check_holding_member,
+        installations=FencedInstallations(fence, team_of=directory.team_of),
         key_bound=handoffs.current,
     )
     return sessions, handoffs

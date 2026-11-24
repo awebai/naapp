@@ -156,22 +156,32 @@ def test_timeout_kills_the_job_and_bounds_execution(tmp_path):
 
 def test_started_is_observation_after_a_real_spawn(tmp_path):
     release = tmp_path / "release"
+    os.mkfifo(release, 0o600)
     path, body = configuration(
         tmp_path,
-        f"""import pathlib,time
-while not pathlib.Path({str(release)!r}).exists():
-    time.sleep(0.01)
+        f"""with open({str(release)!r}, "rb") as release:
+    assert release.read(1) == b"1"
 print("finished")
 """,
     )
     seen = []
 
-    async def started(pid):
-        os.kill(pid, 0)
-        seen.append(pid)
-        release.touch()
+    # Hold the read end so the writer can open before starting the child.
+    reader = os.open(release, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        with release.open("wb", buffering=0) as writer:
 
-    assert run_job(path, body, started=started)["exit_code"] == 0
+            async def started(pid):
+                os.kill(pid, 0)
+                seen.append(pid)
+                writer.write(b"1")
+
+            report = run_job(path, body, started=started)
+    finally:
+        os.close(reader)
+
+    assert report["exit_code"] == 0
+    assert report["stdout"] == "finished\n"
     assert len(seen) == 1
 
 

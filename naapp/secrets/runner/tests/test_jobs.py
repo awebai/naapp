@@ -1,6 +1,8 @@
 import copy
 import hashlib
+import json
 import os
+from pathlib import Path
 
 import pytest
 from aweb_secrets_values import encode_value
@@ -10,6 +12,21 @@ from aweb_secrets_runner.jobs import RunnerConfig, job_digest
 from aweb_secrets_runner.protocol import Refused, canonical
 
 RUNNER = "rnr_Unqp9DFTnajhUdVDTR1eYQ"
+FIELD_FAMILY_CASES = json.loads(
+    (Path(__file__).resolve().parents[4] / "docs/vectors/secrets-runner-http-v1.json").read_text()
+)["field_families"]
+RUNNER_VALUES = {
+    "bearer": {"value": "fixture"},
+    "header": {"value": "fixture"},
+    "query": {"value": "fixture"},
+    "basic": {"username": "", "password": "fixture"},
+    "oauth2-client-credentials": {"client_id": "fixture-id", "client_secret": "fixture"},
+    "aws-sigv4": {
+        "access_key_id": "fixture-id",
+        "secret_access_key": "fixture",
+        "session_token": "fixture-token",
+    },
+}
 
 
 def definition(tmp_path):
@@ -196,45 +213,37 @@ def test_configuration_checks_real_uid_before_work(tmp_path):
         RunnerConfig.load(path)
 
 
-@pytest.mark.parametrize(
-    "kind,fields,selected",
-    [
-        ("bearer", {"value": "fixture"}, "value"),
-        ("header", {"value": "fixture"}, "value"),
-        ("query", {"value": "fixture"}, "value"),
-        ("basic", {"username": "", "password": "fixture"}, "username"),
-        (
-            "oauth2-client-credentials",
-            {"client_id": "fixture-id", "client_secret": "fixture"},
-            "client_secret",
-        ),
-        (
-            "aws-sigv4",
-            {
-                "access_key_id": "fixture-id",
-                "secret_access_key": "fixture",
-                "session_token": "fixture-token",
-            },
-            "session_token",
-        ),
-    ],
-)
-def test_all_kinds_use_the_shared_whole_mapping_codec(tmp_path, kind, fields, selected):
+@pytest.mark.parametrize("kind", ["header", "query"])
+def test_value_aliases_use_the_shared_whole_mapping_codec(tmp_path, kind):
+    fields = RUNNER_VALUES[kind]
     body = definition(tmp_path)
-    body["env"]["PASSWORD"]["field"] = selected
+    body["env"]["PASSWORD"]["field"] = "value"
     body["output"]["projection"] = ["/"]
     config = RunnerConfig.load(config_file(tmp_path, body))
     assert prepared(config, body, credentials=[encode_value(kind, fields)]).env == {
-        "PASSWORD": fields[selected]
+        "PASSWORD": fields["value"]
     }
 
 
-def test_mixed_and_unknown_field_families_refuse_before_preparation(tmp_path):
-    for selected in ("value", "unknown"):
-        body = definition(tmp_path)
-        body["env"]["OTHER"] = {"$credential": "db", "field": selected}
-        with pytest.raises(Refused, match="job_invalid"):
-            RunnerConfig.load(config_file(tmp_path, body))
+@pytest.mark.parametrize("case", FIELD_FAMILY_CASES, ids=lambda case: case["name"])
+def test_job_credential_field_family_matches_public_vectors(tmp_path, case):
+    body = definition(tmp_path)
+    selected = case["selected_fields"]
+    body["env"] = {
+        f"FIELD_{i}": {"$credential": "db", "field": field} for i, field in enumerate(selected)
+    }
+    path = config_file(tmp_path, body)
+    expected = case["expected"]
+    if "error" in expected:
+        with pytest.raises(Refused) as refused:
+            RunnerConfig.load(path)
+        assert refused.value.code == expected["error"]
+        return
+
+    kind = expected["validation_kind"]
+    values = RUNNER_VALUES[kind]
+    run = prepared(RunnerConfig.load(path), body, credentials=[encode_value(kind, values)])
+    assert run.env == {f"FIELD_{i}": values[field] for i, field in enumerate(selected)}
 
 
 def test_removing_a_local_pin_stops_a_previously_loaded_configuration(tmp_path):

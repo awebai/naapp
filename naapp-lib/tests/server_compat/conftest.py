@@ -30,7 +30,10 @@ def redis_left_as_found():
     copied stack records, so a run leaves the database at REDIS_URL as it found it.
     The suites run on a Redis database of their own: a key another process adds
     there during the run is deleted too."""
-    client = redis.Redis.from_url(os.environ.get("REDIS_URL", "redis://localhost:6379/0"))
+    url = os.environ.get("REDIS_URL")
+    if not url:
+        pytest.fail("set REDIS_URL to a Redis database of the suite's own: it deletes the keys it adds there")
+    client = redis.Redis.from_url(url)
     before = set(client.scan_iter())
     yield
     added = set(client.scan_iter()) - before

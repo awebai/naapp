@@ -358,7 +358,6 @@ def lane(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Lane]:
         lane.up("postgres", "redis", "awid", "aweb", "smtp", "front")
         result = lane.compose("--profile", "browser", "build", "cli", "browser")
         assert result.returncode == 0, result.stdout + result.stderr
-        _docker("tag", f"{project}-browser", f"{project}-browser")
         yield lane
     finally:
         # Every service's own record of the run, kept beside the runtime.
@@ -571,10 +570,10 @@ def test_the_owner_designates_a_human_holder_registered_on_another_machine(lane:
     assert code == "owner_required", code
     assert_unchanged(designated, designation_snapshot(query, holding, schema=SECRETS_SCHEMA))
 
-    # The holder holds the role: a session handoff starts for it.
-    child = holder.act(principal, "--json", "app", "human", APP_ID, "--help")
-    listed = holder.answer_passphrases(child)
-    assert "confirm" in listed and "draft-change" in listed, listed
+    # The holder can list the app's human actions using its own identity.
+    listed = holder.run(principal, "--json", "app", "human", APP_ID, "--help")
+    actions = set(re.findall(r"(?m)^  (confirm|draft-change)[ \t]+", listed))
+    assert actions == {"confirm", "draft-change"}, listed
 
     signs_in_again_after_a_reissue(lane, controller, holder, human, hooks)
 

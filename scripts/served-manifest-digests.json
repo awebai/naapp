@@ -1,0 +1,26 @@
+{
+  "apps": {
+    "folio": {
+      "/.well-known/aweb-app-versions.json": "e431b1606c3226dd35d9331e8254b309a7b71ece7558de138f9f2f370cb510f9",
+      "/aweb-app.json": "2e9c71b2910bf91709efcbe77054bf0a424f62522f9e1503b26500192da2680a",
+      "/manifests/v2.json": "2e9c71b2910bf91709efcbe77054bf0a424f62522f9e1503b26500192da2680a"
+    },
+    "library": {
+      "/.well-known/aweb-app.json": "c68373f5928d0cac3119c71b1e85b1f53babda8dea7801ad536e8c3a3baea273",
+      "/aweb-app.json": "c68373f5928d0cac3119c71b1e85b1f53babda8dea7801ad536e8c3a3baea273"
+    },
+    "logs": {
+      "/.well-known/aweb-app-versions.json": "a331e0a34131ef380f446a7f6e605ef836c1d3e2e09f398d3cd6494e53f2c940",
+      "/aweb-app.json": "f8dc9fca850d5661402482b60bcb56711e4193d664566d1928132ba511b0ed80",
+      "/manifests/v2.json": "8d99779ad84176d80891bf58b30a17a42d6b4ac53aa635850d979e7df0b758d0",
+      "/manifests/v3.json": "f8dc9fca850d5661402482b60bcb56711e4193d664566d1928132ba511b0ed80"
+    },
+    "secrets": {
+      "/.well-known/aweb-app-versions.json": "54bd186d8c6185e06ed99bd94015f2081bf05c38dcd24041fcaa5dd77e71de3a",
+      "/aweb-app.json": "67489bc4488018cb860b1da61de6ef675e1342f85ae218737305bf11cee81642",
+      "/manifests/v2.json": "13bfac65eede613e1a5d9c36ce9e7c2f9c8854f5b62df301e9b4ffad9b1457fc",
+      "/manifests/v3.json": "67489bc4488018cb860b1da61de6ef675e1342f85ae218737305bf11cee81642"
+    }
+  },
+  "recorded_from": "aweb d8ee9ed31ad275da7cab3a3cade0006e06587f02, each app in its own aweb environment"
+}

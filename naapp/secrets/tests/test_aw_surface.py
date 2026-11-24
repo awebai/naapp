@@ -15,6 +15,10 @@ ROOT = Path(__file__).resolve().parents[3]
 
 @pytest.fixture(scope="module")
 def aw_binary(tmp_path_factory):
+    # make test installs the release before the suite goes offline.
+    installed = os.environ.get("NAAPP_AW_BINARY")
+    if installed:
+        return Path(installed)
     directory = tmp_path_factory.mktemp("secrets-aw")
     subprocess.run(
         [str(ROOT / "scripts/install-aw.sh"), str(directory)],

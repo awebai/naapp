@@ -13,6 +13,7 @@ from tests.server_compat.aweb_server_tests.app_task_requests import app_request_
 from tests.server_compat.aweb_server_tests.dashboard_privacy import privacy_app
 from tests.server_compat.aweb_server_tests.real_stack import real_stack
 from tests.server_compat.aweb_server_tests.server_conftest import (
+    ENVIRONMENT_DEFAULTS,
     aweb_cloud_db,
     shared_test_database,
     shared_test_pool,
@@ -24,24 +25,46 @@ for aweb_name, copy in AWEB_MODULE_NAMES.items():
         aweb_name, importlib.import_module(f"tests.server_compat.aweb_server_tests.{copy}")
     )
 
+@pytest.fixture(scope="package", autouse=True)
+def aweb_test_environment():
+    """aweb's server-test environment defaults, set only while this suite's tests
+    run and restored afterwards, so no other test in the process sees them."""
+    previous = {name: os.environ.get(name) for name in ENVIRONMENT_DEFAULTS}
+    for name, value in ENVIRONMENT_DEFAULTS.items():
+        os.environ.setdefault(name, value)
+    yield
+    for name, value in previous.items():
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+
+
+# The Redis keys the copied stack writes and never removes.
+SUITE_KEY_PATTERNS = ("presence-transitions:*",)
+
+
 @pytest.fixture(scope="session", autouse=True)
 def redis_left_as_found():
-    """Delete the Redis keys the suite added, such as the presence transitions the
-    copied stack records, so a run leaves the database at REDIS_URL as it found it.
-    The suites run on a Redis database of their own: a key another process adds
-    there during the run is deleted too."""
+    """Delete the Redis keys of the kinds the copied stack writes (presence
+    transitions) that appeared during the run, and fail if any remain. Other
+    keys are left alone, so a run never removes another process's keys."""
     url = os.environ.get("REDIS_URL")
     if not url:
-        pytest.fail("set REDIS_URL to a Redis database of the suite's own: it deletes the keys it adds there")
+        pytest.fail("set REDIS_URL to a Redis database for this run's own keys")
     client = redis.Redis.from_url(url)
-    before = set(client.scan_iter())
+
+    def suite_keys():
+        return {key for pattern in SUITE_KEY_PATTERNS for key in client.scan_iter(match=pattern)}
+
+    before = suite_keys()
     yield
-    added = set(client.scan_iter()) - before
+    added = suite_keys() - before
     if added:
         client.delete(*added)
-    left = set(client.scan_iter())
+    left = suite_keys() - before
     client.close()
-    assert left == before, f"the suite left Redis keys behind: {sorted(left - before)}"
+    assert not left, f"the suite left Redis keys behind: {sorted(left)}"
 
 
 __all__ = [

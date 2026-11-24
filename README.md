@@ -83,6 +83,15 @@ images by digest: the CLI's Library journey and Folio's document-change and
 browser-wake acceptance. They test aweb's client, server and channel-core
 against a real app.
 
+## Running the suites locally
+
+The suites need PostgreSQL and Redis. Each run creates and drops its own test
+databases through pgdbm's fixtures; name the server with `TEST_DB_HOST`,
+`TEST_DB_PORT`, `TEST_DB_USER` and `TEST_DB_PASSWORD`. Give each person or
+agent running suites on a shared host a Redis database number of their own, in
+`REDIS_URL` (for example `redis://localhost:6379/8`): runs write keys there,
+and the server-compatibility suite deletes the keys its stack leaves behind.
+
 ## Temporary copies, deleted when the contracts package publishes
 
 The contract part of `aweb_naapp` is also in aweb, where the server uses it. It

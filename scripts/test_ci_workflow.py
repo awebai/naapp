@@ -35,6 +35,14 @@ class Workflow(unittest.TestCase):
     def test_every_package_has_a_job(self):
         self.assertEqual(set(JOBS.values()), set(PACKAGES))
 
+    def test_naapp_lib_shards_are_a_path_and_everything_else(self):
+        job = workflow()['jobs']['naapp-lib']
+        shards = [entry['tests'] for entry in job['strategy']['matrix']['include']]
+        self.assertEqual(len(shards), 2)
+        path = next(shard for shard in shards if not shard.startswith('--'))
+        self.assertEqual(sorted(shards), sorted([path, f'--ignore={path}']))
+        self.assertEqual(job['env']['NAAPP_LIB_TESTS'], '${{ matrix.tests }}')
+
     def test_no_trigger_filters_by_path(self):
         for path in sorted(WORKFLOWS.glob('*.yml')):
             triggers = yaml.load(path.read_text(), Loader=yaml.BaseLoader)['on']

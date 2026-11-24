@@ -6,7 +6,7 @@ stand in for an SDK client. Successful external vault access remains HO6 proof.
 
 import asyncio
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 from dataclasses import replace
 
 import httpx
@@ -27,7 +27,7 @@ from aweb_secrets.owners import OWNER_ROLE
 from tests.custody.test_onepassword import field, reference, sdk_item
 from tests.custody.test_onepassword_staging import candidate
 from tests.human_owner import fixture_member_admission
-from tests.test_change_sets import ALICE, ORIGIN, TEAM, enrol_owner
+from tests.test_change_sets import ALICE, ORIGIN, TEAM, enrol_owner, unreachable
 from tests.test_change_sets import world as _world
 from tests.test_console import API, login
 from tests.test_use_approvals import uses as _uses
@@ -170,7 +170,10 @@ async def test_preflight_fences_refuse_before_sdk(world, changed):
                         "UPDATE {{tables.installation_fences}} SET generation=generation+1"
                     )
                     status, code = 409, "generation_superseded"
-        response = await human.post(path, json=body(), headers=headers)
+        # A stale installation is observed again first; refused while its
+        # authority cannot be reached.
+        with unreachable() if changed == "stale" else nullcontext():
+            response = await human.post(path, json=body(), headers=headers)
         assert response.status_code == status
         assert response.json() == {"detail": code}
     assert await w.db.fetch_value("SELECT count(*) FROM {{tables.onepassword_versions}}") == 0

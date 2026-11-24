@@ -18,7 +18,7 @@ from typing import Literal
 
 import asyncpg
 from aweb_naapp.console import ConsoleRoute, ConsoleSession, KeyBoundConsoleSession
-from aweb_naapp.console.browser import member_refusal
+from aweb_naapp.console.browser import session_refusal
 from aweb_naapp.hooks.producer import (
     HOOKS_CHANNEL,
     Backlog,
@@ -290,7 +290,7 @@ def console_audit_delivery_router(*, services: ConsoleAuditDelivery) -> APIRoute
     router = APIRouter(route_class=ConsoleRoute)
 
     def _recovery(refused: HTTPException) -> Response:
-        if refused.status_code == 401 or member_refusal(refused) is not None:
+        if refused.status_code == 401 or session_refusal(refused) is not None:
             return shell.refused_page(refused)
         if refused.detail not in _RECOVERIES:
             raise refused

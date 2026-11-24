@@ -612,7 +612,32 @@ async def test_logs_refuses_a_reader_while_it_cannot_hear_of_the_installation(
         assert (options.status_code, options.json()) == unavailable
         read = await deployment.console.get("/v1/events")
         assert (read.status_code, read.json()) == unavailable
+        page = await deployment.console.get("/")
+        assert page.status_code == 503
+        assert page.headers["content-type"].startswith("text/html")
+        assert 'id="console-recovery-action" href="">Try again</a>' in page.text
+        # A state change without its CSRF token is refused before logs asks
+        # anything, and ends nothing.
+        forged = await deployment.console.post("/logout")
+        assert (forged.status_code, forged.json()) == (403, {"detail": "csrf_token_required"})
     finally:
         deployment.server.down = False
     # The outage refused those requests only: the session it held still reads.
     assert (await deployment.console.get("/v1/events")).status_code == 200
+
+
+async def test_a_reader_signs_out_while_logs_cannot_hear_of_the_installation(
+    prompt_installation_status: float, deployment: Deployment
+):
+    scope = await designated_reader(deployment)
+    signed_in = await log_in(deployment, scope)
+    csrf = {"X-CSRF-Token": signed_in.json()["csrf_token"]}
+    await asyncio.sleep(prompt_installation_status)
+    deployment.server.down = True
+    try:
+        out = await deployment.console.post("/logout", headers=csrf)
+        assert (out.status_code, out.json()) == (200, {"closed": True})
+    finally:
+        deployment.server.down = False
+    read = await deployment.console.get("/v1/events")
+    assert (read.status_code, read.json()) == (401, {"detail": "console_session_required"})

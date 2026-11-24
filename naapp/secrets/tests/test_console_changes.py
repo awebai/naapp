@@ -1,7 +1,7 @@
 """Human change drafts and fresh passkey confirmation on real PG/native custody."""
 
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 
 import asyncpg
 import httpx
@@ -20,7 +20,7 @@ from aweb_secrets.console_values import ConsoleValues, console_values_router
 from aweb_secrets.use_context import apply_use_context_migrations
 from tests.human_owner import fixture_member_admission
 from tests.test_change_set_onepassword import view
-from tests.test_change_sets import ALICE, BOB, ORIGIN, TEAM, enrol_owner
+from tests.test_change_sets import ALICE, BOB, ORIGIN, TEAM, enrol_owner, unreachable
 from tests.test_change_sets import world as _world
 from tests.test_console import API
 
@@ -384,7 +384,10 @@ async def test_refused_confirmation_preserves_decision_and_inert_token_without_c
             with pytest.raises(asyncpg.CheckViolationError):
                 await human.post(path + "/confirm", json={}, headers=headers)
         else:
-            result = await human.post(path + "/confirm", json={}, headers=headers)
+            # A stale installation is observed again first; refused while its
+            # authority cannot be reached.
+            with unreachable() if failure == "fence" else nullcontext():
+                result = await human.post(path + "/confirm", json={}, headers=headers)
             assert result.status_code == (503 if failure == "fence" else 409)
         assert (
             await w.db.fetch_value("SELECT active_version FROM {{tables.onepassword_credentials}}")

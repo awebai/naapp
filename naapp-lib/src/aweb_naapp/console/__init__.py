@@ -347,7 +347,16 @@ class ConsoleSessions:
             if self._key_bound is None:
                 raise self._required()
             return await self._key_bound(request)
-        row = await self._cookie_row(request, observe=True)
+        row = await self._cookie_row(request)
+        await self._observe_installation(row["scope"])
+        if not (
+            await self.passkeys.login_evidence_is_current(
+                row["scope"], row["subject"], row["evidence_ref"]
+            )
+            and await self.scopes(row["scope"])
+        ):
+            await self._close(bytes(row["token_sha256"]))
+            raise self._required()
         try:
             member = await self.member(row["scope"])
         except HTTPException as refused:
@@ -366,11 +375,22 @@ class ConsoleSessions:
             member=member,
         )
 
-    async def _cookie_row(self, request: Request, *, observe: bool) -> Any:
-        """The open session row of the request's cookie. A state change must
-        also carry its CSRF token. With ``observe``, a stale installation of its
-        scope is observed again before the scope is admitted; otherwise every
-        read is local."""
+    async def _observe_installation(self, scope: str) -> None:
+        """Observe the scope's installation again when it is stale, so the
+        scope's admission reads it current. An installation that cannot be
+        observed refuses this request as a session refusal, a 503 that leaves
+        the session open."""
+        team_id = await self.installations.stale(scope)
+        if team_id is None:
+            return
+        try:
+            await self.installations.refresh(team_id)
+        except InstallationRefused as refused:
+            raise HTTPException(status_code=refused.status, detail=refused.code) from None
+
+    async def _cookie_row(self, request: Request) -> Any:
+        """The open, unexpired session row of the request's cookie, by local
+        reads only. A state change must also carry the row's CSRF token."""
         token = request.cookies.get(COOKIE_NAME)
         if not token:
             raise self._required()
@@ -383,16 +403,6 @@ class ConsoleSessions:
         )
         if row is None:
             raise self._required()
-        if observe and (team_id := await self.installations.stale(row["scope"])) is not None:
-            await self.installations.refresh(team_id)
-        if not (
-            await self.passkeys.login_evidence_is_current(
-                row["scope"], row["subject"], row["evidence_ref"]
-            )
-            and await self.scopes(row["scope"])
-        ):
-            await self._close(bytes(row["token_sha256"]))
-            raise self._required()
         if request.method not in SAFE_METHODS:
             supplied = request.headers.get(CSRF_HEADER, "")
             if not hmac.compare_digest(_sha256(supplied), bytes(row["csrf_sha256"])):
@@ -400,15 +410,16 @@ class ConsoleSessions:
         return row
 
     async def logout(self, request: Request) -> None:
-        """Close the request's own session. A cookie session closes without the
-        membership check, so it can be ended by anyone who holds it, whatever
-        their membership and while that cannot be read."""
+        """Close the request's own session. A cookie session closes on its live
+        row and exact CSRF token alone, by local reads: anyone who holds it can
+        end it, whatever their membership or installation, and while neither
+        can be read."""
         from aweb_naapp.console.handoff_wire import CONSOLE_SIGNATURE_HEADERS
 
         if any(name in request.headers for name in CONSOLE_SIGNATURE_HEADERS):
             await self.close(await self.current(request))
             return
-        row = await self._cookie_row(request, observe=False)
+        row = await self._cookie_row(request)
         await self._close(bytes(row["token_sha256"]))
 
     async def close(self, session: ConsoleSession) -> None:

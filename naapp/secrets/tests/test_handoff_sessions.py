@@ -343,6 +343,8 @@ async def browser_login(journey):
 
 
 async def reissue_owner_membership(journey, *, rotate=False):
+    """The member holds one active certificate, so the replaced one is revoked
+    first, by the team key current at that moment."""
     old = journey.member
     renewed = replace(old, certificate_id="renewed-holder")
     registry = journey.world.registry
@@ -351,9 +353,14 @@ async def reissue_owner_membership(journey, *, rotate=False):
         await registry.rotate_team_key_by_controller(
             old.team_id, renewed.team_did_key, SigningKey(journey.controller_seed)
         )
+    name, domain = old.team_id.split(":", 1)
+    await journey.registry.revoke_team_certificate(
+        domain,
+        name,
+        team_controller_signing_key=bytes(renewed.team_key),
+        certificate_id=old.certificate_id,
+    )
     await registry.add_certificate(renewed.certificate(), team_key=renewed.team_key)
-    if not rotate:
-        await registry.revoke(old.certificate_id, team_id=old.team_id)
     journey.member = renewed
 
 

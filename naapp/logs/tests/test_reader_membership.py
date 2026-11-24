@@ -14,6 +14,7 @@ from aweb_naapp.runtime.clock import seconds_to_ns
 from aweb_naapp.runtime.team_auth import UNKNOWN_CERTIFICATE_REFRESH_SECONDS
 from aweb_naapp_testing import Member
 from aweb_naapp_testing.owner_acts import TEAM_ID
+from awid.registry import RegistryClient
 from fastapi import HTTPException
 from nacl.signing import SigningKey
 
@@ -244,9 +245,20 @@ async def retained(aw: Aw) -> bytes:  # noqa: F811
 
 
 async def certify_anew(aw: Aw, renewed: Member) -> None:  # noqa: F811
-    """The member holds one active certificate: the old one is revoked first."""
+    """The member holds one active certificate: the old one is revoked first,
+    by the team key current at that moment."""
     registry = aw.world.registry
-    await registry.revoke(aw.member.certificate_id, team_id=TEAM_ID)
+    name, domain = TEAM_ID.split(":", 1)
+    client = RegistryClient(registry_url=registry.registry_url, transport=registry.transport)
+    try:
+        await client.revoke_team_certificate(
+            domain,
+            name,
+            team_controller_signing_key=bytes(renewed.team_key),
+            certificate_id=aw.member.certificate_id,
+        )
+    finally:
+        await client.aclose()
     await registry.add_certificate(renewed.certificate(), team_key=renewed.team_key)
     aw.member = renewed
 

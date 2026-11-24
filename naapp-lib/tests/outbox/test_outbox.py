@@ -12,11 +12,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
+import asyncpg
 import pytest
 from pgdbm import AsyncDatabaseManager
 
 import aweb_naapp.outbox as outbox
 from aweb_naapp.outbox import (
+    DRAINED_PRUNE_BATCH,
     DRAINED_RETENTION,
     Acked,
     Cancelled,
@@ -1158,18 +1160,14 @@ async def test_a_prune_deletes_no_more_than_its_batch(db) -> None:
 
 
 class Prunes:
-    """Stands in for the drain loop's prune: counts the calls, then prunes or fails."""
+    """Count real prune calls made by the drain loop."""
 
-    def __init__(self, error: Exception | None = None) -> None:
-        self.error = error
+    def __init__(self) -> None:
         self.calls = 0
-        self._prune = prune_drained
 
-    async def __call__(self, db: AsyncDatabaseManager, *, limit: int = 500) -> int:
+    async def __call__(self, db: AsyncDatabaseManager, *, limit: int = DRAINED_PRUNE_BATCH) -> int:
         self.calls += 1
-        if self.error is not None:
-            raise self.error
-        return await self._prune(db, limit=limit)
+        return await prune_drained(db, limit=limit)
 
 
 async def _run_drain_until(db, done, **options) -> None:
@@ -1223,16 +1221,44 @@ async def test_the_drain_loop_prunes_again_once_its_interval_has_passed(db, monk
     await _run_drain_until(db, pruned_three_times, prune_interval_seconds=0.02)
 
 
-async def test_the_drain_loop_keeps_delivering_when_a_prune_fails(db, monkeypatch, caplog) -> None:
-    prunes = Prunes(RuntimeError("prune failed"))
-    monkeypatch.setattr(outbox, "prune_drained", prunes)
+async def test_the_drain_loop_keeps_delivering_when_a_prune_fails(db, caplog) -> None:
+    old = _event(b"old")
+    await _deliver(db, old, {"a": Acked("delivered")})
+    await _age(db, _PAST_RETENTION, old)
+    await db.execute("""
+        CREATE FUNCTION {{tables.refuse_outbox_prune}}() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            RAISE EXCEPTION 'outbox prune refused' USING TABLE = TG_TABLE_NAME;
+        END $$
+        """)
+    await db.execute(
+        "CREATE TRIGGER refuse_outbox_prune BEFORE DELETE ON {{tables.outbox_events}} "
+        "FOR EACH ROW EXECUTE FUNCTION {{tables.refuse_outbox_prune}}()"
+    )
     event = _event()
-    async with db.transaction() as tx:
-        await enqueue(tx, event)
+    queued = False
 
-    async def delivered() -> bool:
-        return prunes.calls >= 1 and await _states(db) == {"a": "delivered"}
+    async def delivered_after_failure() -> bool:
+        nonlocal queued
+        if not queued:
+            if "Outbox prune failed" not in caplog.messages:
+                return False
+            async with db.transaction() as tx:
+                await enqueue(tx, event)
+            queued = True
+        return await db.fetch_value(
+            "SELECT state FROM {{tables.outbox_deliveries}} WHERE event_id = $1 AND target_id = 'a'",
+            event.event_id,
+        ) == "delivered"
 
-    with caplog.at_level(logging.ERROR, logger="aweb_naapp.outbox"):
-        await _run_drain_until(db, delivered, prune_interval_seconds=0.02)
-    assert {record.getMessage() for record in caplog.records} == {"Outbox prune failed"}
+    with caplog.at_level(logging.ERROR, logger=outbox.__name__):
+        await _run_drain_until(db, delivered_after_failure)
+    [failure] = [record for record in caplog.records if record.name == outbox.__name__]
+    assert failure.getMessage() == "Outbox prune failed"
+    assert failure.exc_info is not None
+    error = failure.exc_info[1]
+    assert isinstance(error, asyncpg.RaiseError)
+    assert error.table_name == "outbox_events"
+    assert error.message == "outbox prune refused"
+    assert await _event_ids(db) == {old.event_id, event.event_id}
+    assert await _delivery_event_ids(db) == {old.event_id, event.event_id}

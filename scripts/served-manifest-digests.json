@@ -22,5 +22,5 @@
       "/manifests/v3.json": "ac7f68608c96c40d5e2f57169064f5f4e76622dd5d7ee4b06ce74f4185a184ef"
     }
   },
-  "recorded_from": "aweb d8ee9ed31ad275da7cab3a3cade0006e06587f02, each app in its own aweb environment"
+  "recorded_from": "folio and library: aweb d8ee9ed31ad275da7cab3a3cade0006e06587f02, each in its own aweb environment; logs and secrets: naapp 2726d99c7, after their v3 manifests gained the session action"
 }

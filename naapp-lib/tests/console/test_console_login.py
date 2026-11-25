@@ -115,6 +115,8 @@ class MembershipDeadlineTransport(httpx.AsyncBaseTransport):
         if request.method == "GET" and request.url.path == "/v1/namespaces/example.com/teams/people":
             assert response.status_code == 200
             self.team_reads += 1
+            if self.expiry == "retry_error" and self.team_reads == 2:
+                return httpx.Response(503, json={"detail": "fixture-no-log-value"})
             if (self.expiry == "cold" and self.team_reads == 1) or (
                 self.expiry == "retry" and self.team_reads == 2
             ):
@@ -135,11 +137,12 @@ class MembershipDeadlineTransport(httpx.AsyncBaseTransport):
         ("cached", 200, None, 2),
         ("cold", 503, "principal_status_unavailable", 1),
         ("retry", 503, "principal_status_unavailable", 2),
+        ("retry_error", 503, "principal_status_unavailable", 2),
         ("revoked", 403, "principal_not_member", 2),
     ],
 )
 async def test_login_rechecks_membership_once_when_it_expires_during_identity_status(
-    console: Console, registry, monkeypatch, expiry, status, code, reads
+    console: Console, registry, monkeypatch, caplog, expiry, status, code, reads
 ):
     team = "people:example.com"
     member = Member(team_id=team)
@@ -186,6 +189,20 @@ async def test_login_rechecks_membership_once_when_it_expires_during_identity_st
 
         assert (result.status_code, result.json().get("detail")) == (status, code)
         assert transport.team_reads == reads
+        reasons = {
+            "cold": ("team_observation_stale", 1000),
+            "retry": ("team_refresh_stale", 1000),
+            "retry_error": ("team_refresh_unavailable", 0),
+        }
+        expected = []
+        if expiry in reasons:
+            reason, elapsed_ms = reasons[expiry]
+            expected = [f"principal_status_unavailable reason={reason} elapsed_ms={elapsed_ms}"]
+        assert [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "aweb_naapp.runtime.principal_status"
+        ] == expected
         assert transport.kind_reads == (0 if expiry == "cold" else 1)
         sessions_opened = await console.db.fetch_value("SELECT count(*) FROM {{tables.console_sessions}}")
         assert sessions_opened == (1 if status == 200 else 0)

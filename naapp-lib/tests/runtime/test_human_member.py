@@ -7,6 +7,7 @@ from contextlib import aclosing, asynccontextmanager
 from datetime import UTC, datetime
 from time import monotonic_ns, perf_counter_ns
 
+import httpx
 import pytest
 from aweb_naapp_testing import Member
 from aweb_naapp_testing.human_members import registered_human
@@ -125,7 +126,7 @@ async def test_an_agent_with_a_human_parent_is_not_a_human_holder(human, registr
     assert (refused.value.status_code, refused.value.detail) == (403, "principal_not_human")
 
 
-async def test_unavailable_public_identity_evidence_never_admits_a_known_human(human):
+async def test_unavailable_public_identity_evidence_never_admits_a_known_human(human, caplog):
     member, identity, _, cache, _ = human
     listener = await asyncio.start_server(lambda reader, writer: writer.close(), "127.0.0.1", 0)
     port = listener.sockets[0].getsockname()[1]
@@ -140,6 +141,7 @@ async def test_unavailable_public_identity_evidence_never_admits_a_known_human(h
         503,
         "principal_status_unavailable",
     )
+    assert_refusal_log(caplog, "identity_binding_unavailable")
 
 
 async def test_runtime_exposes_the_same_exact_human_member_admission(human, registry, tmp_path):
@@ -156,7 +158,9 @@ async def test_runtime_exposes_the_same_exact_human_member_admission(human, regi
     assert proof.membership.team_id == TEAM
 
 
-async def test_an_unreadable_private_team_is_unavailable_not_a_membership_denial(human, registry):
+async def test_an_unreadable_private_team_is_unavailable_not_a_membership_denial(
+    human, registry, caplog
+):
     member, identity, client, _, _ = human
     await registry.db.execute(
         "UPDATE {{tables.teams}} SET visibility='private' WHERE domain=$1 AND name='people'", DOMAIN
@@ -175,6 +179,7 @@ async def test_an_unreadable_private_team_is_unavailable_not_a_membership_denial
         503,
         "principal_status_unavailable",
     )
+    assert_refusal_log(caplog, "team_observation_unavailable")
 
 
 class _RedisClock(KeyRecordingRedis):
@@ -249,6 +254,7 @@ async def test_cached_kind_deadline_survives_role_lock_before_effect(
     aged_human,
     test_db_factory,
     monkeypatch,
+    caplog,
     wait_ns,
     refused,
 ):
@@ -301,6 +307,7 @@ async def test_cached_kind_deadline_survives_role_lock_before_effect(
                 503,
                 "principal_status_unavailable",
             )
+            assert_refusal_log(caplog, "identity_deadline")
             assert (
                 await db.fetch_all("SELECT * FROM {{tables.role_assignments}} ORDER BY role")
                 == before
@@ -318,6 +325,7 @@ async def test_cached_kind_deadline_survives_role_lock_before_effect(
 async def test_missing_or_invalid_retained_age_cannot_mint_current_effect_proof(
     human,
     monkeypatch,
+    caplog,
     age,
 ):
     from dataclasses import replace
@@ -344,3 +352,67 @@ async def test_missing_or_invalid_retained_age_cannot_mint_current_effect_proof(
         503,
         "principal_status_unavailable",
     )
+    assert_refusal_log(caplog, "identity_age_unavailable")
+
+
+def assert_refusal_log(caplog, reason):
+    import re
+
+    messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.name == "aweb_naapp.runtime.principal_status"
+    ]
+    assert len(messages) == 1
+    assert re.fullmatch(
+        f"principal_status_unavailable reason={reason} elapsed_ms=[0-9]+", messages[0]
+    )
+
+
+async def test_an_unavailable_identity_status_reports_the_failed_observation(human, caplog):
+    member, identity, registry, cache, _ = human
+    from dataclasses import replace
+
+    async def unavailable(request):
+        if request.url.path == "/v1/id-certificates/status":
+            return httpx.Response(503, json={"detail": "fixture-no-log-value"})
+        assert registry.transport is not None
+        return await registry.transport.handle_async_request(request)
+
+    async with aclosing(
+        replace(
+            registry,
+            transport=httpx.MockTransport(unavailable),
+            domain_verifier=registry._domain_verifier,
+        )
+    ) as client:
+        with pytest.raises(HTTPException) as refused:
+            await check_human_member(
+                cache, client, team_id=TEAM, principal=identity, certificate=member.certificate()
+            )
+    assert (refused.value.status_code, refused.value.detail) == (
+        503,
+        "principal_status_unavailable",
+    )
+    assert_refusal_log(caplog, "identity_kind_unavailable")
+
+
+async def test_expired_team_proof_reports_the_deadline_without_reobservation(
+    human, monkeypatch, caplog
+):
+    member, identity, client, cache, _ = human
+    proof = await check_human_member(
+        cache, client, team_id=TEAM, principal=identity, certificate=member.certificate()
+    )
+    from dataclasses import replace
+
+    membership = replace(proof.membership, fresh_until=proof.checked_at + 2_000_000)
+    proof = replace(proof, membership=membership, fresh_until=membership.fresh_until)
+    monkeypatch.setattr(human_member, "monotonic_ns", lambda: membership.fresh_until + 1)
+    with pytest.raises(HTTPException) as refused:
+        proof.require_fresh()
+    assert (refused.value.status_code, refused.value.detail) == (
+        503,
+        "principal_status_unavailable",
+    )
+    assert_refusal_log(caplog, "membership_deadline")

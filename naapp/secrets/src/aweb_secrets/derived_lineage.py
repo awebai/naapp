@@ -20,6 +20,7 @@ from typing import Any
 from pgdbm.core import TransactionManager
 
 from aweb_secrets import records
+from aweb_secrets.authority_integrity import AuthorityRecords
 from aweb_secrets.derived_capture import DEFAULT_MAX_TTL_S, effective_expiry
 from aweb_secrets.operation import OperationTemplate
 from aweb_secrets.secret import SecretRecord
@@ -363,6 +364,7 @@ async def _nearest_current_operation(
     operation_id: str,
     *,
     lock: bool,
+    authority: AuthorityRecords | None = None,
 ) -> OperationTemplate | None:
     for installation_id, secret_id in reversed(path):
         operation = await records.current_operation(
@@ -371,6 +373,7 @@ async def _nearest_current_operation(
             secret_id,
             operation_id,
             lock=lock,
+            authority=authority,
         )
         if operation is not None:
             return operation
@@ -378,7 +381,11 @@ async def _nearest_current_operation(
 
 
 async def current_operation(
-    tx: TransactionManager, nodes: Sequence[LineageNode], operation_id: str
+    tx: TransactionManager,
+    nodes: Sequence[LineageNode],
+    operation_id: str,
+    *,
+    authority: AuthorityRecords | None = None,
 ) -> OperationTemplate | None:
     """Select the nearest CURRENT definition once; the caller checks child pins."""
     return await _nearest_current_operation(
@@ -386,6 +393,7 @@ async def current_operation(
         tuple((node.installation_id, node.secret.record.secret_id) for node in nodes),
         operation_id,
         lock=True,
+        authority=authority,
     )
 
 

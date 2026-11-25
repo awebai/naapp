@@ -16,6 +16,7 @@ from aweb_naapp.egress import InternalDestinations
 from pgdbm.core import TransactionManager
 
 from aweb_secrets import run_pin_store
+from aweb_secrets.authority_integrity import AuthorityEvidenceInvalid, AuthorityRecords
 from aweb_secrets.destination import DestinationRecord
 from aweb_secrets.grant import GrantRecord, GrantTemplate
 from aweb_secrets.operation import OperationTemplate
@@ -41,6 +42,16 @@ class StoredSecret:
     record: SecretRecord
     state: str
     active_version: int | None
+
+
+async def require_secret_authority(
+    tx: TransactionManager, authority: AuthorityRecords, stored: StoredSecret, *, ref: str
+) -> None:
+    secret_id = stored.record.secret_id
+    if stored.record.ref != ref:
+        raise AuthorityEvidenceInvalid()
+    await authority.require(tx, "secret", (secret_id,), stored.record.after)
+    await authority.require(tx, "secret_version", (secret_id,), {"version": stored.active_version})
 
 
 async def create_secret(
@@ -150,7 +161,12 @@ async def create_policy(
 
 
 async def policy(
-    tx: TransactionManager, installation_id: str, digest: str, *, team_id: str
+    tx: TransactionManager,
+    installation_id: str,
+    digest: str,
+    *,
+    team_id: str,
+    authority: AuthorityRecords | None = None,
 ) -> Policy | None:
     body = await tx.fetch_value(
         "SELECT body FROM {{tables.policies}} WHERE installation_id = $1 AND digest = $2 AND team_id = $3",
@@ -158,7 +174,12 @@ async def policy(
         digest,
         team_id,
     )
-    return None if body is None else Policy.from_body(json.loads(body))
+    if body is None:
+        return None
+    value = json.loads(body)
+    if authority is not None:
+        await authority.require(tx, "policy", (digest,), value)
+    return Policy.from_body(value)
 
 
 async def create_grant(
@@ -222,6 +243,7 @@ async def active_grants(
     principal_did: str,
     roles: Sequence[str],
     lock: bool = True,
+    authority: AuthorityRecords | None = None,
 ) -> list[GrantRecord]:
     """The unrevoked grants on a secret to this principal or to any of its roles.
 
@@ -232,7 +254,7 @@ async def active_grants(
     """
     rows = await tx.fetch_all(
         """
-        SELECT record FROM {{tables.grants}}
+        SELECT grant_id, team_id, record FROM {{tables.grants}}
         WHERE installation_id = $1 AND secret_id = $2 AND revoked_at IS NULL
           AND (subject_principal = $3 OR subject_role = ANY($4::text[]))
         ORDER BY grant_id
@@ -243,7 +265,22 @@ async def active_grants(
         principal_did,
         list(roles),
     )
-    return [GrantRecord.from_after(json.loads(row["record"])) for row in rows]
+    grants = []
+    for row in rows:
+        value = json.loads(row["record"])
+        if authority is not None:
+            if row["team_id"] != authority.scope.team_id:
+                raise AuthorityEvidenceInvalid()
+            await authority.require(tx, "grant", (row["grant_id"],), value)
+        grant = GrantRecord.from_after(value)
+        if authority is not None and (
+            grant.grant_id != row["grant_id"]
+            or grant.secret_id != secret_id
+            or not (grant.subject_principal == principal_did or grant.subject_role in roles)
+        ):
+            raise AuthorityEvidenceInvalid()
+        grants.append(grant)
+    return grants
 
 
 async def set_grant_template(
@@ -297,7 +334,11 @@ async def create_destination(
 
 
 async def destinations(
-    tx: TransactionManager, installation_id: str, secret_id: str
+    tx: TransactionManager,
+    installation_id: str,
+    secret_id: str,
+    *,
+    authority: AuthorityRecords | None = None,
 ) -> list[DestinationRecord]:
     """A secret's destinations, by id.
 
@@ -306,19 +347,27 @@ async def destinations(
     """
     rows = await tx.fetch_all(
         """
-        SELECT record FROM {{tables.destinations}}
+        SELECT destination_id, team_id, record FROM {{tables.destinations}}
         WHERE installation_id = $1 AND secret_id = $2
         ORDER BY destination_id
         """,
         installation_id,
         secret_id,
     )
-    return [
-        DestinationRecord.from_after(
-            json.loads(row["record"]), internal_destinations=InternalDestinations.ALLOWED
+    destinations = []
+    for row in rows:
+        value = json.loads(row["record"])
+        if authority is not None:
+            if row["team_id"] != authority.scope.team_id:
+                raise AuthorityEvidenceInvalid()
+            await authority.require(tx, "destination", (row["destination_id"],), value)
+        destination = DestinationRecord.from_after(
+            value, internal_destinations=InternalDestinations.ALLOWED
         )
-        for row in rows
-    ]
+        if authority is not None and destination.secret_id != secret_id:
+            raise AuthorityEvidenceInvalid()
+        destinations.append(destination)
+    return destinations
 
 
 async def remove_destination(
@@ -397,14 +446,15 @@ async def current_operation(
     operation_id: str,
     *,
     lock: bool = True,
+    authority: AuthorityRecords | None = None,
 ) -> OperationTemplate | None:
     """CURRENT, normally locked against replacement until the transaction ends.
 
     ``lock=False`` is inert configured-access discovery, never send authority.
     """
-    record = await tx.fetch_value(
+    row = await tx.fetch_one(
         """
-        SELECT t.record FROM {{tables.current_operations}} c
+        SELECT t.record, t.team_id, c.digest FROM {{tables.current_operations}} c
         JOIN {{tables.operation_templates}} t USING (installation_id, secret_id, operation_id, digest)
         WHERE c.installation_id = $1 AND c.secret_id = $2 AND c.operation_id = $3
         """
@@ -413,4 +463,18 @@ async def current_operation(
         secret_id,
         operation_id,
     )
-    return None if record is None else OperationTemplate.from_after(json.loads(record))
+    if row is None:
+        return None
+    value = json.loads(row["record"])
+    if authority is not None:
+        if row["team_id"] != authority.scope.team_id:
+            raise AuthorityEvidenceInvalid()
+        await authority.require(tx, "operation", (secret_id, operation_id), value)
+    operation = OperationTemplate.from_after(value)
+    if authority is not None and (
+        operation.digest != row["digest"]
+        or operation.secret_id != secret_id
+        or operation.operation_id != operation_id
+    ):
+        raise AuthorityEvidenceInvalid()
+    return operation

@@ -44,7 +44,6 @@ from aweb_naapp.runtime.approvals import (
 from aweb_naapp.runtime.approvals.request import RequestNotCanonical, request_sha256
 from aweb_naapp.runtime.credential_audit import GovernanceUnavailable
 from aweb_naapp.runtime.installation import AdmittedInstallation, InstallationRefused
-from aweb_naapp.runtime.principal_status import PrincipalStatusUnavailable
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
 from pgdbm import TransactionManager
@@ -612,8 +611,8 @@ def console_changes_router(services: ConsoleChanges, *, prefix: str = "") -> API
             except (InstallationRefused, InstallationUnobservable):
                 return JSONResponse(applied_receipt)
             except HTTPException as refused:
-                if refused.status_code not in {401, 403} and not isinstance(
-                    refused, PrincipalStatusUnavailable
+                if refused.status_code not in {401, 403} and not (
+                    refused.status_code == 503 and refused.detail == "principal_status_unavailable"
                 ):
                     raise
                 return JSONResponse(applied_receipt, headers=refused.headers)

@@ -1,9 +1,10 @@
 """The app's self-read clients against the frozen server answers.
 
-Each answer's status and body bytes are served through an httpx.MockTransport
-to the public client, behind a fixed team-server discovery, so the client's
-status handling, JSON decoding and identity checks all run. The server side of
-the same vectors is server/tests/test_app_self_read_vectors.py.
+Each answer's status and body bytes are served by a team server's TLS site
+(an httpx.MockTransport behind it) and read through the app's egress guard,
+behind a fixed team-server discovery, so the client's status handling, JSON
+decoding and identity checks all run. The server side of the same vectors is
+server/tests/test_app_self_read_vectors.py.
 """
 
 from __future__ import annotations
@@ -18,6 +19,8 @@ from uuid import UUID
 
 import httpx
 import pytest
+import pytest_asyncio
+from aweb_naapp_testing.team_server_site import TeamServerSite, team_server_site
 from awid.did import did_from_public_key
 from nacl.signing import SigningKey
 
@@ -29,23 +32,38 @@ from aweb_naapp.runtime.hook_resolver import (
     HookResolutionUnavailable,
     HookResolver,
 )
+from aweb_naapp.runtime.operator_egress import OperatorNetworkSettings
 from aweb_naapp.runtime.team_grants import AppIdentity, TeamGrantSource
-from aweb_naapp.runtime.team_server import TeamServer
+from aweb_naapp.runtime.team_server import TeamServer, TeamServerReach
 
 AWEB_ROOT = Path(__file__).resolve().parents[3]
 GRANT = json.loads((AWEB_ROOT / "docs" / "vectors" / "app-grant-status-v1.json").read_text())
 HOOKS = json.loads((AWEB_ROOT / "docs" / "vectors" / "hook-resolution-v1.json").read_text())
-SERVER_URL = "https://aweb.example"
 
 
+@pytest_asyncio.fixture
+async def site(tmp_path):
+    async with team_server_site(tmp_path / "site") as served:
+        yield served
+
+
+def _reach(site: TeamServerSite) -> TeamServerReach:
+    """Reads through the app's egress guard, the site listed as the operator's own server."""
+    egress = site.egress(OperatorNetworkSettings(**site.settings()))
+    return TeamServerReach(egress=egress.egress, internal=egress.team_servers)
+
+
+@dataclasses.dataclass(frozen=True)
 class FixedDirectory:
     """Discovery that always names the same verified server."""
+
+    server_url: str
 
     async def resolve(self, team_id: str, certificate_id: str | None = None) -> TeamServer:
         return TeamServer(
             team_id=team_id,
-            server_url=SERVER_URL,
-            audience=SERVER_URL,
+            server_url=self.server_url,
+            audience=self.server_url,
             team_did_key="did:key:z6MkhaXgBZDvotDkL5257faiztiGiC2QtKLGpbnnEGta2doK",
             expires_at=2**62,
         )
@@ -69,7 +87,7 @@ def _answer(name: str) -> dict:
     return next(answer for answer in GRANT["answers"] if answer["name"] == name)
 
 
-def _grant_source(client: str, status: int, body: bytes) -> TeamGrantSource:
+def _grant_source(site: TeamServerSite, client: str, status: int, body: bytes) -> TeamGrantSource:
     scenario = GRANT["scenario"]
     config = GRANT["clients"][client]
     signing_key = SigningKey(bytes.fromhex(scenario["grant_read_key"]["seed_hex"]))
@@ -86,14 +104,15 @@ def _grant_source(client: str, status: int, body: bytes) -> TeamGrantSource:
     )
 
     def serve(request: httpx.Request) -> httpx.Response:
-        assert request.url == httpx.URL(SERVER_URL + "/v1/apps/self/grant")
+        assert request.url == httpx.URL(site.origin + "/v1/apps/self/grant")
         return httpx.Response(status, content=body, headers={"content-type": "application/json"})
 
+    site.serve_transport(httpx.MockTransport(serve))
     return TeamGrantSource(
         identity=identity,
         signer=AppCredentialSigner(app_id=config["app_id"], key=key, purpose=APP_GRANT_READ),
-        discovery=FixedDirectory(),  # type: ignore[arg-type]
-        transport=httpx.MockTransport(serve),
+        discovery=FixedDirectory(site.origin),  # type: ignore[arg-type]
+        reach=_reach(site),
     )
 
 
@@ -131,17 +150,17 @@ GRANT_OUTCOMES = [
 
 
 @pytest.mark.parametrize(("name", "client", "outcome"), GRANT_OUTCOMES)
-async def test_the_grant_source_reads_each_server_answer(name, client, outcome):
+async def test_the_grant_source_reads_each_server_answer(site, name, client, outcome):
     answer = _answer(name)
     body = answer["body"].encode()
     team_id = GRANT["scenario"]["team_id"]
     if "unavailable" in outcome:
         with pytest.raises(GrantUnavailable) as refused:
-            await _grant_source(client, answer["status"], body).status_for(team_id)
+            await _grant_source(site, client, answer["status"], body).status_for(team_id)
         assert refused.value.args == (outcome["unavailable"],)
         return
-    status = await _grant_source(client, answer["status"], body).status_for(team_id)
-    grant = await _grant_source(client, answer["status"], body).grant_for(team_id)
+    status = await _grant_source(site, client, answer["status"], body).status_for(team_id)
+    grant = await _grant_source(site, client, answer["status"], body).grant_for(team_id)
     if outcome["status"] is None:
         assert status is None
     else:
@@ -170,18 +189,20 @@ REFUSED = [
     REFUSED,
     ids=lambda value: value["name"] if isinstance(value, dict) else value,
 )
-async def test_a_refused_answer_is_unavailable_and_its_base_is_read(client, case):
+async def test_a_refused_answer_is_unavailable_and_its_base_is_read(site, client, case):
     refused = GRANT["refused_answers"]
     base = _answer(refused["base"])
     team_id = GRANT["scenario"]["team_id"]
     changed = _apply(json.loads(base["body"]), case["op"], case["path"], case.get("value"))
     with pytest.raises(GrantUnavailable) as unavailable:
-        await _grant_source(client, base["status"], json.dumps(changed).encode()).status_for(
-            team_id
-        )
+        await _grant_source(
+            site, client, base["status"], json.dumps(changed).encode()
+        ).status_for(team_id)
     assert unavailable.value.args == (refused["outcome"]["unavailable"],)
     # The case's one change is its only fault: the base it changed is read.
-    assert await _grant_source(client, base["status"], base["body"].encode()).status_for(team_id)
+    assert await _grant_source(site, client, base["status"], base["body"].encode()).status_for(
+        team_id
+    )
 
 
 # --- hook resolution ---
@@ -197,7 +218,9 @@ def _hook_path(answer: dict) -> str:
     return answer["path"].format(**ids)
 
 
-def _resolver(caller: str | None, status: int, body: bytes, path: str) -> HookResolver:
+def _resolver(
+    site: TeamServerSite, caller: str | None, status: int, body: bytes, path: str
+) -> HookResolver:
     app = HOOKS["scenario"]["apps"][caller or "logs"]
     signing_key = SigningKey(bytes.fromhex(app["resolve_key"]["seed_hex"]))
     key = AppKey(
@@ -208,19 +231,20 @@ def _resolver(caller: str | None, status: int, body: bytes, path: str) -> HookRe
 
     def serve(request: httpx.Request) -> httpx.Response:
         # The answer belongs to one request: the client must ask for exactly it.
-        assert request.url == httpx.URL(SERVER_URL + path), request.url
+        assert request.url == httpx.URL(site.origin + path), request.url
         return httpx.Response(status, content=body, headers={"content-type": "application/json"})
 
+    site.serve_transport(httpx.MockTransport(serve))
     return HookResolver(
-        directory=FixedDirectory(),  # type: ignore[arg-type]
+        directory=FixedDirectory(site.origin),  # type: ignore[arg-type]
         signer=AppCredentialSigner(app_id=caller or "logs", key=key, purpose=HOOK_RESOLVE),
         app_origin=app["origin"],
-        transport=httpx.MockTransport(serve),
+        reach=_reach(site),
     )
 
 
-async def _read(answer: dict, status: int, body: bytes):
-    resolver = _resolver(answer["caller"], status, body, _hook_path(answer))
+async def _read(site: TeamServerSite, answer: dict, status: int, body: bytes):
+    resolver = _resolver(site, answer["caller"], status, body, _hook_path(answer))
     team_id = HOOKS["scenario"]["team_id"]
     request = answer["request"]
     if request["read"] in ("registrations", "productions"):
@@ -269,29 +293,29 @@ def _as_answered(item: Any) -> dict:
 
 
 @pytest.mark.parametrize("answer", HOOKS["answers"], ids=lambda answer: answer["name"])
-async def test_the_hook_resolver_reads_each_server_answer(answer):
+async def test_the_hook_resolver_reads_each_server_answer(site, answer):
     body = answer["body"].encode()
     if answer["outcome"] == "binding_required":
         with pytest.raises(HookBindingRequired):
-            await _read(answer, answer["status"], body)
+            await _read(site, answer, answer["status"], body)
         return
-    resolution = await _read(answer, answer["status"], body)
+    resolution = await _read(site, answer, answer["status"], body)
     sent = json.loads(answer["body"])
     listed = sent["keys"] if "keys" in sent else sent["bindings"]
     assert [_as_answered(item) for item in resolution.items] == listed
     assert resolution.team_id == HOOKS["scenario"]["team_id"]
-    assert resolution.server_url == SERVER_URL
+    assert resolution.server_url == site.origin
     assert resolution.max_age_seconds == min(sent["max_age_seconds"], 60)
 
 
 @pytest.mark.parametrize(
     "case", HOOKS["refused_answers"]["cases"], ids=lambda case: f"{case['base']}-{case['name']}"
 )
-async def test_a_refused_hook_answer_is_unavailable_and_its_base_is_read(case):
+async def test_a_refused_hook_answer_is_unavailable_and_its_base_is_read(site, case):
     base = _hook_answer(case["base"])
     changed = _apply(json.loads(base["body"]), case["op"], case["path"], case.get("value"))
     with pytest.raises(HookResolutionUnavailable) as unavailable:
-        await _read(base, base["status"], json.dumps(changed).encode())
+        await _read(site, base, base["status"], json.dumps(changed).encode())
     assert unavailable.value.code == HOOKS["refused_answers"]["outcome"]["unavailable"]
     # The case's one change is its only fault: the answer it changed is read.
-    assert (await _read(base, base["status"], base["body"].encode())).items
+    assert (await _read(site, base, base["status"], base["body"].encode())).items

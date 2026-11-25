@@ -76,7 +76,7 @@ async def test_a_certificate_published_after_a_sign_in_is_seen_after_the_refresh
         )
 
     unseen = await start()
-    assert (unseen.status_code, unseen.json()["detail"]) == (401, "unregistered")
+    assert (unseen.status_code, unseen.json()["detail"]["code"]) == (401, "certificate_unregistered")
     window = seconds_to_ns(UNKNOWN_CERTIFICATE_REFRESH_SECONDS + 1)
     monkeypatch.setattr(time, "monotonic_ns", lambda: signed_in_at + window)
     admitted = await start()

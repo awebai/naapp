@@ -38,7 +38,7 @@ async def test_a_lone_surrogate_in_the_certificate_is_a_401(registry, member) ->
     async with relying_app(registry, public_origin=ORIGIN) as (client, _):
         response = await client.get("/v1/items", headers=headers)
     assert response.status_code == 401, response.text
-    assert response.json()["detail"] == "bad_signature"
+    assert response.json()["detail"]["code"] == "certificate_bad_signature"
 
 
 async def test_a_lone_surrogate_in_the_signed_payload_is_a_401(registry, member) -> None:
@@ -53,7 +53,7 @@ async def test_a_lone_surrogate_in_the_signed_payload_is_a_401(registry, member)
     async with relying_app(registry, public_origin=ORIGIN) as (client, _):
         response = await client.get("/v1/items", headers=headers)
     assert response.status_code == 401, response.text
-    assert response.json()["detail"] == "Invalid X-AWEB-Signed-Payload"
+    assert response.json()["detail"]["code"] == "signed_payload_invalid"
 
 
 @pytest.mark.parametrize("depth", [6000, 100000], ids=["under-the-cap", "over-the-cap"])
@@ -63,7 +63,7 @@ async def test_deeply_nested_certificate_is_a_401(registry, member, depth) -> No
     async with relying_app(registry, public_origin=ORIGIN) as (client, _):
         response = await client.get("/v1/items", headers=headers)
     assert response.status_code == 401, response.text
-    assert response.json()["detail"] == "malformed"
+    assert response.json()["detail"]["code"] == "certificate_malformed"
 
 
 async def test_a_deeply_nested_signed_payload_is_a_401(registry, member) -> None:
@@ -72,7 +72,7 @@ async def test_a_deeply_nested_signed_payload_is_a_401(registry, member) -> None
     async with relying_app(registry, public_origin=ORIGIN) as (client, _):
         response = await client.get("/v1/items", headers=headers)
     assert response.status_code == 401, response.text
-    assert response.json()["detail"] == "Invalid X-AWEB-Signed-Payload"
+    assert response.json()["detail"]["code"] == "signed_payload_invalid"
 
 
 async def test_a_certificate_for_a_team_id_that_is_not_one_is_a_401(registry) -> None:
@@ -81,4 +81,4 @@ async def test_a_certificate_for_a_team_id_that_is_not_one_is_a_401(registry) ->
     async with relying_app(registry, public_origin=ORIGIN) as (client, _):
         response = await client.get("/v1/items", headers=headers)
     assert response.status_code == 401, response.text
-    assert response.json()["detail"] == "invalid_field: team_id"
+    assert response.json()["detail"]["code"] == "certificate_invalid_field"

@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import pytest
+from cloudflare_wire import ACCOUNT_ID, API_TOKEN, STREAM_UID, UPLOAD_URL, cloudflare_stream_api
 from fastapi import HTTPException
 
 from folio import cloudflare_stream
@@ -103,3 +106,39 @@ def test_a_readiness_that_is_not_a_boolean_is_refused_naming_it(ready_to_stream)
         _status({"state": "inprogress"}, ready_to_stream=ready_to_stream)
     assert refused.value.field == "readyToStream"
     assert refused.value.value == ready_to_stream
+
+
+async def test_a_direct_upload_sends_cloudflare_the_documented_request() -> None:
+    async with cloudflare_stream_api() as api:
+        settings = Settings(_env_file=None, public_origin="https://folio.example", **api.settings())
+        expires_at = datetime(2026, 11, 25, 12, 0, 0, 500_000, tzinfo=UTC)
+
+        upload = await cloudflare_stream.CloudflareStreamClient(settings).create_direct_upload(
+            max_duration_seconds=600, expires_at=expires_at
+        )
+
+    assert (upload.uid, upload.upload_url) == (STREAM_UID, UPLOAD_URL)
+    [sent] = api.received
+    assert (sent.method, sent.path) == ("POST", f"/accounts/{ACCOUNT_ID}/stream/direct_upload")
+    assert sent.authorization == f"Bearer {API_TOKEN}"
+    assert sent.body == {
+        "maxDurationSeconds": 600,
+        "expiry": "2026-11-25T12:00:00Z",
+        "requireSignedURLs": True,
+        "allowedOrigins": ["https://folio.example"],
+    }
+
+
+async def test_a_video_status_is_read_from_cloudflare_by_its_uid() -> None:
+    async with cloudflare_stream_api() as api:
+        api.state = "inprogress"
+        settings = Settings(_env_file=None, **api.settings())
+
+        status = await cloudflare_stream.CloudflareStreamClient(settings).get_video_status(
+            stream_uid=STREAM_UID
+        )
+
+    assert status == StreamStatus.PROCESSING
+    [sent] = api.received
+    assert (sent.method, sent.path) == ("GET", f"/accounts/{ACCOUNT_ID}/stream/{STREAM_UID}")
+    assert sent.authorization == f"Bearer {API_TOKEN}"

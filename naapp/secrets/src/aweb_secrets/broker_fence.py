@@ -31,6 +31,11 @@ from pgdbm.core import TransactionManager
 
 from aweb_secrets import derived_lineage, records
 from aweb_secrets.admission import Admission, AdmissionRefused, UseRequest, _covers
+from aweb_secrets.authority_integrity import (
+    AuthorityEvidenceInvalid,
+    AuthorityIntegrityKey,
+    AuthorityRecords,
+)
 from aweb_secrets.broker import SecretVersion
 from aweb_secrets.containment_state import ContainmentRefused, require_enabled
 from aweb_secrets.custody import SealContext
@@ -75,6 +80,7 @@ class BrokerFence:
         open_call: BrokerOpen | None = None,
         backend_version_check: Callable[[TransactionManager, SealContext], Awaitable[None]]
         | None = None,
+        integrity_key: AuthorityIntegrityKey | None = None,
     ) -> None:
         if not callable(clock) or type(derived_max_ttl_s) is not int or derived_max_ttl_s <= 0:
             raise ValueError("broker fence requires a live clock and positive deployment cap")
@@ -90,6 +96,9 @@ class BrokerFence:
         self.internal_destinations = internal_destinations
         self.open_call = copy.deepcopy(open_call)
         self.backend_version_check = backend_version_check
+        self._authority = (
+            None if integrity_key is None else AuthorityRecords(integrity_key, admission.installation)
+        )
         self._tx: TransactionManager | None = None
         self._call: PreparedBrokerCall | None = None
         self._forest: derived_lineage.LockedForest | None = None
@@ -104,6 +113,8 @@ class BrokerFence:
         self._tx, self._call, self._forest = None, None, None
         try:
             await self._prepare(tx)
+        except AuthorityEvidenceInvalid as refused:
+            raise AdmissionRefused(refused.code, 503) from None
         except (derived_lineage.LineageRefused, ContainmentRefused, EgressRefused) as refused:
             raise AdmissionRefused(refused.code) from None
 
@@ -141,6 +152,12 @@ class BrokerFence:
         )
         alive = forest.check(clock=self.clock, max_ttl_s=self.derived_max_ttl_s)
         path, stored = paths[0], paths[0][-1].secret
+        if self._authority is not None:
+            if len(path) != 1:
+                raise AuthorityEvidenceInvalid()
+            await records.require_secret_authority(
+                tx, self._authority, stored, ref=self.request.secret_ref
+            )
         if stored.active_version is None:
             raise AdmissionRefused("secret_disabled")
         _require(stored.active_version == intent["secret_version"], "secret_version_changed")
@@ -151,6 +168,7 @@ class BrokerFence:
             principal_did=key.principal_did,
             roles=roles,
             lock=False,
+            authority=self._authority,
         )
         selected = next(
             (g for g in grants if g.grant_id == intent["grant_id"] and g.capability == "use"), None
@@ -165,14 +183,20 @@ class BrokerFence:
             "grant_revoked",
         )
         policy = await records.policy(
-            tx, scope.installation_id, intent["policy_digest"], team_id=scope.team_id
+            tx,
+            scope.installation_id,
+            intent["policy_digest"],
+            team_id=scope.team_id,
+            authority=self._authority,
         )
         if policy is None:
             raise AdmissionRefused("grant_revoked")
         operation = (
             None
             if self.request.operation_id is None
-            else await derived_lineage.current_operation(tx, path, self.request.operation_id)
+            else await derived_lineage.current_operation(
+                tx, path, self.request.operation_id, authority=self._authority
+            )
         )
         sensitivity = (
             "sensitive"
@@ -186,8 +210,12 @@ class BrokerFence:
             not any(n.secret.record.approve_only for n in path) or intent["approval_required"],
             "operation_not_allowed",
         )
+        if self._authority is not None:
+            approval_required = policy.body["approval"] == "per_use" or stored.record.approve_only
+            if intent["approval_required"] != approval_required:
+                raise AuthorityEvidenceInvalid()
         destinations = await records.destinations(
-            tx, scope.installation_id, stored.record.secret_id
+            tx, scope.installation_id, stored.record.secret_id, authority=self._authority
         )
         if operation is not None:
             _require(operation.digest == intent["operation_digest"], "operation_not_allowed")

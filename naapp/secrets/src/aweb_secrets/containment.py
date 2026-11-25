@@ -32,7 +32,7 @@ from aweb_naapp.runtime.team_auth import Principal
 from pgdbm import AsyncDatabaseManager
 from pgdbm.core import TransactionManager
 
-from aweb_secrets import derived_lineage, run_pin_store, use_approvals
+from aweb_secrets import derived_lineage, records, run_pin_store, use_approvals
 from aweb_secrets.console import KeyBoundPreparation
 from aweb_secrets.containment_state import ContainmentRefused
 from aweb_secrets.containment_state import require_enabled as require_enabled
@@ -100,13 +100,7 @@ async def _disable(
     secret_ids: tuple[str, ...],
 ) -> None:
     for secret_id in secret_ids:
-        await tx.execute(
-            "UPDATE {{tables.secrets}} SET state='disabled', updated_at=NOW()"
-            " WHERE installation_id=$1 AND team_id=$2 AND secret_id=$3 AND state<>'disabled'",
-            installation_id,
-            team_id,
-            secret_id,
-        )
+        await records.disable_secret(tx, installation_id, team_id, secret_id)
         await custody.disable(
             tx,
             installation_id=installation_id,
@@ -831,7 +825,7 @@ class Containment:
         team_id: str,
         target_kind: str,
         target_ref: str,
-    ) -> None:
+    ) -> records.StoredSecret | None:
         """S10-only callback after passkey confirmation and ancestry preparation.
 
         No API containment action calls this method. Enabling one record never
@@ -846,7 +840,7 @@ class Containment:
                 installation_id,
                 team_id,
             )
-            return
+            return None
         if target_kind != "secret":
             raise ContainmentRefused("reenable_target_unsupported", 400)
         # Resolve the mutable ref without locking the child before its parent.
@@ -895,6 +889,7 @@ class Containment:
                     team_id=team_id,
                     secret_id=secret_id,
                 )
+                return nodes[-1].secret
         except derived_lineage.LineageRefused as refused:
             raise ContainmentRefused(refused.code) from None
 

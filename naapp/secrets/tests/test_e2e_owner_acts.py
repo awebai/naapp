@@ -155,6 +155,7 @@ def secrets_env() -> dict[str, str]:
         "SECRETS_HOOK_INTERNAL_DESTINATIONS": "allowed",
         "SECRETS_HOOK_INTERNAL_CIDR": LANE_SUBNET,
         "SECRETS_HOOK_CA_FILE": "/run/secrets-keys/hook-ca.pem",
+        "SECRETS_TEAM_SERVER_INTERNAL_ORIGINS": json.dumps([AWEB]),
     }
 
 

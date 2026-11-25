@@ -300,7 +300,7 @@ async def test_a_session_handoff_gives_a_removed_member_nothing(aw: Aw):  # noqa
     await removed_from_team(aw)
     before, certificate = await held_state(aw), await retained(aw)
     started, _, _ = await aw.start()
-    assert started.status_code in (401, 403), started.text
+    assert (started.status_code, started.json()) == (401, {"detail": "revoked"})
     assert (await held_state(aw), await retained(aw)) == (before, certificate)
     assert outcome(await login(aw)) == NOT_A_MEMBER
 

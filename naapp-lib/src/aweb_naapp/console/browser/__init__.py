@@ -36,7 +36,7 @@ _ASSETS = files(__package__)
 class SessionRefusal:
     """What a person reads, and can do, when the session refuses them: the
     member check, or an installation the console cannot observe. The remedy
-    names the deployment's app id as ``{app_id}``."""
+    can name the deployment’s app ID and the holder’s role."""
 
     status: int
     message: str
@@ -51,8 +51,10 @@ SESSION_REFUSALS = {
     "principal_not_member": SessionRefusal(
         403,
         "Your current team membership does not open this console.",
-        "If you are a member, sign in once from aw with “aw app human {app_id} session”, then "
-        "sign in here. Otherwise ask the team’s owner.",
+        "If you’re still a member, install your renewed team certificate in aw. Run "
+        "“aw --human <human-id> --human-domain <identity-domain> app credential register "
+        "{app_id} --role {member_role}” and complete registration. Then sign in with your "
+        "original passkey. Ask your team’s owner if you need help with your certificate or membership.",
         "/login",
         "Go to sign-in",
     ),
@@ -127,11 +129,12 @@ class CeremonyCopy:
 
 @dataclass(frozen=True)
 class ConsoleBrand:
-    """An app's console: its name, the deployment's id of the app, its tab CSRF
-    storage key, its stylesheet and its sign-in copy, all trusted app inputs."""
+    """The console’s trusted app inputs, including the deployment’s app ID
+    and the member role named in sign-in recovery."""
 
     product: str
     app_id: str
+    member_role: str
     csrf_key: str
     stylesheet: str
     sign_in: SignInCopy
@@ -212,7 +215,7 @@ class ConsoleShell:
         )
 
     def _remedy(self, refusal: SessionRefusal) -> str:
-        return refusal.remedy.replace("{app_id}", self.brand.app_id)
+        return refusal.remedy.format(app_id=self.brand.app_id, member_role=self.brand.member_role)
 
     def refused_page(self, error: HTTPException) -> Response:
         """A browser GET's refusal by the session: a session refusal as a page

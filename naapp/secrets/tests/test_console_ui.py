@@ -1,5 +1,6 @@
 """The browser shell mounts with real S4/B3 sessions and PostgreSQL."""
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from html.parser import HTMLParser
@@ -7,6 +8,8 @@ from urllib.parse import urlencode
 
 import aweb_naapp as naapp
 import httpx
+import pytest
+from aweb_logs.console_ui import logs_shell
 from aweb_naapp.console import CONSOLE_HEADERS, apply_console_migrations
 from aweb_naapp.css import font_bytes
 from aweb_naapp.roles import unassign
@@ -14,7 +17,7 @@ from aweb_naapp.runtime.origins import split_origins
 from fastapi import FastAPI, HTTPException
 
 from aweb_secrets.console import OwnerConsole, owner_console_router
-from aweb_secrets.console_ui import console_ui_router
+from aweb_secrets.console_ui import console_ui_router, secrets_shell
 from aweb_secrets.owners import OWNER_ROLE
 from tests.console_home import no_banner
 from tests.human_owner import fixture_member_admission
@@ -29,10 +32,14 @@ class Elements(HTMLParser):
     def __init__(self, html: str) -> None:
         super().__init__()
         self.tags: list[tuple[str, dict[str, str | None]]] = []
+        self.text: list[str] = []
         self.feed(html)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.tags.append((tag, dict(attrs)))
+
+    def handle_data(self, data: str) -> None:
+        self.text.append(data)
 
 
 @asynccontextmanager
@@ -180,11 +187,22 @@ def test_the_recovery_page_is_in_the_secrets_brand():
     assert action["href"] == "/activity"
 
 
-def test_membership_help_names_the_deployment():
-    from fastapi import HTTPException
-
-    from aweb_secrets.console_ui import secrets_shell
-
-    page = secrets_shell("sandbox-secrets").refused_page(HTTPException(403, "principal_not_member"))
+@pytest.mark.parametrize(
+    ("shell", "app_id", "role"),
+    [
+        (secrets_shell, "sandbox-secrets", "secrets.owner"),
+        (logs_shell, "sandbox-logs", "logs.reader"),
+    ],
+)
+def test_membership_help_names_the_deployment_and_role(shell, app_id, role):
+    page = shell(app_id).refused_page(HTTPException(403, "principal_not_member"))
     assert page.status_code == 403
-    assert b"aw app human sandbox-secrets session" in page.body
+    elements = Elements(page.body.decode())
+    command = (
+        "aw --human <human-id> --human-domain <identity-domain> "
+        f"app credential register {app_id} --role {role}"
+    )
+    assert command in "".join(elements.text)
+    body = next(attrs for tag, attrs in elements.tags if tag == "body")
+    inline = json.loads(body["data-copy-session-refusals"])["principal_not_member"]
+    assert command in inline

@@ -525,7 +525,7 @@ def signs_in_again_after_a_reissue(
         # The new passkey is never designated or used to sign back in.
         holder.run_in_browser(
             principal, console, "credential", "app", "credential", "register", app_id,
-            "--role", role, "--out", f"/runtime/holder/{app_id}-recovery-export.json",
+            "--role", role,
             device="recovery-authenticator.json",
         )
         answer = holder.login(console, scopes[app_id])

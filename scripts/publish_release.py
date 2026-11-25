@@ -178,15 +178,28 @@ def publish_pypi(root: Path, prefix: str, version: str) -> None:
             )
 
 
-OCI_REPOSITORIES = {
-    "secrets-v": "ghcr.io/awebai/secrets",
-    "logs-v": "ghcr.io/awebai/logs",
-    "folio-v": "ghcr.io/awebai/folio",
-    "library-v": "ghcr.io/awebai/library",
+OCI_APPS = {
+    "secrets-v": "secrets",
+    "logs-v": "logs",
+    "folio-v": "folio",
+    "library-v": "library",
 }
+# GHCR path segments: lowercase alphanumerics joined by single separators.
+IMAGE_NAMESPACE = re.compile(r"ghcr\.io(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+")
+
+
+def image_namespace() -> str:
+    """Where the app images are published: NAAPP_IMAGE_NAMESPACE (the release
+    workflow sets it to its repository owner), else ghcr.io/awebai."""
+    namespace = os.environ.get("NAAPP_IMAGE_NAMESPACE", "ghcr.io/awebai")
+    if IMAGE_NAMESPACE.fullmatch(namespace) is None:
+        raise PublishRefusal(f"NAAPP_IMAGE_NAMESPACE {namespace!r} is not a ghcr.io/<owner>[/<path>] namespace")
+    return namespace
+
+
 def oci_images(prefix: str) -> tuple[str, ...]:
     """The image repositories published by this tag."""
-    return (OCI_REPOSITORIES[prefix],)
+    return (f"{image_namespace()}/{OCI_APPS[prefix]}",)
 
 
 def build_oci_archive(

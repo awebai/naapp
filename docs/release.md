@@ -110,7 +110,10 @@ refuses a same-version byte conflict.
 ## App images
 
 An image tag publishes its app's image from `naapp/<app>/Dockerfile` and the
-repository root. It builds Linux amd64 and arm64 into one OCI archive, checked
+repository root, to `<namespace>/<app>`. The namespace is `NAAPP_IMAGE_NAMESPACE`:
+the workflow sets it to `ghcr.io/<repository owner>` (`ghcr.io/awebai`) unless the
+repository variable of that name gives another GHCR namespace, as a dry run under
+throwaway names does. A runnerless publication without it uses `ghcr.io/awebai`. It builds Linux amd64 and arm64 into one OCI archive, checked
 before the registry is touched. The exact OCI helper validates the archive and
 each platform's version/source labels. Version tags are immutable: a conflicting
 digest refuses, an identical one is adopted, and each published index is read

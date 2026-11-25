@@ -229,12 +229,34 @@ class PypiLaneContractTest(unittest.TestCase):
 
 class OciLaneContractTest(unittest.TestCase):
     def test_each_image_lane_publishes_its_app_repository(self):
-        self.assertEqual(PUBLISH.OCI_REPOSITORIES, {
-            "secrets-v": "ghcr.io/awebai/secrets",
-            "logs-v": "ghcr.io/awebai/logs",
-            "folio-v": "ghcr.io/awebai/folio",
-            "library-v": "ghcr.io/awebai/library",
-        })
+        with patch.dict(os.environ):
+            os.environ.pop("NAAPP_IMAGE_NAMESPACE", None)
+            self.assertEqual({prefix: PUBLISH.oci_images(prefix) for prefix in PUBLISH.OCI_APPS}, {
+                "secrets-v": ("ghcr.io/awebai/secrets",),
+                "logs-v": ("ghcr.io/awebai/logs",),
+                "folio-v": ("ghcr.io/awebai/folio",),
+                "library-v": ("ghcr.io/awebai/library",),
+            })
+
+    def test_the_image_namespace_can_name_another_ghcr_owner_or_path(self):
+        for namespace, expected in (("ghcr.io/example", "ghcr.io/example/logs"),
+                                    ("ghcr.io/awebai/naapp-dryrun", "ghcr.io/awebai/naapp-dryrun/logs")):
+            with self.subTest(namespace=namespace), patch.dict(os.environ, {"NAAPP_IMAGE_NAMESPACE": namespace}):
+                self.assertEqual(PUBLISH.oci_images("logs-v"), (expected,))
+
+    def test_an_image_namespace_outside_ghcr_or_malformed_refuses(self):
+        for namespace in ("docker.io/awebai", "ghcr.io", "ghcr.io/", "ghcr.io/AwebAI", "ghcr.io/awebai/",
+                          "ghcr.io//awebai", "ghcr.io/awebai/../x", " ghcr.io/awebai"):
+            with self.subTest(namespace=namespace), patch.dict(os.environ, {"NAAPP_IMAGE_NAMESPACE": namespace}):
+                with self.assertRaisesRegex(PUBLISH.PublishRefusal, "NAAPP_IMAGE_NAMESPACE"):
+                    PUBLISH.oci_images("logs-v")
+
+    def test_the_image_workflow_publishes_under_its_repository_owner_unless_a_variable_names_a_namespace(self):
+        workflow = (ROOT / ".github/workflows/service-image-release.yml").read_text(encoding="utf-8")
+        self.assertIn(
+            "NAAPP_IMAGE_NAMESPACE: ${{ vars.NAAPP_IMAGE_NAMESPACE || format('ghcr.io/{0}', github.repository_owner) }}",
+            workflow,
+        )
 
     def test_each_image_builds_its_app_dockerfile_from_the_repository_root(self):
         for prefix, app in (("secrets-v", "secrets"), ("logs-v", "logs"),

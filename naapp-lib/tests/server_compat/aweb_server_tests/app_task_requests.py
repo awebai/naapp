@@ -1,4 +1,4 @@
-"""aweb server/tests/test_app_task_requests.py at server-v1.27.53, the definitions the server-compatibility suite uses.
+"""aweb server/tests/test_app_task_requests.py at 2788969b6fce509437eab53637927bb97cf18b58, the definitions the server-compatibility suite uses.
 
 Copied verbatim by scripts/server_test_support.py and checked against COPIED by
 tests/server_compat/test_aweb_server_tests.py. Do not edit them here; rerun the
@@ -21,7 +21,9 @@ import json
 import pytest_asyncio
 from tests.server_compat.aweb_server_tests.dashboard_privacy import TEAM, privacy_app
 
-AWEB_TAG = 'server-v1.27.53'
+# Copied from an aweb commit, not a release: replaced by the re-copy
+# from the first server tag that carries this change.
+AWEB_REF = '2788969b6fce509437eab53637927bb97cf18b58'
 AWEB_PATH = 'server/tests/test_app_task_requests.py'
 AWEB_BLOB = '0e35141b3b3d0924f2235159b6611830cbc08a10'
 COPIED = {

@@ -1,4 +1,4 @@
-"""aweb server/tests/test_messages_http.py at server-v1.27.53, the definitions the server-compatibility suite uses.
+"""aweb server/tests/test_messages_http.py at 2788969b6fce509437eab53637927bb97cf18b58, the definitions the server-compatibility suite uses.
 
 Copied verbatim by scripts/server_test_support.py and checked against COPIED by
 tests/server_compat/test_aweb_server_tests.py. Do not edit them here; rerun the
@@ -13,7 +13,9 @@ from nacl.signing import SigningKey
 import base64
 import json
 
-AWEB_TAG = 'server-v1.27.53'
+# Copied from an aweb commit, not a release: replaced by the re-copy
+# from the first server tag that carries this change.
+AWEB_REF = '2788969b6fce509437eab53637927bb97cf18b58'
 AWEB_PATH = 'server/tests/test_messages_http.py'
 AWEB_BLOB = '1eff7642d7fc3fa2e3e46b070d5b725ea258676d'
 COPIED = {

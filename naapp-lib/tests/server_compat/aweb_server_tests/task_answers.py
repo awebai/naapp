@@ -1,4 +1,4 @@
-"""aweb server/tests/test_task_answers.py at server-v1.27.53, the definitions the server-compatibility suite uses.
+"""aweb server/tests/test_task_answers.py at 2788969b6fce509437eab53637927bb97cf18b58, the definitions the server-compatibility suite uses.
 
 Copied verbatim by scripts/server_test_support.py and checked against COPIED by
 tests/server_compat/test_aweb_server_tests.py. Do not edit them here; rerun the
@@ -11,7 +11,9 @@ import base64
 import hashlib
 from tests.server_compat.aweb_server_tests.dashboard_privacy import TEAM as LIVE_TEAM
 
-AWEB_TAG = 'server-v1.27.53'
+# Copied from an aweb commit, not a release: replaced by the re-copy
+# from the first server tag that carries this change.
+AWEB_REF = '2788969b6fce509437eab53637927bb97cf18b58'
 AWEB_PATH = 'server/tests/test_task_answers.py'
 AWEB_BLOB = 'cd32c4823c73280c370cded3019dc8e6d351b297'
 COPIED = {

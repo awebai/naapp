@@ -6,8 +6,9 @@
       "/manifests/v2.json": "2e9c71b2910bf91709efcbe77054bf0a424f62522f9e1503b26500192da2680a"
     },
     "library": {
-      "/.well-known/aweb-app.json": "c68373f5928d0cac3119c71b1e85b1f53babda8dea7801ad536e8c3a3baea273",
-      "/aweb-app.json": "c68373f5928d0cac3119c71b1e85b1f53babda8dea7801ad536e8c3a3baea273"
+      "/.well-known/aweb-app-versions.json": "70b00c91e960b2947ac413fd44b37f76869e93ee35322e2bcd9c39106d58ca5d",
+      "/aweb-app.json": "3eb6ebd43fa12bb34c503813ec1f460d0d1dcc9017bc911a8f2f7c636eac4b86",
+      "/manifests/v2.json": "3eb6ebd43fa12bb34c503813ec1f460d0d1dcc9017bc911a8f2f7c636eac4b86"
     },
     "logs": {
       "/.well-known/aweb-app-versions.json": "5cceafd2c9af2747270ca76cf962794b16811535f9eca5082c17fa4c05673513",
@@ -22,5 +23,5 @@
       "/manifests/v3.json": "ac7f68608c96c40d5e2f57169064f5f4e76622dd5d7ee4b06ce74f4185a184ef"
     }
   },
-  "recorded_from": "folio and library: aweb d8ee9ed31ad275da7cab3a3cade0006e06587f02, each in its own aweb environment; logs and secrets: naapp 2726d99c7, after their v3 manifests gained the session action"
+  "recorded_from": "folio: aweb d8ee9ed31ad275da7cab3a3cade0006e06587f02, in its own aweb environment; library: naapp, after its manifest declared the grant-read key (every installation re-pins); logs and secrets: naapp 2726d99c7, after their v3 manifests gained the session action"
 }

@@ -52,9 +52,9 @@ HEALTH_READINESS_SECONDS = 90.0
 HEALTH_RETRY_SECONDS = 5.0
 HEALTH_BODY_LIMIT = 16_384
 NOT_YET_HEALTH_STATUSES = {404, 408, 425, 429, 500, 502, 503, 504}
-# The deploy check names itself: Cloudflare on a public zone refuses Python's default
-# User-Agent with its browser-signature 403, which would hide a healthy service and
-# make a real outage look the same.
+# The ops tool names itself, on health checks and Render API calls alike: Cloudflare on
+# a public zone refuses Python's default User-Agent with its browser-signature 403,
+# which would hide a healthy service and make a real outage look the same.
 HEALTH_USER_AGENT = "aweb-naapp-deploy-check/1.0"
 
 
@@ -165,6 +165,7 @@ class RenderClient:
                 "Authorization": f"Bearer {self._api_key}",
                 "Accept": "application/json",
                 "Content-Type": "application/json",
+                "User-Agent": HEALTH_USER_AGENT,
             },
         )
         try:

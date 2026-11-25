@@ -40,12 +40,15 @@ class FakeRender:
     # to Python's default User-Agent (naapp/library/docs/production-operations.md).
     edge_refuses_default_python_agent: bool = False
     health_agents: list[str] = field(default_factory=list)
+    api_agents: list[str] = field(default_factory=list)
     requests: list[tuple[str, str, Any]] = field(default_factory=list)
     polls_until_live: int = 1
     _counter: int = 0
 
     def handle(self, method: str, path: str, body: Any, user_agent: str = "") -> tuple[int, Any]:
         self.requests.append((method, path, body))
+        if path.startswith("/v1/"):
+            self.api_agents.append(user_agent)
         base = f"/v1/services/{SERVICE_ID}"
         if method == "GET" and path == "/health":
             self.health_agents.append(user_agent)
@@ -831,6 +834,12 @@ def test_a_config_that_requires_evidence_refuses_a_deploy_without_it(history) ->
     with pytest.raises(OpsError, match="evidence"):
         _deploy(client, config, work, tip, live)
     assert state.posts() == []
+
+
+def test_render_api_requests_name_the_ops_tool(fake) -> None:
+    state, config, client = _ready(fake)
+    render.status(client, config)
+    assert state.api_agents and set(state.api_agents) == {render.HEALTH_USER_AGENT}
 
 
 def test_wait_stops_on_a_failed_build(fake) -> None:

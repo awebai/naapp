@@ -147,9 +147,8 @@ def test_ci_runs_every_make_gate_on_main_pull_request_and_manual_retry() -> None
     assert set(workflow["on"]) == {"push", "pull_request", "workflow_dispatch"}
     assert workflow["on"]["push"] == {"branches": ["main"]}
     commands = _commands("library", "library-e2e")
-    for target in ("lint", "check-library-aatk", "test", "e2e-library"):
+    for target in ("lint", "test", "e2e-library"):
         assert f"make {target}" in commands
-    assert "naapp/library aatk-spec-check" in _recipe("check-library-aatk")
     assert "naapp/library e2e" in _recipe("e2e-library")
 
 

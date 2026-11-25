@@ -379,9 +379,6 @@ jobs:
       - name: Lint and type-check
         run: make lint
 
-      - name: Validate the AATK structural contract
-        run: make check-library-aatk
-
       - name: Run unit and contract tests
         run: make test
 

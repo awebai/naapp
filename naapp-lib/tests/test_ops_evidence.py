@@ -224,7 +224,7 @@ def _git_without_inherited_repository(*args: str) -> None:
 
 def _committed_script_repo(tmp_path: Path, content: str = "print('clean')\n") -> tuple[Path, Path]:
     repo = tmp_path / "repo"
-    script = repo / "scripts" / "render_ops.py"
+    script = repo / "scripts" / "render.py"
     script.parent.mkdir(parents=True)
     script.write_text(content, encoding="utf-8")
     _git_without_inherited_repository("init", "-q", str(repo))

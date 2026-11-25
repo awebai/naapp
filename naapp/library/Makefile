@@ -1,7 +1,6 @@
 .PHONY: test test-server lint compile run e2e e2e-up e2e-down api-serve api-stop \
-	prod-tools-prepare prod-shelf-pin prod-ops-test prod-public-identity prod-status prod-health-client-proof prod-move-build prod-deploy prod-wait prod-verify prod-rollback prod-recovery \
-	prod-gate-candidate prod-gate-recovery prod-gate-current-incumbent \
-	aatk-predicate-inventory aatk-spec-check aatk-validate-preplan aatk-validate-release
+	prod-tools-prepare prod-shelf-pin prod-ops-test prod-public-identity prod-status prod-deploy prod-wait prod-verify prod-rollback prod-recovery \
+	prod-gate-candidate prod-gate-recovery
 
 API_PORT ?= 8765
 # A local .env configures the dev server only when it exists; Library itself reads
@@ -22,22 +21,15 @@ AW_SOURCE_HOME ?=
 EXPECTED_PROFILE_REF ?=
 EXPECTED_PROFILE_VERSION ?=
 EXPECTED_PROFILE_DIGEST ?=
-INCUMBENT_SERVICE_ID ?=
-INCUMBENT_DEPLOY_ID ?=
-INCUMBENT_COMMIT ?=
-ALLOW_LEGACY_MISSING_BUILD_FOR ?=
 APPLY ?= 0
 PROD_EVIDENCE_DIR ?=
-AATK_EVIDENCE_INDEX ?=
 
 # Export operational values instead of interpolating them into recipes. This keeps
 # operator-provided IDs and paths out of shell parsing; Python performs exact validation.
 export PROD_CONFIG RENDER_ENV_FILE PROD_COMMIT PROD_DEPLOY_ID CURRENT_DEPLOY_ID CURRENT_COMMIT
 export ROLLBACK_DEPLOY_ID
 export ROLLBACK_COMMIT CONFIRM_SERVICE_ID AW_SOURCE_HOME EXPECTED_PROFILE_VERSION
-export EXPECTED_PROFILE_REF EXPECTED_PROFILE_DIGEST INCUMBENT_SERVICE_ID INCUMBENT_DEPLOY_ID INCUMBENT_COMMIT
-export ALLOW_LEGACY_MISSING_BUILD_FOR APPLY PROD_EVIDENCE_DIR
-export AATK_EVIDENCE_INDEX LIBRARY_GATE_TOOL_ROOT
+export EXPECTED_PROFILE_REF EXPECTED_PROFILE_DIGEST APPLY PROD_EVIDENCE_DIR LIBRARY_GATE_TOOL_ROOT
 
 test:
 	uv run pytest -q -m "not e2e"
@@ -85,34 +77,28 @@ prod-shelf-pin:
 	uv run python scripts/library_prod_gate.py shelf-pin
 
 prod-ops-test:
-	uv run pytest -q tests/test_render_ops.py tests/test_library_prod_gate.py tests/test_prepare_gate_tools.py
+	uv run pytest -q tests/test_library_prod_gate.py tests/test_prepare_gate_tools.py
 
+# Render operations run naapp-lib's shared tool (aweb_naapp.ops), with Library's
+# config; its own checks are the library_prod_gate.py steps after verify.
 prod-public-identity:
-	uv run python scripts/render_ops.py public-identity
+	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) public-identity
 
 prod-status:
-	uv run python scripts/render_ops.py status
-
-prod-health-client-proof:
-	uv run python scripts/render_ops.py health-client-proof
-
-prod-move-build:
-	git fetch --quiet origin main
-	uv run python scripts/render_ops.py move-build --repo-root ../..
+	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) status
 
 prod-deploy:
-	git fetch --quiet origin
-	uv run python scripts/render_ops.py deploy
+	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) deploy --repo-root ../..
 
 prod-wait:
-	uv run python scripts/render_ops.py wait
+	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) wait
 
 prod-verify:
-	uv run python scripts/render_ops.py verify
+	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) verify
 	uv run python scripts/library_prod_gate.py candidate
 
 prod-rollback:
-	uv run python scripts/render_ops.py rollback
+	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) rollback
 
 # This recovery fingerprint is specific to the 0c490a362 rollback artifact. Future
 # releases must add and review their own exact recovery gate rather than reusing it.
@@ -125,22 +111,3 @@ prod-gate-candidate:
 
 prod-gate-recovery:
 	uv run python scripts/library_prod_gate.py runtime-managed-0c490a362
-
-# Read-only semantic probe for the exact pre-aasb incumbent. It does not query Render
-# identity or authorize AATK receipts; later orchestration binds these asserted pins.
-prod-gate-current-incumbent:
-	uv run python scripts/library_prod_gate.py current-incumbent
-
-aatk-predicate-inventory:
-	uv run python scripts/aatk.py inventory
-
-aatk-spec-check:
-	uv run python scripts/aatk.py spec
-
-aatk-validate-preplan:
-	@[ -n "$$AATK_EVIDENCE_INDEX" ] || { echo "AATK_EVIDENCE_INDEX is required"; exit 2; }
-	uv run python scripts/aatk.py preplan --index "$$AATK_EVIDENCE_INDEX"
-
-aatk-validate-release:
-	@[ -n "$$AATK_EVIDENCE_INDEX" ] || { echo "AATK_EVIDENCE_INDEX is required"; exit 2; }
-	uv run python scripts/aatk.py release --index "$$AATK_EVIDENCE_INDEX"

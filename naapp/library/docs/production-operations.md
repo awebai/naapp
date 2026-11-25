@@ -102,32 +102,11 @@ in the image as it does in a checkout.
 | Docker build context | `.` (the repository root) |
 | Health check path | `/health` |
 
-`ops/render-production.json` pins these values. Until the live service's settings move to
-this build, `make prod-status` fails closed and names the fields that differ. The established incumbent has `rootDir=naapp/library`,
-`dockerfilePath=./Dockerfile`, and `dockerContext=.`; only the first two change.
-
-### Moving the live service onto this build
-
-The settings change and the first deploy of a commit with this Dockerfile go together:
-
-1. Before the change, a build of any commit with this Dockerfile under the
-   `naapp/library` root directory fails at the first `COPY naapp-lib/...`. A failed build does
-   not replace the running deploy.
-2. After the change, a build of an older commit whose Dockerfile expects the
-   `naapp/library` context fails the same way. Rollback across the change therefore uses
-   `make prod-rollback`, which redeploys an earlier deploy's built artifact and does not
-   rebuild; a commit deploy of a pre-change commit is not a rollback path.
-3. Record the live deploy ID and commit before the change as the rollback target.
-   Run `make prod-move-build` with the candidate and rollback pins, `APPLY=1`, the
-   exact service confirmation and a fresh evidence directory. It accepts only the
-   established before-values above, validates the entire topology and live artifact,
-   and changes exactly `rootDir` and `dockerfilePath` in one Render PATCH. It checks
-   the after-values and that the live deploy did not change. Render’s settings update
-   does not start a deploy; run `make prod-deploy` next.
-   Artifact rollback does not reverse these build settings: it reuses the existing
-   image without rebuilding and leaves future builds on the reviewed repository-root layout.
-4. Verify the new deploy with `make prod-verify` and an authenticated read, which
-   exercises team-certificate verification through awid-service.
+`ops/render-production.json` pins these values, and `make prod-status` fails closed and
+names any field that differs. The live service moved onto this repository-root build on
+2026-11-06 (from `rootDir=naapp/library` and `dockerfilePath=./Dockerfile`). An artifact
+built under the earlier settings stays a valid rollback target: `make prod-rollback`
+redeploys the built artifact and never rebuilds it.
 
 ## Required release record
 
@@ -140,7 +119,7 @@ Before requesting production approval, record all of the following:
 - the independent review verdict;
 - the human approval for this service, including any candidate constraints it imposes.
 
-`prod-deploy` and `prod-move-build` read `main` from the remote itself and refuse unless
+`prod-deploy` reads `main` from the remote itself and refuse unless
 `PROD_COMMIT` is on it (the tip or behind it) and strictly ahead of the live commit: a
 deploy never moves production backwards, which is `prod-rollback`'s job, with a built
 artifact. When main has moved past the approved candidate, deploy that candidate; do not
@@ -161,21 +140,18 @@ rollback artifact after starting the deploy.
 |---|---|
 | `make prod-tools-prepare` | Downloads and verifies the reviewed Linux x86_64 clients in an empty operator-owned mode-0700 `LIBRARY_GATE_TOOL_ROOT`; changes no global tools. |
 | `make prod-shelf-pin` | Read-only public materialization for both runtimes; checks explicit ref/version/digest and recomputes the content digest from source profile files before deploy. |
-| `make prod-ops-test` | Mocked operations and gate tests; no network mutation. |
+| `make prod-ops-test` | The gate's tests; no network mutation. The Render operations are naapp-lib's shared tool (`python -m aweb_naapp.ops`), tested with naapp-lib (`tests/test_ops_render.py`, `tests/test_ops_evidence.py`). |
 | `make prod-public-identity` | Credential-less comparison of public automatic Render metadata with the pinned topology; validates commit identity but cannot attest region. |
 | `make prod-status` | Read-only topology and current-live-deploy preflight. |
-| `make prod-health-client-proof ...` | Makes exactly two bounded canonical health requests: the known-blocked baseline UA must return 403 and the honest gate UA must return the exact 200 payload; persists both artifacts. |
-| `make prod-gate-current-incumbent ...` | Read-only semantic probe of the exact pinned pre-aasb incumbent: authenticated generated-origin then mandatory public materialization for both runtimes, validating only the pinned legacy response shape. It does not prove the asserted deploy is live or emit AATK receipts. |
-| `make prod-move-build ... APPLY=1` | Performs only the pinned incumbent-to-repository-root build-settings transition; verifies the live artifact remains unchanged. |
 | `make prod-deploy ... APPLY=1` | Validates topology and rollback pin, verifies the candidate is on the remote `main` and ahead of the live commit, starts a clear-cache deploy, waits for `live`, then waits boundedly for exact origin and public health readiness. |
 | `make prod-wait ...` | Restartable read-only wait for one exact deploy ID and commit. |
 | `make prod-verify ...` | Requires the exact deploy to be the sole live artifact, checks origin/public health, then runs generated-origin raw, public raw, released-client, and real-harness gates. |
-| `make prod-rollback ... APPLY=1` | Pins the exact current live deployment, validates a distinct known-good rollback deploy ID/commit/state, rolls back, waits, re-checks the sole live artifact, and checks both health surfaces against the approved rollback commit. A pre-build-identity artifact additionally requires an explicit per-run `ALLOW_LEGACY_MISSING_BUILD_FOR` equal to that rollback commit. |
+| `make prod-rollback ... APPLY=1` | Pins the exact current live deployment, validates a distinct known-good rollback deploy ID/commit/state, rolls back, waits, re-checks the sole live artifact, and checks both health surfaces against the approved rollback commit, which must report its build identity. |
 | `make prod-recovery ... APPLY=1` | Performs the pinned rollback and its explicitly selected recovery gate. |
 
 Run `make prod-ops-test` before release planning. The mutation targets deliberately
 require `APPLY=1` and `CONFIRM_SERVICE_ID=srv-d8qm4jvavr4c73dhrmgg` in addition to the
-artifact pins. Settings move, deploy, verify, rollback, and health-client proof also require a fresh
+artifact pins. Deploy, verify and rollback also require a fresh
 absolute `PROD_EVIDENCE_DIR` outside the repository. The directory must not exist; its
 parent must be an operator-owned exact-mode-0700 path with no symlink component. The tooling
 retains no-follow directory descriptors, detects path replacement before and after publication,
@@ -186,15 +162,6 @@ semantics, timing, bounded body bytes and their captured-byte digest/completenes
 of diagnostic response headers, and bounded omitted header names/count but never omitted
 values. A terminal outcome survives HTTP, DNS, TLS, timeout, and no-response failure. The
 operator owns retention and cleanup.
-
-The legacy-incumbent client proof requires its exact live commit and explicit missing-build pin:
-
-```text
-make prod-health-client-proof \
-  CURRENT_COMMIT=<40-char-current-live> \
-  ALLOW_LEGACY_MISSING_BUILD_FOR=<same-40-char-current-live> \
-  PROD_EVIDENCE_DIR=/absolute/operator-owned/client-proof-run
-```
 
 Example deploy variable shape (placeholders only):
 
@@ -242,8 +209,9 @@ the strict-client check. `prod-verify` never installs or grants an app. Any need
 `aw plugin install` is a separate, explicitly authorized operator step in the release
 record, with the served manifest digest checked against the reviewed pin.
 
-Every Library health request, Render API request and private-tool download identifies
-itself as `aweb-library-deploy-gate/1.0`. Materialization and plugin requests use the
+Health checks and Render API requests from the shared ops tool identify themselves as
+`aweb-naapp-deploy-check/1.0`; the gate's private-tool downloads identify themselves as
+`aweb-library-deploy-gate/1.0`. Materialization and plugin requests use the
 released `aw` client’s own User-Agent; Claude Code and Pi use their provider clients.
 These are not health probes and do not inherit the Python health User-Agent.
 
@@ -269,7 +237,7 @@ artifact `dep-db4prf142hec73eibj7g` at
 and runtime-specific `ref.json`/`managed_set`. Recovery checks generated-origin and
 public raw materialization, successful released strict-client materialization, and the
 real Claude Code and Pi instruction rendering, using the same explicit shelf pins as
-verification. It requires no missing-build exception. Pass the failed candidate’s
+verification. Pass the failed candidate’s
 exact live deploy ID and SHA as `CURRENT_DEPLOY_ID`/`CURRENT_COMMIT`, plus the
 pre-recorded rollback artifact as `ROLLBACK_DEPLOY_ID`/`ROLLBACK_COMMIT`, and a fresh
 `PROD_EVIDENCE_DIR`. `prod-rollback` verifies the newly created rollback deploy’s health
@@ -279,20 +247,6 @@ The historical `legacy-aasb` mode remains only for its July artifact; it is not 
 release’s recovery path. It expects raw responses without runtime/managed-set fields
 and the precise strict-client schema rejection. Applying it to the October incumbent
 would incorrectly reject working runtime-specific materialization.
-
-`ALLOW_LEGACY_MISSING_BUILD_FOR` is never defaulted or stored as an exception list. It is
-accepted only when it is a full SHA exactly equal to the approved target for that invocation.
-It accepts only the established two-key `{"status":"ok","service":"library"}` shape;
-null `build.git_sha`, malformed build identity, and any other payload still fail. Naming a
-different commit fails before a request or rollback mutation. Candidate deploy and verify
-never set this exception and always require exact `build.git_sha` equality.
-
-For the read-only incumbent preflight, this exception expires as soon as the build-identified
-candidate becomes live. For rollback/recovery, it remains only while the exact pre-AASR
-artifact is the approved rollback target and must be removed when that target is replaced by a
-verified build-identified artifact. No deployed Library artifact ever emitted a present
-`{"build":{"git_sha":null}}` shape, so the speculative null-build exception was removed
-rather than broadened alongside the real legacy contract.
 
 Do not reuse `legacy-aasb` for a later release. Add and review the later release's exact
 recovery fingerprint before its production approval.

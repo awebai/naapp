@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import threading
@@ -41,14 +42,29 @@ class FakeRender:
     edge_refuses_default_python_agent: bool = False
     health_agents: list[str] = field(default_factory=list)
     api_agents: list[str] = field(default_factory=list)
+    api_authorizations: list[str] = field(default_factory=list)
+    # Render answering every API request with this status (an error).
+    api_status: int | None = None
+    # Called after a POST is answered, and on every poll of a deploy.
+    after_post: Any = None
+    on_poll: Any = None
+    # The health body is cut short of its Content-Length.
+    health_truncated: bool = False
+    # Bytes sent in place of any HTTP response at all (a broken status line).
+    health_raw: bytes | None = None
     requests: list[tuple[str, str, Any]] = field(default_factory=list)
     polls_until_live: int = 1
     _counter: int = 0
 
-    def handle(self, method: str, path: str, body: Any, user_agent: str = "") -> tuple[int, Any]:
+    def handle(
+        self, method: str, path: str, body: Any, user_agent: str = "", authorization: str = ""
+    ) -> tuple[int, Any]:
         self.requests.append((method, path, body))
         if path.startswith("/v1/"):
             self.api_agents.append(user_agent)
+            self.api_authorizations.append(authorization)
+            if self.api_status is not None:
+                return self.api_status, {"message": "denied"}
         base = f"/v1/services/{SERVICE_ID}"
         if method == "GET" and path == "/health":
             self.health_agents.append(user_agent)
@@ -68,6 +84,8 @@ class FakeRender:
             deploy = self._find(path.rsplit("/", 1)[1])
             if deploy is None:
                 return 404, {}
+            if self.on_poll is not None:
+                self.on_poll(deploy)
             if deploy["status"] == "build_in_progress":
                 deploy["_polls"] = deploy.get("_polls", 0) + 1
                 if deploy["_polls"] >= self.polls_until_live:
@@ -77,12 +95,18 @@ class FakeRender:
                     deploy["status"] = "live"
             return 200, deploy
         if method == "POST" and path == f"{base}/deploys":
-            return 201, self._create(str(body["commitId"]))
+            created = self._create(str(body["commitId"]))
+            if self.after_post is not None:
+                self.after_post()
+            return 201, created
         if method == "POST" and path == f"{base}/rollback":
             target = self._find(str(body["deployId"]))
             if target is None:
                 return 404, {}
-            return 201, self._create(target["commit"]["id"])
+            created = self._create(target["commit"]["id"])
+            if self.after_post is not None:
+                self.after_post()
+            return 201, created
         return 404, {}
 
     def health_payload(self) -> dict[str, Any]:
@@ -110,20 +134,32 @@ def fake() -> Iterator[tuple[FakeRender, str]]:
 
     class Handler(BaseHTTPRequestHandler):
         def _respond(self) -> None:
+            if self.path == "/health" and state.health_raw is not None:
+                state.health_agents.append(self.headers.get("User-Agent", ""))
+                self.wfile.write(state.health_raw)
+                self.close_connection = True
+                return
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length)) if length else None
             status, payload = state.handle(
-                self.command, self.path, body, self.headers.get("User-Agent", "")
+                self.command,
+                self.path,
+                body,
+                self.headers.get("User-Agent", ""),
+                self.headers.get("Authorization", ""),
             )
             data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(data)))
+            truncated = self.path == "/health" and state.health_truncated
+            self.send_header("Content-Length", str(len(data) + (100 if truncated else 0)))
             if self.path == "/health":
                 for name, value in state.health_headers.items():
                     self.send_header(name, value)
             self.end_headers()
-            self.wfile.write(data)
+            self.wfile.write(data[: len(data) // 2] if truncated else data)
+            if truncated:
+                self.close_connection = True
 
         do_GET = _respond
         do_POST = _respond
@@ -840,6 +876,287 @@ def test_render_api_requests_name_the_ops_tool(fake) -> None:
     state, config, client = _ready(fake)
     render.status(client, config)
     assert state.api_agents and set(state.api_agents) == {render.HEALTH_USER_AGENT}
+
+
+# --- Gaps from the coverage map of Library's retired render_ops tests ---
+
+
+def test_public_identity_reads_only_the_public_url(fake) -> None:
+    state, config, _client = _ready(fake)
+    config = _identified(state, _both_surfaces(config), origin_url=config.origin_url)
+    config = replace(config, public_url=_both_surfaces(config).public_url)
+    render.public_identity(config)
+    assert state.health_agents == [render.HEALTH_USER_AGENT]
+
+
+def test_public_identity_refuses_a_deployment_block_with_an_extra_field(fake) -> None:
+    state, config, _client = _ready(fake)
+    config = _identified(state, config, region="oregon")
+    with pytest.raises(OpsError, match="deployment block"):
+        render.public_identity(config)
+
+
+def test_public_identity_refuses_another_origin(fake) -> None:
+    state, config, _client = _ready(fake)
+    config = _identified(state, config, origin_url="https://elsewhere.example")
+    with pytest.raises(OpsError, match="origin_url"):
+        render.public_identity(config)
+
+
+def test_a_render_api_error_never_carries_the_key(fake) -> None:
+    state, config, _client = _ready(fake)
+    client = RenderClient("secret-render-key-value", base_url=f"{fake[1]}/v1")
+    state.api_status = 403
+    with pytest.raises(OpsError) as refused:
+        render.status(client, config)
+    assert "secret-render-key-value" not in str(refused.value)
+    assert state.api_authorizations == ["Bearer secret-render-key-value"]
+
+
+@pytest.mark.parametrize(
+    "build", [{"git_sha": "a" * 39}, {"git_sha": None}, {"git_sha": "A" * 40}], ids=["short", "null", "upper"]
+)
+def test_a_health_build_identity_that_is_not_a_full_sha_fails_at_once(fake, build) -> None:
+    state, config, client = _ready(fake)
+    state.health_not_yet = [(200, {"status": "ok", "service": "folio", "build": build})] * 1000
+    with pytest.raises(OpsError, match="no build identity"):
+        render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT, **FAST)
+    assert len(state.health_agents) == 1
+
+
+def test_extra_build_fields_are_tolerated(fake) -> None:
+    # Changed by design: the shared check reads build.git_sha and ignores what else
+    # a build block reports (Library's own check required exactly {"git_sha"}).
+    state, config, client = _ready(fake)
+    state.health_not_yet = [
+        (200, {"status": "ok", "service": "folio", "build": {"git_sha": LIVE_COMMIT, "built_at": "now"}})
+    ]
+    render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT, **FAST)
+
+
+def test_a_403_is_not_asked_again(fake) -> None:
+    state, config, client = _ready(fake)
+    state.health_status = 403
+    with pytest.raises(OpsError, match="HTTP 403"):
+        render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT, **FAST)
+    assert len(state.health_agents) == 1
+
+
+def test_a_403_s_body_and_allowed_headers_are_kept_as_evidence(fake, tmp_path) -> None:
+    state, config, client = _ready(fake)
+    state.health_not_yet = [(403, b"error code: 1010")]
+    state.health_headers = {"Server": "cloudflare", "CF-Ray": "ray-id", "Set-Cookie": "must-not-persist"}
+    run = _evidence_run(tmp_path, "verify-health")
+    with pytest.raises(OpsError, match="HTTP 403"):
+        render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT, evidence=run, **FAST)
+    probe = _records(run)[1]
+    assert (probe["status"], probe["body_preview"]) == (403, "error code: 1010")
+    assert "cloudflare" in probe["response_headers"]["server"]
+    assert "set-cookie" in probe["omitted_response_header_names"]
+    assert "must-not-persist" not in (run.path / "002.json").read_text()
+
+
+def test_a_health_body_that_is_not_utf8_is_asked_again(fake) -> None:
+    state, config, client = _ready(fake)
+    state.health_not_yet = [(200, b"\xff\xfe")]
+    render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT, **FAST)
+    assert len(state.health_agents) == 2
+
+
+def test_a_health_body_cut_short_fails_as_ops_error(fake) -> None:
+    state, config, client = _ready(fake)
+    state.health_truncated = True
+    with pytest.raises(OpsError):
+        render.verify(
+            client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT,
+            readiness_timeout_seconds=0.2, retry_interval_seconds=0.01,
+        )
+
+
+def test_a_health_answer_that_is_not_http_is_asked_again_as_an_ops_error(fake) -> None:
+    state, config, client = _ready(fake)
+    state.health_raw = b"NOT-HTTP garbage\r\n\r\n"
+    with pytest.raises(OpsError, match="health readiness failed"):
+        render.verify(
+            client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT,
+            readiness_timeout_seconds=0.2, retry_interval_seconds=0.01,
+        )
+
+
+def test_a_health_body_exactly_at_the_limit_is_read(fake) -> None:
+    state, config, client = _ready(fake)
+    payload = {"status": "ok", "service": "folio", "build": {"git_sha": LIVE_COMMIT}, "pad": ""}
+    payload["pad"] = "x" * (render.HEALTH_BODY_LIMIT - len(json.dumps(payload).encode()))
+    assert len(json.dumps(payload).encode()) == render.HEALTH_BODY_LIMIT
+    state.health_not_yet = [(200, json.dumps(payload).encode())]
+    render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT, **FAST)
+
+
+def test_retries_stop_when_the_next_would_pass_the_deadline(fake) -> None:
+    # Changed by design: the deadline bounds the retries; an answer that is this
+    # deploy's is accepted whenever it arrives, and no progress lines are printed
+    # (the evidence directory records each probe).
+    state, config, client = _ready(fake)
+    state.health_not_yet = [(503, {})] * 1000
+    now = [0.0]
+    with pytest.raises(OpsError, match="after 10 seconds and 6 attempts"):
+        render.verify_health_surfaces(
+            config, LIVE_COMMIT, readiness_timeout_seconds=10, retry_interval_seconds=2,
+            sleep=lambda seconds: now.__setitem__(0, now[0] + seconds), monotonic=lambda: now[0],
+        )
+    # Probes at 0, 2, 4, 6, 8 and 10 seconds; the next would pass the deadline.
+    assert len(state.health_agents) == 6
+
+
+def test_status_refuses_an_unknown_deploy_state(fake) -> None:
+    state, config, client = _ready(fake)
+    state.deploys.insert(0, {"id": "dep-future01", "status": "future_state", "commit": {"id": "c" * 40}})
+    with pytest.raises(OpsError, match="unknown Render deploy state"):
+        render.status(client, config)
+
+
+@pytest.mark.parametrize("status", ["created", "queued"])
+def test_a_created_or_queued_deploy_counts_as_active(fake, status) -> None:
+    state, config, client = _ready(fake)
+    state.deploys.insert(0, {"id": "dep-pending01", "status": status, "commit": {"id": "c" * 40}})
+    with pytest.raises(OpsError, match="another deploy is active"):
+        render.status(client, config)
+
+
+def test_deploy_refuses_a_health_that_reports_no_build(history) -> None:
+    state, config, client, work, live, _approved, tip = history
+    state.health_not_yet = [(200, {"status": "ok", "service": "folio"})] * 1000
+    with pytest.raises(OpsError, match="no build identity"):
+        _deploy(client, config, work, tip, live, **FAST)
+
+
+def test_deploy_writes_its_run_manifest_before_the_deploy_request(history, tmp_path) -> None:
+    state, config, client, work, live, _approved, tip = history
+    run = _evidence_run(tmp_path, "deploy-health")
+    seen: list[bool] = []
+    state.after_post = lambda: seen.append((run.path / "001.json").exists())
+
+    _deploy(client, config, work, tip, live, evidence=run, **FAST)
+
+    assert seen == [True]
+    records = _records(run)
+    assert records[0]["probe_kind"] == "run-manifest"
+    assert (records[-1]["outcome"], records[-1]["stage"]) == ("passed", "deploy")
+    assert state.api_authorizations[0] == "Bearer test-key"
+
+
+def test_rollback_records_its_probes_and_outcome(fake, tmp_path) -> None:
+    state, config, client = _ready(fake)
+    run = _evidence_run(tmp_path, "rollback-health")
+    render.rollback(
+        client, config, rollback_deploy_id=EARLIER_DEPLOY, rollback_commit=EARLIER_COMMIT,
+        current_deploy_id=LIVE_DEPLOY, current_commit=LIVE_COMMIT,
+        timeout_seconds=10, interval_seconds=0, evidence=run, **FAST,
+    )
+    records = _records(run)
+    assert "unauthenticated-health" in [r["probe_kind"] for r in records]
+    assert (records[-1]["outcome"], records[-1]["stage"]) == ("passed", "rollback")
+
+
+def test_rollback_refuses_an_artifact_that_is_not_known_good(fake) -> None:
+    state, config, client = _ready(fake)
+    state.deploys[1]["status"] = "build_failed"
+    with pytest.raises(OpsError, match="known-good"):
+        render.rollback(
+            client, config, rollback_deploy_id=EARLIER_DEPLOY, rollback_commit=EARLIER_COMMIT,
+            current_deploy_id=LIVE_DEPLOY, current_commit=LIVE_COMMIT,
+            timeout_seconds=10, interval_seconds=0, **FAST,
+        )
+    assert state.posts() == []
+
+
+def test_rollback_refuses_when_the_live_deploy_is_not_the_named_current(fake) -> None:
+    state, config, client = _ready(fake)
+    with pytest.raises(OpsError):
+        render.rollback(
+            client, config, rollback_deploy_id=EARLIER_DEPLOY, rollback_commit=EARLIER_COMMIT,
+            current_deploy_id="dep-other0001", current_commit=LIVE_COMMIT,
+            timeout_seconds=10, interval_seconds=0, **FAST,
+        )
+    assert state.posts() == []
+
+
+def test_a_competing_deploy_after_the_rollback_request_is_refused(fake) -> None:
+    state, config, client = _ready(fake)
+    state.polls_until_live = 2
+    state.after_post = lambda: state.deploys.insert(
+        0, {"id": "dep-rival0001", "status": "build_in_progress", "commit": {"id": "d" * 40}}
+    )
+    with pytest.raises(OpsError):
+        render.rollback(
+            client, config, rollback_deploy_id=EARLIER_DEPLOY, rollback_commit=EARLIER_COMMIT,
+            current_deploy_id=LIVE_DEPLOY, current_commit=LIVE_COMMIT,
+            timeout_seconds=10, interval_seconds=0, **FAST,
+        )
+
+
+def test_wait_returns_an_existing_deploy_once_live(fake) -> None:
+    state, config, client = _ready(fake)
+    state.deploys.insert(0, {"id": "dep-running01", "status": "build_in_progress", "commit": {"id": "c" * 40}})
+    result = render.wait(client, config, deploy_id="dep-running01", commit="c" * 40, timeout_seconds=10, interval_seconds=0)
+    assert result["deploy"]["status"] == "live"
+    assert state.posts() == []
+
+
+def test_wait_fails_when_the_deploy_s_commit_changes(fake) -> None:
+    state, config, client = _ready(fake)
+    state.polls_until_live = 3
+    state.deploys.insert(0, {"id": "dep-running01", "status": "build_in_progress", "commit": {"id": "c" * 40}})
+    state.on_poll = lambda deploy: deploy.update(commit={"id": "d" * 40})
+    with pytest.raises(OpsError):
+        render.wait(client, config, deploy_id="dep-running01", commit="c" * 40, timeout_seconds=10, interval_seconds=0)
+
+
+def test_the_key_file_may_not_be_a_symlink(tmp_path: Path) -> None:
+    key_file = tmp_path / "env"
+    key_file.write_text("RENDER_API_KEY=k\n")
+    key_file.chmod(0o600)
+    link = tmp_path / "linked"
+    link.symlink_to(key_file)
+    with pytest.raises(OpsError, match="symlink"):
+        render.load_api_key(link)
+
+
+def test_the_evidence_schema_and_config_digest_come_from_the_config(tmp_path: Path) -> None:
+    path = _write_config(tmp_path, app_id="library", evidence="required")
+    original = path.read_bytes()
+    config = ProductionConfig.load(path)
+    path.write_text("{}")
+    assert config.source_sha256 == hashlib.sha256(original).hexdigest()
+    assert config.evidence == "required"
+    with pytest.raises(OpsError, match="evidence"):
+        ProductionConfig.load(_write_config(tmp_path, evidence="optional"))
+
+
+@pytest.mark.parametrize(
+    "where", ["relative", "existing", "inside the repository", "through a symlink"]
+)
+@pytest.mark.parametrize("command", ["deploy", "rollback"])
+def test_cli_refuses_a_bad_evidence_directory_before_any_render_call(tmp_path: Path, where, command) -> None:
+    parent = tmp_path / "private"
+    parent.mkdir(mode=0o700)
+    parent.chmod(0o700)
+    (parent / "exists").mkdir()
+    (tmp_path / "link").symlink_to(parent, target_is_directory=True)
+    directory = {
+        "relative": "relative/evidence",
+        "existing": str(parent / "exists"),
+        "inside the repository": str(Path(__file__).resolve().parents[2] / "evidence-run"),
+        "through a symlink": str(tmp_path / "link" / "run"),
+    }[where]
+    result = _cli(
+        "--config", str(_write_config(tmp_path, evidence="required")),
+        "--env-file", str(tmp_path / "absent"), command,
+        env={"PROD_EVIDENCE_DIR": directory, "APPLY": "1", "CONFIRM_SERVICE_ID": SERVICE_ID},
+    )
+    assert result.returncode == 2
+    assert "Render env file" not in result.stderr
+    assert not (Path(__file__).resolve().parents[2] / "evidence-run").exists()
 
 
 def test_wait_stops_on_a_failed_build(fake) -> None:

@@ -20,6 +20,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import MISSING, dataclass, field, fields
 from datetime import UTC, datetime
+from http.client import HTTPException
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -172,6 +173,7 @@ class RenderClient:
             with urlopen(request, timeout=self._timeout) as response:
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as exc:
+            exc.close()
             raise OpsError(f"Render API {method} {path} failed with HTTP {exc.code}") from exc
         except (URLError, TimeoutError) as exc:
             raise OpsError(f"Render API {method} {path} failed: {type(exc).__name__}") from exc
@@ -475,9 +477,15 @@ def _health_answer(url: str, evidence: HealthEvidenceRun | None = None) -> tuple
             record(response.status, response.headers, body, "response")
             return response.status, body
     except HTTPError as exc:
-        record(exc.code, exc.headers, b"", "http-error", "HTTPError")
-        return exc.code, b""
-    except (URLError, TimeoutError, OSError) as exc:
+        try:
+            body = exc.read(HEALTH_BODY_LIMIT + 1)
+        except (OSError, HTTPException):
+            body = b""
+        finally:
+            exc.close()
+        record(exc.code, exc.headers, body, "http-error", "HTTPError")
+        return exc.code, body
+    except (URLError, TimeoutError, OSError, HTTPException) as exc:
         record(None, None, b"", "transport-error", type(exc).__name__)
         raise _HealthNotYet(f"health request to {url} failed: {type(exc).__name__}") from exc
 

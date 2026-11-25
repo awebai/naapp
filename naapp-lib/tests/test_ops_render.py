@@ -28,14 +28,21 @@ class FakeRender:
     service: dict[str, Any]
     deploys: list[dict[str, Any]]
     health_status: int = 200
+    # Cloudflare on the public zone answers its browser-signature 403 (error 1010)
+    # to Python's default User-Agent (naapp/library/docs/production-operations.md).
+    edge_refuses_default_python_agent: bool = False
+    health_agents: list[str] = field(default_factory=list)
     requests: list[tuple[str, str, Any]] = field(default_factory=list)
     polls_until_live: int = 1
     _counter: int = 0
 
-    def handle(self, method: str, path: str, body: Any) -> tuple[int, Any]:
+    def handle(self, method: str, path: str, body: Any, user_agent: str = "") -> tuple[int, Any]:
         self.requests.append((method, path, body))
         base = f"/v1/services/{SERVICE_ID}"
         if method == "GET" and path == "/health":
+            self.health_agents.append(user_agent)
+            if self.edge_refuses_default_python_agent and user_agent.startswith("Python-urllib/"):
+                return 403, {"error": 1010}
             return self.health_status, {"status": "ok"}
         if method == "GET" and path == base:
             return 200, self.service
@@ -83,7 +90,9 @@ def fake() -> Iterator[tuple[FakeRender, str]]:
         def _respond(self) -> None:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length)) if length else None
-            status, payload = state.handle(self.command, self.path, body)
+            status, payload = state.handle(
+                self.command, self.path, body, self.headers.get("User-Agent", "")
+            )
             data = json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -533,6 +542,23 @@ def test_verify_fails_when_health_is_not_ok(fake) -> None:
     state, config, client = _ready(fake)
     state.health_status = 503
     with pytest.raises(OpsError, match="health"):
+        render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT)
+
+
+def test_verify_reaches_health_through_an_edge_that_refuses_python_s_default_agent(fake) -> None:
+    state, config, client = _ready(fake)
+    state.edge_refuses_default_python_agent = True
+
+    result = render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT)
+
+    assert result["health"] == {config.origin_url + "/health": 200}
+    assert state.health_agents == [render.HEALTH_USER_AGENT]
+
+
+def test_a_403_from_health_is_a_failure(fake) -> None:
+    state, config, client = _ready(fake)
+    state.health_status = 403
+    with pytest.raises(OpsError, match="HTTP 403"):
         render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT)
 
 

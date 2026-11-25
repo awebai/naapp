@@ -20,6 +20,11 @@ ORIGIN = "https://app.example.com"
 TEAM_ID = "backend:example.com"
 
 
+def refused(response) -> tuple[int, str]:
+    """A refusal's status and stable code."""
+    return response.status_code, response.json()["detail"]["code"]
+
+
 @pytest.fixture
 async def member(registry) -> Member:
     member = Member(team_id=TEAM_ID)
@@ -69,7 +74,10 @@ async def test_timestamp_window_is_five_minutes(registry, member, offset, accept
                 aud=ORIGIN, method="GET", path="/v1/items", timestamp=utc_timestamp(signed_at)
             ),
         )
-    assert response.status_code == (200 if accepted else 401), response.text
+    if accepted:
+        assert response.status_code == 200, response.text
+    else:
+        assert refused(response) == (401, "timestamp_skew")
 
 
 @pytest.mark.parametrize(
@@ -98,7 +106,10 @@ async def test_configured_window_never_exceeds_five_minutes(
                 aud=ORIGIN, method="GET", path="/v1/items", timestamp=utc_timestamp(signed_at)
             ),
         )
-    assert response.status_code == (200 if accepted else 401), response.text
+    if accepted:
+        assert response.status_code == 200, response.text
+    else:
+        assert refused(response) == (401, "timestamp_skew")
 
 
 @pytest.mark.parametrize("timestamp", ["2026-10-19T12:00:00", "not-a-time"])
@@ -108,7 +119,7 @@ async def test_timestamp_without_zone_or_unparseable_is_refused(registry, member
             "/v1/items",
             headers=member.headers(aud=ORIGIN, method="GET", path="/v1/items", timestamp=timestamp),
         )
-    assert response.status_code == 401
+    assert refused(response) == (401, "timestamp_invalid")
 
 
 @pytest.mark.parametrize(
@@ -125,19 +136,24 @@ async def test_authorization_header_must_be_didkey(registry, member, authorizati
     headers["Authorization"] = authorization
     async with relying_app(registry, public_origin=ORIGIN) as (client, _):
         response = await client.get("/v1/items", headers=headers)
-    assert response.status_code == 401
+    assert refused(response) == (401, "authorization_invalid")
 
 
 @pytest.mark.parametrize(
-    "missing",
-    ["Authorization", "X-AWEB-Timestamp", "X-AWEB-Signed-Payload", "X-AWID-Team-Certificate"],
+    "missing,code",
+    [
+        ("Authorization", "authorization_invalid"),
+        ("X-AWEB-Timestamp", "timestamp_missing"),
+        ("X-AWEB-Signed-Payload", "signed_payload_invalid"),
+        ("X-AWID-Team-Certificate", "certificate_missing"),
+    ],
 )
-async def test_every_envelope_header_is_required(registry, member, missing):
+async def test_every_envelope_header_is_required(registry, member, missing, code):
     headers = member.headers(aud=ORIGIN, method="GET", path="/v1/items")
     headers.pop(missing)
     async with relying_app(registry, public_origin=ORIGIN) as (client, _):
         response = await client.get("/v1/items", headers=headers)
-    assert response.status_code == 401
+    assert refused(response) == (401, code)
 
 
 @pytest.mark.parametrize(
@@ -162,7 +178,7 @@ async def test_signed_claims_bind_the_actual_request(registry, member, change):
                 aud=ORIGIN, method="GET", path="/v1/items", payload_changes=change
             ),
         )
-    assert response.status_code == 401
+    assert refused(response) == (401, "signed_payload_invalid")
 
 
 async def test_audience_compares_canonical_origins(registry, member):
@@ -216,7 +232,7 @@ async def test_signed_payload_must_be_unpadded_base64url_canonical_json(registry
         assert set("+/") & set(headers["X-AWEB-Signed-Payload"])
     async with relying_app(registry, public_origin=ORIGIN) as (client, _):
         response = await client.get("/v1/items?q=%3F%3E", headers=headers)
-    assert response.status_code == 401
+    assert refused(response) == (401, "signed_payload_invalid")
 
 
 async def test_signature_must_be_the_members(registry, member):
@@ -227,7 +243,7 @@ async def test_signature_must_be_the_members(registry, member):
     headers["Authorization"] = f"DIDKey {member.did_key} {other['Authorization'].split()[2]}"
     async with relying_app(registry, public_origin=ORIGIN) as (client, _):
         response = await client.get("/v1/items", headers=headers)
-    assert response.status_code == 401
+    assert refused(response) == (401, "signature_invalid")
 
 
 async def test_certificate_must_name_the_signer(registry, member):
@@ -239,7 +255,10 @@ async def test_certificate_must_name_the_signer(registry, member):
         aud=ORIGIN, method="GET", path="/v1/items", cert=member.certificate()
     )
     async with relying_app(registry, public_origin=ORIGIN) as (client, _):
-        assert (await client.get("/v1/items", headers=headers)).status_code == 401
+        assert refused(await client.get("/v1/items", headers=headers)) == (
+            401,
+            "certificate_member_key_mismatch",
+        )
         neighbour = impostor.headers(aud=ORIGIN, method="GET", path="/v1/items")
         assert (await client.get("/v1/items", headers=neighbour)).status_code == 200
 
@@ -253,7 +272,7 @@ async def test_certificate_requires_its_identifying_fields(registry, member, fie
             "/v1/items",
             headers=member.headers(aud=ORIGIN, method="GET", path="/v1/items", cert=cert),
         )
-    assert response.status_code == 401
+    assert refused(response) == (401, "certificate_invalid_field")
 
 
 @pytest.mark.parametrize(
@@ -263,7 +282,10 @@ async def test_malformed_certificate_is_refused(registry, member, header):
     headers = member.headers(aud=ORIGIN, method="GET", path="/v1/items")
     headers["X-AWID-Team-Certificate"] = header
     async with relying_app(registry, public_origin=ORIGIN) as (client, _):
-        assert (await client.get("/v1/items", headers=headers)).status_code == 401
+        assert refused(await client.get("/v1/items", headers=headers)) == (
+            401,
+            "certificate_malformed",
+        )
 
 
 async def test_certificate_signature_must_be_the_current_team_key(registry, member):
@@ -275,7 +297,10 @@ async def test_certificate_signature_must_be_the_current_team_key(registry, memb
     async with relying_app(registry, public_origin=ORIGIN) as (client, _):
         for cert in (altered, forged.certificate()):
             headers = member.headers(aud=ORIGIN, method="GET", path="/v1/items", cert=cert)
-            assert (await client.get("/v1/items", headers=headers)).status_code == 401
+            assert refused(await client.get("/v1/items", headers=headers)) == (
+                401,
+                "certificate_bad_signature",
+            )
 
 
 async def test_team_key_rotation_invalidates_old_certificates(registry, member):
@@ -285,7 +310,7 @@ async def test_team_key_rotation_invalidates_old_certificates(registry, member):
         response = await client.get(
             "/v1/items", headers=member.headers(aud=ORIGIN, method="GET", path="/v1/items")
         )
-    assert response.status_code == 401
+    assert refused(response) == (401, "certificate_bad_signature")
 
 
 async def test_revoked_certificate_is_refused_once_the_cache_expires(registry, member):
@@ -294,7 +319,10 @@ async def test_revoked_certificate_is_refused_once_the_cache_expires(registry, m
         assert (await client.get("/v1/items", headers=headers)).status_code == 200
         await registry.revoke("cert-1")
         cache._certificate_cache.clear()
-        assert (await client.get("/v1/items", headers=headers)).status_code == 401
+        assert refused(await client.get("/v1/items", headers=headers)) == (
+            401,
+            "certificate_revoked",
+        )
 
 
 async def test_mounted_app_verifies_the_external_path(registry, member):
@@ -302,7 +330,10 @@ async def test_mounted_app_verifies_the_external_path(registry, member):
         external = member.headers(aud=ORIGIN, method="GET", path="/mounted/v1/items")
         assert (await client.get("/mounted/v1/items", headers=external)).status_code == 200
         internal = member.headers(aud=ORIGIN, method="GET", path="/v1/items")
-        assert (await client.get("/mounted/v1/items", headers=internal)).status_code == 401
+        assert refused(await client.get("/mounted/v1/items", headers=internal)) == (
+            401,
+            "signed_payload_invalid",
+        )
 
 
 async def test_raw_percent_encoding_is_what_is_signed(registry, member):
@@ -310,7 +341,10 @@ async def test_raw_percent_encoding_is_what_is_signed(registry, member):
         raw = member.headers(aud=ORIGIN, method="GET", path="/v1/items/a%2Fb")
         assert (await client.get("/v1/items/a%2Fb", headers=raw)).status_code == 200
         decoded = member.headers(aud=ORIGIN, method="GET", path="/v1/items/a/b")
-        assert (await client.get("/v1/items/a%2Fb", headers=decoded)).status_code == 401
+        assert refused(await client.get("/v1/items/a%2Fb", headers=decoded)) == (
+            401,
+            "signed_payload_invalid",
+        )
 
 
 @pytest.mark.parametrize(
@@ -344,4 +378,7 @@ async def test_non_ascii_request_target_is_a_client_error(registry, member, raw_
     cache = AWIDTeamCache(registry_url=REGISTRY_URL, ttl_seconds=60, transport=registry.transport)
     with pytest.raises(HTTPException) as caught:
         await authenticate_request(Request(scope, receive), public_origin=ORIGIN, team_cache=cache)
-    assert caught.value.status_code == 400
+    assert (caught.value.status_code, caught.value.detail["code"]) == (
+        400,
+        "request_target_not_ascii",
+    )

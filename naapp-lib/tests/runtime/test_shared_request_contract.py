@@ -57,10 +57,7 @@ def test_team_request_and_controller_request_are_distinct(purpose):
         with pytest.raises(HTTPException) as refusal:
             verify()
         assert refusal.value.status_code == 401
-        assert (
-            refusal.value.detail
-            == "Wrong request envelope type: sign a team-auth v2 request for this service instead of an AWID controller request."
-        )
+        assert refusal.value.detail["code"] == "signed_payload_invalid"
 
 
 @pytest.mark.parametrize(

@@ -151,6 +151,16 @@ class CachedTeamFacts:
     fetched_at: int
     expires_at: int
 
+    def membership_proof(self, team_id: str, certificate_id: str) -> MembershipProof:
+        """Carry these exact facts' original window after validation."""
+        return MembershipProof(
+            team_id=team_id,
+            certificate_id=certificate_id,
+            team_did_key=self.team_did_key,
+            checked_at=self.fetched_at,
+            fresh_until=self.expires_at,
+        )
+
 
 @dataclass(frozen=True)
 class CachedDidKey:
@@ -378,15 +388,10 @@ class AWIDTeamCache:
             raise _current_member_refusal(503) from exc
         if team_did_key != facts.team_did_key:
             raise _current_member_refusal(403)
-        if time.monotonic_ns() > facts.expires_at:
+        proof = facts.membership_proof(team_id, certificate_id)
+        if not proof.is_fresh_at(time.monotonic_ns()):
             raise _current_member_refusal(503)
-        return MembershipProof(
-            team_id=team_id,
-            certificate_id=certificate_id,
-            team_did_key=team_did_key,
-            checked_at=facts.fetched_at,
-            fresh_until=facts.expires_at,
-        )
+        return proof
 
     async def get(self, team_id: str, certificate_id: str | None = None) -> CachedTeamFacts:
         if certificate_id and not self._reads_team_history(team_id):

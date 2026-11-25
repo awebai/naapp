@@ -12,7 +12,7 @@ RUN playwright="$(sed -n '/^name = "playwright"$/{n;s/^version = "\(.*\)"$/\1/p;
     && apt-get install -y --no-install-recommends libnss3-tools \
     && rm -rf /var/lib/apt/lists/* /tmp/naapp-lib.lock \
     && chmod -R a+rX /opt/ms-playwright /opt/uv-tools
-COPY naapp/secrets/e2e/browser/chromium_driver.py /driver/chromium_driver.py
+COPY naapp/secrets/e2e/browser/chromium_driver.py naapp/secrets/e2e/browser/customer_console.py /driver/
 RUN useradd --uid 1000 --create-home browser
 ENV HOME=/home/browser
 USER 1000:1000

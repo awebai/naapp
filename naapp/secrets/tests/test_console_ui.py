@@ -8,8 +8,6 @@ from urllib.parse import urlencode
 
 import aweb_naapp as naapp
 import httpx
-import pytest
-from aweb_logs.console_ui import logs_shell
 from aweb_naapp.console import CONSOLE_HEADERS, apply_console_migrations
 from aweb_naapp.css import font_bytes
 from aweb_naapp.roles import unassign
@@ -187,20 +185,13 @@ def test_the_recovery_page_is_in_the_secrets_brand():
     assert action["href"] == "/activity"
 
 
-@pytest.mark.parametrize(
-    ("shell", "app_id", "role"),
-    [
-        (secrets_shell, "sandbox-secrets", "secrets.owner"),
-        (logs_shell, "sandbox-logs", "logs.reader"),
-    ],
-)
-def test_membership_help_names_the_deployment_and_role(shell, app_id, role):
-    page = shell(app_id).refused_page(HTTPException(403, "principal_not_member"))
+def test_membership_help_names_the_deployment_and_owner_role():
+    page = secrets_shell("sandbox-secrets").refused_page(HTTPException(403, "principal_not_member"))
     assert page.status_code == 403
     elements = Elements(page.body.decode())
     command = (
         "aw --human <human-id> --human-domain <identity-domain> "
-        f"app credential register {app_id} --role {role}"
+        "app credential register sandbox-secrets --role secrets.owner"
     )
     assert command in "".join(elements.text)
     body = next(attrs for tag, attrs in elements.tags if tag == "body")

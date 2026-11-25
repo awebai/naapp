@@ -71,6 +71,16 @@ def test_the_lanes_logs_uses_the_lanes_registry_and_mail_and_an_id_of_its_own():
     assert json.loads(env["LOGS_EGRESS_DENIED_NETWORKS"]) == []
 
 
+def test_secrets_approval_mail_uses_the_authenticated_tls_mailbox():
+    env = secrets_env()
+    mail = LANE["services"]["smtp-tls"]
+    assert env["SECRETS_EMAIL_SMTP_HOST"] in mail["networks"]["default"]["aliases"]
+    assert env["SECRETS_EMAIL_CA_FILE"] == env["SSL_CERT_FILE"]
+    assert "smtp-tls" in LANE["services"]["secrets"]["depends_on"]
+    assert mail["environment"]["MP_SMTP_REQUIRE_STARTTLS"] == "true"
+    assert mail["environment"]["MP_SMTP_AUTH_ACCEPT_ANY"] == "true"
+
+
 @pytest.fixture
 def prepared_lane(tmp_path):
     lane = ComposeLane(

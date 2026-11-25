@@ -159,8 +159,9 @@ def secrets_env() -> dict[str, str]:
             "secrets.hook-delivery-1": "/run/secrets-keys/delivery",
             "secrets:grant-read-1": "/run/secrets-keys/grant",
             "secrets:hook-resolve-1": "/run/secrets-keys/resolve"}),
-        "SECRETS_EMAIL_SMTP_HOST": "smtp.svc.test",
+        "SECRETS_EMAIL_SMTP_HOST": "mail.svc.test",
         "SECRETS_EMAIL_SMTP_PORT": "1025",
+        "SECRETS_EMAIL_CA_FILE": "/run/secrets-keys/hook-ca.pem",
         "SECRETS_EMAIL_USERNAME": "lane",
         "SECRETS_EMAIL_PASSWORD_FILE": "/run/secrets-keys/smtp",
         "SECRETS_EMAIL_FROM": "secrets@svc.test",
@@ -279,7 +280,7 @@ def lane(tmp_path_factory: pytest.TempPathFactory, request: pytest.FixtureReques
     write_secrets_env(lane)
     try:
         lane.start_core()
-        lane.up("smtp")
+        lane.up("smtp-tls")
         lane.checked(lane.compose("build", "cli", "browser", "chromium"), "build lane clients")
         yield lane
     finally:

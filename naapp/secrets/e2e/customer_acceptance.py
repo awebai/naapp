@@ -183,7 +183,7 @@ def mailbox_json(lane: ComposeLane, controller: str, path: str):
         "python3",
         "-c",
         "import sys, urllib.request; print(urllib.request.urlopen(sys.argv[1], timeout=10).read().decode())",
-        "http://smtp.svc.test:8025/api/v1/" + path,
+        "http://mail.svc.test:8025/api/v1/" + path,
     )
     assert result.returncode == 0, "could not read the test mailbox"
     return json.loads(result.stdout)

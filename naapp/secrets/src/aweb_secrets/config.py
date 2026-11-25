@@ -17,7 +17,7 @@ from aweb_secrets.response_limits import MAX_RESPONSE_BYTES
 
 
 class SecretsSettings(NaappSettings):
-    model_config = SettingsConfigDict(env_prefix="SECRETS_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="SECRETS_", env_file=None, extra="ignore")
 
     database_url: str = Field(default="postgresql://localhost/secrets")
     # The agent API origin: team-auth only, no cookies.

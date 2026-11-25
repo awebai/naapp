@@ -25,3 +25,15 @@ def test_deployment_can_tighten_lifetime_and_explicitly_enable_internal_destinat
 def test_invalid_lifetime_fails_configuration(cap):
     with pytest.raises(ValidationError):
         SecretsSettings(derived_max_ttl_s=cap, _env_file=None)
+
+
+def test_an_env_file_in_the_working_directory_is_not_configuration(tmp_path, monkeypatch) -> None:
+    # Only the environment configures the app: a .env in whatever directory the
+    # process starts in (a developer's, another app's) does not.
+    from aweb_secrets.config import SecretsSettings
+
+    (tmp_path / ".env").write_text("SECRETS_AWID_REGISTRY_URL=https://planted.example\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("SECRETS_AWID_REGISTRY_URL", raising=False)
+
+    assert SecretsSettings().awid_registry_url == "https://api.awid.ai"

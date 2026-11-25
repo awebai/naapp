@@ -15,7 +15,7 @@ MAX_TEAM_FACTS_TTL_SECONDS = 60
 class Settings(BaseSettings):
     """Runtime configuration for library."""
 
-    model_config = SettingsConfigDict(env_prefix="LIBRARY_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="LIBRARY_", env_file=None, extra="ignore")
 
     database_url: str = Field(default="postgresql://localhost/library")
     awid_registry_url: str = Field(default="https://api.awid.ai")

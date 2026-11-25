@@ -30,6 +30,7 @@ from tests.test_e2e_owner_acts import (
     REGISTRY,
     UPSTREAMS,
     secrets_env,
+    write_service_member,
 )
 
 LANE = yaml.safe_load((APP_DIR / "docker-compose.e2e.yml").read_text())
@@ -95,6 +96,20 @@ def prepared_lane(tmp_path):
         controller_did="did:key:placeholder",
     )
     return lane
+
+
+def test_secrets_key_mount_contains_only_the_deployed_files(prepared_lane, monkeypatch):
+    def issue_member(lane, controller, name, home):
+        home.mkdir()
+        certificate = home / "certificate"
+        certificate.write_text("test certificate")
+        return "test key", certificate
+
+    monkeypatch.setattr("tests.test_e2e_owner_acts.admit_app_member", issue_member)
+    write_service_member(prepared_lane, "controller")
+    keys = prepared_lane.runtime / "keys"
+    assert (keys / "member-cert.json").read_text() == "test certificate"
+    assert all(path.is_file() for path in keys.iterdir())
 
 
 def test_the_front_serves_logs_and_aweb_installs_it_from_its_internal_origin(prepared_lane):

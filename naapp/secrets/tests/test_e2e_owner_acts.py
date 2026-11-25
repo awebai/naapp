@@ -325,7 +325,9 @@ def write_service_member(lane: ComposeLane, controller: str) -> None:
     keys = lane.runtime / "keys"
     keys.mkdir(mode=0o755)
     keys.chmod(0o755)  # mkdir's mode is masked by the launching umask
-    pem, certificate = admit_app_member(lane, controller, "secrets-service", keys / "service-home")
+    pem, certificate = admit_app_member(
+        lane, controller, "secrets-service", lane.runtime / "secrets-member",
+    )
     lane.redact(pem)
     (keys / "member.pem").write_text(pem)
     shutil.copyfile(certificate, keys / "member-cert.json")

@@ -4,6 +4,7 @@ AWID registry: both admit only a holder who is a current human team member."""
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from dataclasses import replace
 
@@ -299,7 +300,7 @@ async def test_a_session_handoff_gives_a_removed_member_nothing(aw: Aw):  # noqa
     await removed_from_team(aw)
     before, certificate = await held_state(aw), await retained(aw)
     started, _, _ = await aw.start()
-    assert started.status_code in (401, 403), started.text
+    assert (started.status_code, started.json()["detail"]["code"]) == (401, "certificate_revoked")
     assert (await held_state(aw), await retained(aw)) == (before, certificate)
     assert outcome(await login(aw)) == NOT_A_MEMBER
 
@@ -312,8 +313,18 @@ async def test_an_abandoned_session_handoff_changes_nothing_held(aw: Aw):  # noq
     assert (await held_state(aw), await retained(aw)) == (before, certificate)
 
 
-def test_the_page_names_the_deployments_own_app_id():
-    (action,) = OWNER_ACTS["session_actions"]
-    page = logs_shell("team-logs").refused_page(HTTPException(403, "principal_not_member"))
-    command = f"aw app human team-logs {action['name']}"
-    assert command in bytes(page.body).decode()
+def test_membership_help_names_the_deployment_and_reader_role():
+    response = logs_shell("team-logs").refused_page(HTTPException(403, "principal_not_member"))
+    assert response.status_code == 403
+    page = Html(response.body.decode())
+    command = (
+        "aw --human <human-id> --human-domain <identity-domain> "
+        "app credential register team-logs --role logs.reader"
+    )
+    (recovery,) = [
+        element for element in page.with_attribute("id")
+        if element["attrs"]["id"] == "console-recovery"
+    ]
+    assert command in recovery["text"]
+    inline = json.loads(page.first("body")["data-copy-session-refusals"])
+    assert command in inline["principal_not_member"]

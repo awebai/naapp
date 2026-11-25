@@ -21,6 +21,7 @@ from aweb_naapp.console import (
     ConsoleRoute,
     ConsoleSession,
     ConsoleSessions,
+    FencedInstallations,
     KeyBoundConsoleSession,
     LoginLimiter,
     MemberAdmission,
@@ -120,7 +121,12 @@ class OwnerConsole:
         self.credential_audit = credential_audit
         self._prepare_key_bound = prepare_key_bound
         self.sessions = ConsoleSessions(
-            db, passkeys=passkeys, scopes=self.admits_scope, member=member, key_bound=key_bound
+            db,
+            passkeys=passkeys,
+            scopes=self.admits_scope,
+            member=member,
+            installations=FencedInstallations(fence, team_of=self.team_of_scope),
+            key_bound=key_bound,
         )
         self.limiter = limiter or LoginLimiter(
             db,
@@ -173,17 +179,20 @@ class OwnerConsole:
         """The installation as the session's own team holds it. The team is the
         one the session's scope was enrolled under, as an owner or an approver;
         an id that team does not hold raises LookupError, as an unknown id does."""
-        record = await owner_binding(self.db, current.scope)
-        team_id = (
-            record["team_id"]
-            if record is not None
-            else await self.db.fetch_value(
-                "SELECT team_id FROM {{tables.approvers}} WHERE scope=$1", current.scope
-            )
-        )
+        team_id = await self.team_of_scope(current.scope)
         if team_id is None:
             raise LookupError("installation not found")
         return await self.installation(installation_id, team_id=team_id)
+
+    async def team_of_scope(self, scope: str) -> str | None:
+        """The team ``scope`` was enrolled under, as an owner or an approver;
+        None for any other scope. Local reads only."""
+        record = await owner_binding(self.db, scope)
+        if record is not None:
+            return record["team_id"]
+        return await self.db.fetch_value(
+            "SELECT team_id FROM {{tables.approvers}} WHERE scope=$1", scope
+        )
 
     async def apply_owner_act(
         self,

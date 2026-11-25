@@ -4,11 +4,11 @@ through the real installation fence and roles.purge_team on real PostgreSQL."""
 from __future__ import annotations
 
 import time
-from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 from aweb_naapp.console import apply_console_migrations
 from aweb_naapp.roles import (
     PrincipalKey,
@@ -22,7 +22,8 @@ from aweb_naapp.runtime.credential_audit import recorder as credential_recorder
 from aweb_naapp.runtime.installation import InstallationRefused, apply_installation_migrations
 from aweb_naapp.runtime.passkeys.service import MIGRATION_MODULE as PASSKEY_MODULE
 from aweb_naapp.runtime.passkeys.service import MIGRATIONS as PASSKEY_MIGRATIONS
-from pgdbm import AsyncDatabaseManager, AsyncMigrationManager
+from aweb_naapp_testing.database_fixtures import database_template
+from pgdbm import AsyncMigrationManager
 
 from aweb_secrets.app import MIGRATIONS_PATH, MODULE_NAME, installation_fence
 from aweb_secrets.change_sets import apply_change_set_migrations
@@ -73,9 +74,7 @@ class TeamServer:
         )
 
 
-@pytest.fixture
-async def db(test_db_factory) -> AsyncIterator[AsyncDatabaseManager]:
-    database = await test_db_factory.create_db(suffix="secrets_reinstall")
+async def migrate_database(database) -> None:
     await apply_installation_migrations(database)
     await apply_roles_migrations(database)
     await AsyncMigrationManager(
@@ -96,7 +95,17 @@ async def db(test_db_factory) -> AsyncIterator[AsyncDatabaseManager]:
         migrations_path=str(Path(credential_recorder.__file__).with_name("migrations")),
         module_name=CREDENTIAL_AUDIT_MIGRATIONS,
     ).apply_pending_migrations()
-    yield database
+
+
+@pytest_asyncio.fixture(scope="session")
+async def schema_template():
+    async with database_template(migrate_database, suffix="secrets_reinstall_template") as template:
+        yield template
+
+
+@pytest.fixture
+async def db(clone_database, schema_template):
+    return await clone_database(schema_template, suffix="secrets_reinstall")
 
 
 @pytest.fixture

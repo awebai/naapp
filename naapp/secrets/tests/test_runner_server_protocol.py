@@ -7,7 +7,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 from aweb_naapp.nonces import apply_nonce_migrations, consume_nonce
+from aweb_naapp_testing.database_fixtures import database_template
 
 from aweb_secrets.runner_protocol import (
     RunnerRefused,
@@ -26,11 +28,17 @@ def at(value):
     return datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=UTC)
 
 
+@pytest_asyncio.fixture(scope="session")
+async def schema_template():
+    async with database_template(
+        apply_nonce_migrations, suffix="runner_protocol_template"
+    ) as template:
+        yield template
+
+
 @pytest.fixture
-async def db(test_db_factory):
-    database = await test_db_factory.create_db(suffix="runner_protocol")
-    await apply_nonce_migrations(database)
-    return database
+async def db(clone_database, schema_template):
+    return await clone_database(schema_template, suffix="runner_protocol")
 
 
 def test_every_refusal_code_of_the_contract_has_a_case():

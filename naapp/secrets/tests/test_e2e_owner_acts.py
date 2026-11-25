@@ -8,6 +8,11 @@ and routes. The only stand-in is the person: a software authenticator drives
 the page's JSON routes from the holder's own network namespace, so aw's
 loopback receives the code.
 
+That same owner uses Chromium to enter a native value and approve a request.
+An isolated released aw submits the request and retries it over team auth.
+The upstream verifies the injected credential, Logs reads the linked audit
+events, and the databases and key files are backed up at the end.
+
 The owner signs the designation locally, so aw keeps no request to replay:
 its proof is the app's own records (team_journey_support.assert_designated),
 and a refused duplicate leaves them unchanged.
@@ -46,6 +51,13 @@ from aweb_naapp_testing.compose_lane import (
 from aweb_naapp_testing.compose_lane import (
     docker as _docker,
 )
+from customer_acceptance import (
+    UPSTREAM,
+    confirm_native_bearer,
+    create_agent,
+    exercise_customer_use,
+    start_upstream,
+)
 from nacl.signing import SigningKey
 from team_journey_support import (
     Designation,
@@ -61,6 +73,7 @@ from team_journey_support import (
     first_json,
     install_app,
     publish_team_server,
+    sql_literal,
 )
 from team_journey_support import Holder as SharedHolder
 
@@ -108,6 +121,7 @@ UPSTREAMS = {
     "console.secrets.svc.test": "secrets:8770",
     "api.logs.svc.test": "logs:8765",
     "console.logs.svc.test": "logs:8765",
+    UPSTREAM.removeprefix("https://"): "customer-upstream:8080",
 }
 
 
@@ -145,12 +159,15 @@ def secrets_env() -> dict[str, str]:
             "secrets.hook-delivery-1": "/run/secrets-keys/delivery",
             "secrets:grant-read-1": "/run/secrets-keys/grant",
             "secrets:hook-resolve-1": "/run/secrets-keys/resolve"}),
-        "SECRETS_EMAIL_SMTP_HOST": "smtp.svc.test",
+        "SECRETS_EMAIL_SMTP_HOST": "mail.svc.test",
         "SECRETS_EMAIL_SMTP_PORT": "1025",
+        "SECRETS_EMAIL_CA_FILE": "/run/secrets-keys/hook-ca.pem",
         "SECRETS_EMAIL_USERNAME": "lane",
         "SECRETS_EMAIL_PASSWORD_FILE": "/run/secrets-keys/smtp",
         "SECRETS_EMAIL_FROM": "secrets@svc.test",
         "SECRETS_EGRESS_DENIED_NETWORKS": "[]",
+        "SECRETS_INTERNAL_DESTINATIONS": "allowed",
+        "SECRETS_EGRESS_CA_FILE": "/run/secrets-keys/hook-ca.pem",
         "SECRETS_HOOK_INTERNAL_ORIGINS": json.dumps([LOGS_API]),
         "SECRETS_HOOK_INTERNAL_DESTINATIONS": "allowed",
         "SECRETS_HOOK_INTERNAL_CIDR": LANE_SUBNET,
@@ -165,13 +182,15 @@ class Holder(SharedHolder):
         super().__init__(container, DOMAIN)
         self.lane = lane
 
-    def browser(self, page: str, purpose: str, *, page_check: bool) -> None:
+    def browser(
+        self, page: str, purpose: str, *, page_check: bool, device: str = "authenticator.json",
+    ) -> None:
         """The holder's browser, in the holder's network namespace."""
         args = [
             "run", "--rm", f"--network=container:{self.container}",
             "--user", f"{os.getuid()}:{os.getgid()}",
             f"--volume={self.lane.runtime}:/runtime", f"{self.lane.project}-browser",
-            "--page", page, "--purpose", purpose, "--device", "/runtime/holder/authenticator.json",
+            "--page", page, "--purpose", purpose, "--device", f"/runtime/holder/{device}",
             "--ca", "/runtime/tls/ca.pem",
         ]
         if not page_check:
@@ -210,13 +229,18 @@ class Holder(SharedHolder):
         assert child.exitstatus == 0, output
         return output
 
-    def run_in_browser(self, principal: str, console: str, purpose: str, *args: str) -> str:
+    def run_in_browser(
+        self, principal: str, console: str, purpose: str, *args: str,
+        device: str = "authenticator.json",
+    ) -> str:
         """aw as the holder, completing the handoff page it opens on ``console``."""
         child = self.act(principal, *args)
         output = self.answer_passphrases(child, until=r"Open this page to continue: (\S+)")
-        page = re.search(r"Open this page to continue: (\S+)", output).group(1)
+        link = re.search(r"Open this page to continue: (\S+)", output)
+        assert link is not None, output
+        page = link.group(1)
         assert page.startswith(console + "/handoff/"), page
-        self.browser(page, purpose, page_check=False)
+        self.browser(page, purpose, page_check=False, device=device)
         child.expect(pexpect.EOF)
         rest = child.before
         child.close()
@@ -240,7 +264,7 @@ def lane(tmp_path_factory: pytest.TempPathFactory, request: pytest.FixtureReques
             "NAAPP_E2E_POSTGRES_PASSWORD": "disposable",
             "SECRETS_E2E_SOURCE_COMMIT": commit,
         },
-        profiles=("logs", "browser"),
+        profiles=("logs", "browser", "chromium", "customer"),
         subnet=LANE_SUBNET,
     )
     tls = lane.prepare(
@@ -256,8 +280,8 @@ def lane(tmp_path_factory: pytest.TempPathFactory, request: pytest.FixtureReques
     write_secrets_env(lane)
     try:
         lane.start_core()
-        lane.up("smtp")
-        lane.checked(lane.compose("build", "cli", "browser"), "build lane clients")
+        lane.up("smtp-tls")
+        lane.checked(lane.compose("build", "cli", "browser", "chromium"), "build lane clients")
         yield lane
     finally:
         request.node.add_report_section("teardown", "lane Compose", lane.close())
@@ -301,7 +325,9 @@ def write_service_member(lane: ComposeLane, controller: str) -> None:
     keys = lane.runtime / "keys"
     keys.mkdir(mode=0o755)
     keys.chmod(0o755)  # mkdir's mode is masked by the launching umask
-    pem, certificate = admit_app_member(lane, controller, "secrets-service", keys / "service-home")
+    pem, certificate = admit_app_member(
+        lane, controller, "secrets-service", lane.runtime / "secrets-member",
+    )
     lane.redact(pem)
     (keys / "member.pem").write_text(pem)
     shutil.copyfile(certificate, keys / "member-cert.json")
@@ -369,8 +395,16 @@ def install_apps(lane: ComposeLane, controller: str, owner_did_key: str) -> None
 
 
 def test_the_owner_designates_a_human_holder_registered_on_another_machine(lane: ComposeLane) -> None:
-    controller = lane.machine("controller")
-    holder = Holder(lane, lane.machine("holder"))
+    released_aw = os.environ.get("NAAPP_AW_BINARY")
+    assert released_aw, "set NAAPP_AW_BINARY to the pinned Linux aw release"
+    aw_binary = Path(released_aw)
+    controller = lane.machine("controller", aw_binary=aw_binary)
+    installed_version = subprocess.check_output(
+        [str(REPO / "scripts/install-aw.sh"), "--version"], text=True,
+    ).strip()
+    version = lane.checked(_docker("exec", controller, "aw", "version"), "inspect released aw")
+    assert version.splitlines()[0] == f"aw {installed_version}", version
+    holder = Holder(lane, lane.machine("holder", aw_binary=aw_binary))
 
     # Setup authority: the namespace, its root human (the holder) and the team.
     prepared = aw(holder.container, "id", "namespace", "prepare-controller", "--domain", DOMAIN, "--registry", REGISTRY)
@@ -401,8 +435,12 @@ def test_the_owner_designates_a_human_holder_registered_on_another_machine(lane:
     invite = aw(controller, "id", "team", "invite", "--team", TEAM, "--namespace", DOMAIN, "--member-global")
     # The owner's machine holds no namespace authority, so the membership
     # names the address the namespace root already issued to this identity.
-    aw(controller, "id", "team", "accept-invite", invite["token"], "--name", "owner", "--global",
-       "--address", owner["address"])
+    lane.redact(invite["token"])
+    accepted = _docker(
+        "exec", "-i", controller, "aw", "--json", "id", "team", "accept-invite", "--token-stdin",
+        "--name", "owner", "--global", "--address", owner["address"], input=invite["token"] + "\n",
+    )
+    lane.checked(accepted, "accept the controller's invite")
     aw(controller, "init", "--url", AWEB, "--name", "owner", "--do-not-touch-agents-md")
     added = aw(controller, "id", "team", "add-member", "--team", TEAM, "--namespace", DOMAIN,
                "--did", human["did_key"], "--did-aw", principal, "--name", "holder", "--global")
@@ -470,14 +508,31 @@ def test_the_owner_designates_a_human_holder_registered_on_another_machine(lane:
     listed = holder.answer_passphrases(child)
     assert "confirm" in listed and "draft-change" in listed, listed
 
-    signs_in_again_after_a_reissue(lane, controller, holder, human, hooks)
+    scopes = signs_in_again_after_a_reissue(lane, controller, holder, human, hooks)
+    value = start_upstream(lane)
+    secret_id = confirm_native_bearer(
+        lane, controller, holder.container, CONSOLE, scopes[APP_ID],
+        installed["installation_id"], CONTACT, value,
+    )
+    agent, requester = create_agent(
+        lane, controller, holder.container,
+        binary=aw_binary, team=TEAM, domain=DOMAIN, registry=REGISTRY, aweb=AWEB,
+    )
+    exercise_customer_use(
+        lane,
+        controller=controller, holder=holder.container,
+        agent=agent, agent_principal=requester, owner_principal=principal,
+        owner_scope=scopes[APP_ID], reader_scope=scopes[LOGS_APP_ID],
+        contact=CONTACT, api=API, console=CONSOLE, logs=LOGS_CONSOLE,
+        installation_id=installed["installation_id"], secret_id=secret_id, value=value,
+    )
 
 
 def signs_in_again_after_a_reissue(
     lane: ComposeLane, controller: str, holder: Holder, human: dict, hooks: dict
-) -> None:
-    """A Logs reader and Secrets owner whose member certificate was reissued is
-    refused by each app's passkey login until its own aw signs it in once there."""
+) -> dict[str, str]:
+    """A renewed certificate and credential registration restore passkey login
+    for the original Logs reader and Secrets owner holdings."""
     principal = human["id"]
     aw(holder.container, "plugin", "install", LOGS_API)
     holder.run_in_browser(principal, LOGS_CONSOLE, "credential", "app", "credential", "register", LOGS_APP_ID,
@@ -487,34 +542,45 @@ def signs_in_again_after_a_reissue(
                          "--principal", principal, "--credential", "/runtime/controller/logs-export.json", "--yes",
                          timeout=300)
     assert designated.returncode == 0, designated.stdout + designated.stderr
-    scope = holding_scope(hooks["active"]["logs/production/post-governance-hook"]["installation_id"], TEAM_ID,
-                          READER_ROLE, principal)
-    assert holder.login(LOGS_CONSOLE, scope)["status"] == 200
+    apps = (
+        (LOGS_APP_ID, LOGS_CONSOLE, READER_ROLE, "logs"),
+        (APP_ID, CONSOLE, ROLE, "secrets"),
+    )
+    scopes = {
+        app_id: holding_scope(
+            hooks["active"][f"{service}/production/post-governance-hook"]["installation_id"],
+            TEAM_ID, role, principal,
+        )
+        for app_id, _, role, service in apps
+    }
+    for app_id, console, _, _ in apps:
+        answer = holder.login(console, scopes[app_id])
+        assert answer["status"] == 200, (app_id, answer)
 
     reissued = aw(controller, "id", "team", "reissue-cert", "holder", "--team", TEAM, "--namespace", DOMAIN,
                   "--did", human["did_key"], "--did-aw", principal, "--global", "--registry", REGISTRY)
     assert reissued["old_certificate_id"] != reissued["new_certificate_id"]
-    holder.refused_login(LOGS_CONSOLE, scope)
-
-    # With the replaced certificate still installed, aw's session is refused and
-    # opens no page. What aw says is kept with the run.
-    child = holder.act(principal, "app", "human", LOGS_APP_ID, "session")
-    refused = holder.answer_passphrases(child)
-    child.close()
-    (lane.runtime / "session-with-replaced-certificate.txt").write_text(refused)
-    print(refused)
-    assert child.exitstatus not in (0, None), refused
-    assert holder.login(LOGS_CONSOLE, scope) == {"status": 403, "detail": "principal_not_member"}
+    for app_id, console, _, _ in apps:
+        holder.refused_login(console, scopes[app_id])
 
     holder.run(principal, "--json", "id", "team", "fetch-cert", "--namespace", DOMAIN, "--team", TEAM,
                "--cert-id", reissued["new_certificate_id"], "--registry", REGISTRY, "--force")
-    shown = holder.run_in_browser(principal, LOGS_CONSOLE, "session", "app", "human", LOGS_APP_ID, "session")
-    assert scope in shown, shown
-    assert holder.login(LOGS_CONSOLE, scope)["status"] == 200
-
-    owner_scope = holding_scope(hooks["active"]["secrets/production/post-governance-hook"]["installation_id"],
-                                TEAM_ID, ROLE, principal)
-    holder.refused_login(CONSOLE, owner_scope)
-    shown = holder.run_in_browser(principal, CONSOLE, "session", "app", "human", APP_ID, "session")
-    assert owner_scope in shown, shown
-    assert holder.login(CONSOLE, owner_scope)["status"] == 200
+    for app_id, console, role, database in apps:
+        # Registration refreshes the certificate for the existing holding.
+        # The new passkey is never designated or used to sign back in.
+        holder.run_in_browser(
+            principal, console, "credential", "app", "credential", "register", app_id,
+            "--role", role,
+            device="recovery-authenticator.json",
+        )
+        answer = holder.login(console, scopes[app_id])
+        schema = "public" if database == "logs" else SECRETS_SCHEMA
+        certificate_id = sql_literal(reissued["new_certificate_id"])
+        scope = sql_literal(scopes[app_id])
+        renewed = lane.query(
+            "secrets", database,
+            f"SELECT convert_from(certificate, 'UTF8')::jsonb->>'certificate_id' = {certificate_id}"
+            f" FROM {schema}.role_holdings WHERE b3_scope = {scope} AND ended_in IS NULL",
+        ) == "t"
+        assert answer["status"] == 200 and renewed, (app_id, answer, renewed)
+    return scopes

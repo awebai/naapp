@@ -8,6 +8,7 @@ import json
 from datetime import timedelta
 from pathlib import Path
 
+import asyncpg
 import pytest
 
 from aweb_naapp.page_store import (
@@ -344,17 +345,22 @@ async def test_expired_request_key_never_executes_again(store):
 async def test_outbox_failure_rolls_back_data_audit_and_idempotency(store):
     await create(store)
     await store.db.execute("""CREATE FUNCTION refuse_page_event() RETURNS trigger LANGUAGE plpgsql AS $$
-        BEGIN RAISE EXCEPTION 'synthetic outbox failure'; END $$""")
+        BEGIN
+            RAISE EXCEPTION 'synthetic outbox failure' USING TABLE = TG_TABLE_NAME;
+        END $$""")
     await store.db.execute(
-        "CREATE TRIGGER refuse_event BEFORE INSERT ON outbox_events FOR EACH ROW EXECUTE FUNCTION refuse_page_event()"
+        "CREATE TRIGGER refuse_event BEFORE INSERT ON {{tables.outbox_events}} "
+        "FOR EACH ROW EXECUTE FUNCTION refuse_page_event()"
     )
-    with pytest.raises(Exception, match="synthetic outbox failure"):
+    with pytest.raises(asyncpg.RaiseError) as refused:
         await store.mutate(
             SCOPE, OWNER, expected_rev=1, key="retry-after-fault", records=[record_change()]
         )
+    assert refused.value.table_name == "outbox_events"
+    assert refused.value.message == "synthetic outbox failure"
     assert (await store.read(SCOPE, OWNER))["rev"] == 1
     assert await store.db.fetch_value("SELECT count(*) FROM {{tables.page_audit}}") == 1
-    await store.db.execute("DROP TRIGGER refuse_event ON outbox_events")
+    await store.db.execute("DROP TRIGGER refuse_event ON {{tables.outbox_events}}")
     assert (
         await store.mutate(
             SCOPE, OWNER, expected_rev=1, key="retry-after-fault", records=[record_change()]

@@ -22,7 +22,7 @@ from aweb_secrets.use_context import UseCommitments, apply_use_context_migration
 from tests.console_home import no_banner
 from tests.human_owner import fixture_member_admission
 from tests.test_broker_audit import source
-from tests.test_change_sets import ALICE, ORIGIN, TEAM, enrol_owner
+from tests.test_change_sets import ALICE, ORIGIN, TEAM, enrol_owner, unreachable
 from tests.test_change_sets import world as _world
 from tests.test_console import API
 from tests.test_console_changes import sign_in
@@ -142,7 +142,10 @@ async def test_activity_owner_revocation_and_f6_are_checked_before_read(world):
         await world.db.execute(
             "UPDATE {{tables.installation_fences}} SET fresh_until=clock_timestamp()-interval '1 second'"
         )
-        response = await human.get("/activity/events")
+        # The stale installation is observed again before the read, and while
+        # its authority cannot be reached the read is refused.
+        with unreachable():
+            response = await human.get("/activity/events")
         assert response.status_code == 503 and str(event_id) not in response.text
         await world.fence.refresh(TEAM)
         async with world.db.transaction() as tx:

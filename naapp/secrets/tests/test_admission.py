@@ -6,7 +6,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import time
-from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
@@ -131,9 +130,7 @@ def _request(request_id: str = "req_1", body: bytes = b"GET /v1/status", **chang
     return replace(request, **changes)
 
 
-@pytest.fixture
-async def db(test_db_factory) -> AsyncIterator[AsyncDatabaseManager]:
-    database = await test_db_factory.create_db(suffix="secrets_admission")
+async def migrate_admission_database(database: AsyncDatabaseManager) -> None:
     await apply_installation_migrations(database)
     await apply_idempotency_migrations(database)
     await apply_roles_migrations(database)
@@ -142,7 +139,11 @@ async def db(test_db_factory) -> AsyncIterator[AsyncDatabaseManager]:
         database, migrations_path=str(MIGRATIONS_PATH), module_name=MODULE_NAME
     ).apply_pending_migrations()
     await apply_revision_migrations(database)
-    yield database
+
+
+@pytest.fixture
+async def db(clone_database, admission_template) -> AsyncDatabaseManager:
+    return await clone_database(admission_template, suffix="secrets_admission")
 
 
 @pytest.fixture

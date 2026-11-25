@@ -15,10 +15,12 @@ import hashlib
 import json
 import secrets
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 
+import httpx
 import pytest
-from aweb_naapp.console.handoff_requester import RequesterEvidence, requester_parent
+from aweb_naapp.console.handoff_requester import requester_parent
 from aweb_naapp.roles import PrincipalKey, lock_holding, read_holding
 from aweb_naapp_testing import Member, did_key
 from awid.id_certificates import encode_id_chain_header, id_certificate_signing_bytes
@@ -104,6 +106,38 @@ async def test_the_first_direct_child_start_after_designation_is_admitted(journe
     requester = state.json()["requester"]
     assert requester["id"] == laptop.extra_cert_fields["member_did_aw"]
     assert requester["key_fingerprint"]
+
+
+def requester_with_unavailable_status(registry):
+    async def unavailable(request):
+        if request.url.path == "/v1/id-certificates/status":
+            return httpx.Response(503, json={"detail": "fixture-no-log-value"})
+        return await registry.transport.handle_async_request(request)
+
+    async def check(request, signer):
+        client = replace(
+            registry, transport=httpx.MockTransport(unavailable),
+            domain_verifier=registry._domain_verifier,
+        )
+        async with contextlib.aclosing(client):
+            return await requester_parent(client)(request, signer)
+
+    return check
+
+
+@pytest.mark.parametrize("journey", [{"requester_parent": requester_with_unavailable_status}], indirect=True)
+async def test_unreadable_requester_status_refuses_and_reports_one_value_free_line(journey, caplog):
+    import re
+
+    laptop, chain = await certify_agent(journey, journey.member, [journey.member.id_certificate], "laptop")
+    response = await start(journey, laptop, chain)
+    assert response.status_code == 503 and response.json() == {"detail": "principal_status_unavailable"}
+    messages = [
+        record.getMessage() for record in caplog.records
+        if record.name == "aweb_naapp.runtime.principal_status"
+    ]
+    assert len(messages) == 1
+    assert re.fullmatch("principal_status_unavailable reason=requester_identity_unavailable elapsed_ms=[0-9]+", messages[0])
 
 
 @pytest.mark.parametrize("journey", [REQUESTER], indirect=True)
@@ -200,7 +234,7 @@ class ShortWindowOnce:
         evidence = await self.real(request, signer)
         if evidence is not None and self.deadline is None:
             self.deadline = time.monotonic_ns() + 100_000_000
-            return RequesterEvidence(evidence.parent, self.deadline)
+            return replace(evidence, fresh_until=self.deadline)
         return evidence
 
 

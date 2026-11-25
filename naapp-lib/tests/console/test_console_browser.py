@@ -123,13 +123,11 @@ def _human_app(passkeys: Passkeys, sessions: ConsoleSessions, limiter: LoginLimi
 
 
 @pytest.fixture
-async def service(test_db_factory, registry) -> AsyncIterator[Console]:
+async def service(console_database, registry) -> AsyncIterator[Console]:
     sock = _free_socket()
     port = sock.getsockname()[1]
     human_origin = f"http://localhost:{port}"
-    console = await console_world(
-        test_db_factory, registry, "naapp_console_browser", origin=human_origin
-    )
+    console = await console_world(console_database, registry, origin=human_origin)
     console.allowed = {SCOPE}
     sessions = console.sessions()
     limiter = LoginLimiter(

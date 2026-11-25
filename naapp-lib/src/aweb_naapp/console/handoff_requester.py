@@ -19,7 +19,7 @@ from awid.id_certificates import IDCertificateError, decode_id_chain_header, ver
 from awid.registry import MalformedIDStatusError
 from fastapi import HTTPException, Request
 
-from aweb_naapp.runtime.human_member import PrincipalStatusUnavailable
+from aweb_naapp.runtime.principal_status import PrincipalStatusReason, PrincipalStatusUnavailable
 from aweb_naapp.runtime.team_auth import Principal
 
 CHAIN_HEADER = "X-AWID-ID-Chain"
@@ -45,10 +45,14 @@ class RequesterEvidence:
 
     parent: str
     fresh_until: int
+    checked_at: int
 
     def require_fresh(self) -> None:
-        if time.monotonic_ns() > self.fresh_until:
-            raise PrincipalStatusUnavailable()
+        now = time.monotonic_ns()
+        if now > self.fresh_until:
+            raise PrincipalStatusUnavailable(
+                PrincipalStatusReason.REQUESTER_IDENTITY_DEADLINE, self.checked_at, now=now
+            )
 
 
 RequesterParent = Callable[[Request, Principal], Awaitable[RequesterEvidence | None]]
@@ -96,7 +100,9 @@ def requester_parent(registry: Any) -> RequesterParent:
             raise HTTPException(422, "registry_response_unusable") from exc
         result = verify_id_chain(bundle, subject=subject, evidence=evidence, domain=domain)
         if result.get("outcome") == "unavailable":
-            raise PrincipalStatusUnavailable()
+            raise PrincipalStatusUnavailable(
+                PrincipalStatusReason.REQUESTER_IDENTITY_UNAVAILABLE, started
+            )
         if result.get("identity_valid") is not True or result.get("kind") != "agent":
             return None
         edge = leaf.get("parent") or {}
@@ -106,6 +112,6 @@ def requester_parent(registry: Any) -> RequesterParent:
             return None
         age = evidence.age_seconds if evidence.age_seconds is not None else FRESHNESS_SECONDS
         fresh_until = started + math.floor((FRESHNESS_SECONDS - age) * 1_000_000_000)
-        return RequesterEvidence(edge["id"], fresh_until)
+        return RequesterEvidence(edge["id"], fresh_until, started)
 
     return parent

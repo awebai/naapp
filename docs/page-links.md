@@ -106,6 +106,13 @@ Phase 1 refuses unknown/revoked/rotated/incomplete evidence with 403
 `current_member_required`; unavailable facts remain 503
 `current_membership_unavailable`.
 
+If membership expires while the separate human identity checks run, console
+admission may read team facts once more before an effect transaction. It checks
+the certificate against the new facts, uses their own fetch-start and expiry,
+and retains the original identity deadlines. An observation that exhausts its
+own window refuses. Capability links and Folio use the membership-only check
+and keep their existing refusal when the proof expires.
+
 The host supplies `proof` to `exchange`, `read` or `admit`. Under its existing
 verified secret/session and link lock, N5 reloads `created_by`, requires the
 proof's team to match both scope and stored creator team, and matches the

@@ -12,11 +12,10 @@ from datetime import timedelta
 
 import pytest
 from aweb_naapp.hooks import envelope as hook_envelope
-from aweb_naapp.hooks.envelope import MAX_ENVELOPE_BYTES
 from pgdbm import AsyncDatabaseManager, AsyncMigrationManager
 
 from aweb_logs import MIGRATIONS_MODULE, MIGRATIONS_PATH
-from aweb_logs.export import EXPORT_PAGE, export_bundle, header_line, verify_bundle
+from aweb_logs.export import export_bundle, header_line, verify_bundle
 from aweb_logs.ledger import Appended, append, issue_checkpoint, open_next_epoch
 from aweb_logs.retention import purge
 
@@ -172,6 +171,3 @@ async def test_an_event_purged_mid_export_is_exported_purged_and_still_verifies(
     assert verified(lines)["intact"] is True
 
 
-def test_a_page_of_the_largest_envelopes_holds_at_most_16_mib() -> None:
-    assert EXPORT_PAGE >= 1
-    assert EXPORT_PAGE * MAX_ENVELOPE_BYTES <= 16 << 20

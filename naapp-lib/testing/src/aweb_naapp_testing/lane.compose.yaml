@@ -96,5 +96,3 @@ services:
       # lane's own registry, which the network below makes the only one it
       # can reach.
       AWID_REGISTRY_URL: http://awid.svc.test:8010
-    volumes:
-      - "${NAAPP_E2E_RUNTIME:?}:/runtime"

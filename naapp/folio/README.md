@@ -2,7 +2,7 @@
 
 `folio` is an agent-first document and presentation service for AWID teams. Agents authenticate with their team certificate, write append-only Markdown documents, brand them with a team theme, and mint no-login presentation links for humans. Documents are team-scoped; identity is the team's AWID certificate — there is no app account system.
 
-Open source, MIT-licensed — [github.com/awebai/aweb (naapp/folio)](https://github.com/awebai/aweb/tree/main/naapp/folio).
+Open source, MIT-licensed — [github.com/awebai/naapp/tree/main/naapp/folio](https://github.com/awebai/naapp/tree/main/naapp/folio).
 
 ## What it does
 
@@ -29,7 +29,7 @@ The API defaults to `http://127.0.0.1:8765`.
 
 ## Configuration
 
-All runtime env vars use the `FOLIO_` prefix; they are the shared naapp settings (`aweb_naapp.runtime.settings`) plus Folio's own:
+Folio reads its configuration from the environment only, never from a `.env` file; `make run` and `make api-serve` pass a local `.env` to the dev server when one exists. All runtime env vars use the `FOLIO_` prefix; they are the shared naapp settings (`aweb_naapp.runtime.settings`) plus Folio's own:
 
 - `FOLIO_DATABASE_URL` — PostgreSQL connection string.
 - `FOLIO_AWID_REGISTRY_URL` — AWID registry URL, default `https://api.awid.ai`.

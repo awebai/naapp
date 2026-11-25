@@ -15,12 +15,15 @@ from aweb_naapp.console import ConsoleSession, ConsoleSessions
 from aweb_naapp.console.browser import ConsoleBrand, ConsoleShell, SignInCopy
 from fastapi import APIRouter
 
+from aweb_secrets.owners import OWNER_ROLE
+
 
 def secrets_shell(app_id: str) -> ConsoleShell:
     return ConsoleShell(
         ConsoleBrand(
             product="Secrets",
             app_id=app_id,
+            member_role=OWNER_ROLE,
             csrf_key="aweb.secrets.console.csrf",
             stylesheet=(Path(__file__).parent / "style.css").read_text(),
             sign_in=SignInCopy(

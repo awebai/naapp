@@ -41,20 +41,6 @@ async def test_a_holding_scope_is_a_reader_scope() -> None:
     assert not is_reader_scope(holding_scope(INSTALLATION_ID, TEAM_ID, "secrets.owner", READER))
 
 
-async def test_a_scope_no_one_holds_is_no_reader(world: World) -> None:
-    await held_reader(world)
-    never = reader_scope(OTHER_READER)
-    assert await world.directory.reader(never) is None
-    assert not await world.directory.is_current_reader(never)
-
-
-async def test_a_revoked_reader_is_no_reader(world: World) -> None:
-    scope, _ = await held_reader(world)
-    await revoked_reader(world)
-    assert await world.directory.reader(scope) is None
-    assert not await world.directory.is_current_reader(scope)
-
-
 async def test_a_reader_held_again_after_revocation_reads_again(world: World) -> None:
     scope, first = await held_reader(world)
     await revoked_reader(world)

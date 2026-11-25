@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, Protocol
@@ -25,6 +25,7 @@ from typing import Any, Literal, Protocol
 from aweb_naapp.console import (
     ConsoleRoute,
     ConsoleSession,
+    InstallationUnobservable,
     KeyBoundConsoleSession,
     session_is_current,
 )
@@ -38,6 +39,7 @@ from aweb_naapp.runtime.approvals import (
     ApprovalState,
     Assurance,
     Decision,
+    PendingApproval,
 )
 from aweb_naapp.runtime.approvals.request import RequestNotCanonical, request_sha256
 from aweb_naapp.runtime.credential_audit import GovernanceUnavailable
@@ -204,7 +206,6 @@ class ConsoleChanges:
                     admitted.installation_id, admitted.team_id, value["secret_id"], value["version"]
                 )
             )
-        issued = datetime.now(UTC).replace(microsecond=0)
         async with self.console.db.transaction() as tx:
             await self._owner(tx, current, admitted)
             await self._prepare_bound(tx, current)
@@ -216,37 +217,52 @@ class ConsoleChanges:
                 hold=not isinstance(current, KeyBoundConsoleSession),
             ):
                 raise HTTPException(401, "console_session_required")
-            change = {
-                "v": 1,
-                "type": "aweb.secrets.change",
-                "change_id": "chg_" + uuid.uuid4().hex,
-                "installation_id": admitted.installation_id,
-                "install_generation": admitted.generation,
-                "team_id": admitted.team_id,
-                "drafter": {"via": "console", "scope": current.scope, "subject": current.subject},
-                "base_revision": await config_revision(
-                    tx, admitted.installation_id, team_id=admitted.team_id
-                ),
-                "changes": body["changes"],
-                "reason": body["reason"],
-                "issued_at": issued.strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "expires_at": (issued + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            }
-            pending = await self.changes.draft(
-                tx,
-                change,
-                sealed=sealed,
-                confirm_in_aw=isinstance(current, KeyBoundConsoleSession),
+            change_id, pending = await self._record_draft(
+                tx, current, admitted, items=body["changes"], sealed=sealed, reason=body["reason"]
             )
-            await self.console.fence.check(tx, admitted)
-            await self._effect_session_current(tx, current)
-            self._unexpired(current)
         await self.approvals.deliver(pending)
         return {
-            "change_id": change["change_id"],
+            "change_id": change_id,
             "approval_id": pending.approval.approval_id,
             "state": "pending",
         }
+
+    async def _record_draft(
+        self,
+        tx: TransactionManager,
+        current: ConsoleSession,
+        admitted: AdmittedInstallation,
+        *,
+        items: list[dict[str, Any]],
+        sealed: Sequence[SealContext],
+        reason: str,
+    ) -> tuple[str, PendingApproval]:
+        """Record a draft under the caller's held owner and session authority."""
+        issued = datetime.now(UTC).replace(microsecond=0)
+        change_id = "chg_" + uuid.uuid4().hex
+        change = {
+            "v": 1,
+            "type": "aweb.secrets.change",
+            "change_id": change_id,
+            "installation_id": admitted.installation_id,
+            "install_generation": admitted.generation,
+            "team_id": admitted.team_id,
+            "drafter": {"via": "console", "scope": current.scope, "subject": current.subject},
+            "base_revision": await config_revision(
+                tx, admitted.installation_id, team_id=admitted.team_id
+            ),
+            "changes": items,
+            "reason": reason,
+            "issued_at": issued.strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "expires_at": (issued + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
+        pending = await self.changes.draft(
+            tx, change, sealed=sealed, confirm_in_aw=isinstance(current, KeyBoundConsoleSession)
+        )
+        await self.console.fence.check(tx, admitted)
+        await self._effect_session_current(tx, current)
+        self._unexpired(current)
+        return change_id, pending
 
     async def read(
         self, current: ConsoleSession, installation_id: str, change_id: str
@@ -592,7 +608,7 @@ def console_changes_router(services: ConsoleChanges, *, prefix: str = "") -> API
                 if not isinstance(current, KeyBoundConsoleSession):
                     current = await services.console.sessions.current(request)
                 return await services.confirmation_result(confirmation, current)
-            except InstallationRefused:
+            except (InstallationRefused, InstallationUnobservable):
                 return JSONResponse(applied_receipt)
             except HTTPException as refused:
                 if refused.status_code not in {401, 403} and not (

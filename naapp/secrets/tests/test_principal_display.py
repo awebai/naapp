@@ -4,7 +4,9 @@ from pathlib import Path
 
 import aweb_naapp.runtime
 import pytest
+import pytest_asyncio
 from aweb_naapp.runtime.team_auth import Principal, record_observed_principal
+from aweb_naapp_testing.database_fixtures import database_template
 from pgdbm import AsyncMigrationManager
 
 from aweb_secrets.principal_display import observed_principal_alias, principal_html
@@ -28,13 +30,23 @@ def observed(**changes) -> Principal:
     return Principal(**{**fields, **changes})
 
 
-@pytest.fixture
-async def db(test_db_factory):
-    db = await test_db_factory.create_db(suffix="secrets_principal_display")
+async def migrate_database(db) -> None:
     await AsyncMigrationManager(
         db, migrations_path=str(RUNTIME_MIGRATIONS), module_name="aweb_naapp"
     ).apply_pending_migrations()
-    return db
+
+
+@pytest_asyncio.fixture(scope="session")
+async def schema_template():
+    async with database_template(
+        migrate_database, suffix="secrets_principal_display_template"
+    ) as template:
+        yield template
+
+
+@pytest.fixture
+async def db(clone_database, schema_template):
+    return await clone_database(schema_template, suffix="secrets_principal_display")
 
 
 async def alias_of(db, principal_did: str, *, team_id: str = TEAM) -> str | None:

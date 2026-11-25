@@ -19,7 +19,7 @@ from pgdbm import AsyncDatabaseManager, AsyncMigrationManager
 from aweb_logs import MIGRATIONS_MODULE, MIGRATIONS_PATH, read_store
 from aweb_logs.chain import format_time
 from aweb_logs.ledger import append, verify_epoch
-from aweb_logs.retention import EXPIRED, apply_retention, purge, set_retention
+from aweb_logs.retention import EXPIRED, apply_retention, lock_holds, purge, set_retention
 
 from .fixtures import TEAM_ID
 from .test_read_store import OTHER_TEAM, SIGNER, START, certificate_observed, secret_use
@@ -164,13 +164,28 @@ async def test_a_purge_waits_for_a_projection_reading_the_same_events(db, purges
 async def test_a_pass_stops_between_batches_once_asked_to(db, purges) -> None:
     for seq in (1, 2, 3):
         await appended(db, secret_use(seq=seq), age=timedelta(days=45))
-    await retention_setting(db, TEAM_ID, "all", days=30)
+    # One hook's setting, so the pass has one class to purge in batches.
+    await retention_setting(db, TEAM_ID, "post-secret-use-hook", days=30)
     stop = asyncio.Event()
-    stop.set()
-    assert (
-        await apply_retention(db, purges, now=NOW, batch=1, stop=stop) == 0
-    )
-    assert await apply_retention(db, purges, now=NOW, batch=1) == 3
+    # The first batch waits on the team's hold lock, which the test holds; it
+    # is asked to stop while that batch is under way.
+    async with db.transaction() as holding:
+        await lock_holds(holding, TEAM_ID, exclusive=True)
+        passing = asyncio.create_task(apply_retention(db, purges, now=NOW, batch=1, stop=stop))
+        for _ in range(100):
+            waiting = await db.fetch_value(
+                "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND NOT granted"
+                " AND database = (SELECT oid FROM pg_database WHERE datname = current_database())"
+            )
+            if waiting:
+                break
+            await asyncio.sleep(0.05)
+        assert waiting == 1
+        stop.set()
+    # The batch under way finishes; the next one never starts.
+    assert await passing == 1
+    assert [kept for _, kept, _ in await contents(db)] == [False, True, True]
+    assert await apply_retention(db, purges, now=NOW, batch=1) == 2
 
 
 async def test_a_team_whose_purge_fails_does_not_keep_the_others_from_theirs(

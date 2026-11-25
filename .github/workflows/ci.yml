@@ -97,6 +97,7 @@ jobs:
           - shard: rest
             tests: --ignore=tests/runtime
     env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp-lib
       NAAPP_LIB_TESTS: ${{ matrix.tests }}
       TEST_DB_HOST: localhost
@@ -147,6 +148,18 @@ jobs:
       - name: Install the test browser
         run: make browsers
 
+      # The page renderer runs in the rest shard only, which holds the
+      # store/renderer browser test (tests/page_store).
+      - name: Set up Node
+        if: matrix.shard == 'rest'
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install the page renderer's locked packages and browser
+        if: matrix.shard == 'rest'
+        run: make renderer-deps
+
       - name: Lint and type-check
         run: make lint
 
@@ -161,6 +174,18 @@ jobs:
       - name: Run tests offline against real PostgreSQL and Redis
         run: make test
 
+      - name: Run the page renderer's tests
+        if: matrix.shard == 'rest'
+        run: make test-renderer
+
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   folio:
     name: Folio lint and tests
     needs: plan
@@ -168,7 +193,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/folio
+      REDIS_URL: redis://localhost:6379/0
       TEST_DB_HOST: localhost
       TEST_DB_PORT: "5432"
       TEST_DB_USER: postgres
@@ -224,6 +251,14 @@ jobs:
       - name: Run unit and contract tests
         run: make test
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   folio-e2e:
     name: Folio real-stack e2e
     needs: plan
@@ -231,6 +266,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
+      PYTEST_ADDOPTS: --junitxml=${{ github.workspace }}/junit/folio-e2e.xml
       PACKAGES: naapp/folio
     steps:
       - name: Checkout
@@ -258,6 +294,48 @@ jobs:
       - name: Run real-stack e2e
         run: make e2e-folio
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
+  folio-image:
+    name: Folio image starts and serves
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.packages), 'naapp/folio')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PACKAGES: naapp/folio
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Built from the repository root as the release builds it, started with a
+      # minimal configuration; /live must name Folio and this build's commit.
+      - name: Build the Folio image and check it serves
+        env:
+          IMAGE_SMOKE_SHA: ${{ github.sha }}
+          IMAGE_SMOKE_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: make image-smoke-folio
+
   library:
     name: Library lint and tests
     needs: plan
@@ -265,6 +343,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/library
     services:
       postgres:
@@ -303,6 +382,21 @@ jobs:
       - name: Run unit and contract tests
         run: make test
 
+      # A developer's targets work from a clone: make compile, and make run
+      # serves /live against this job's database.
+      - name: Library's developer targets work
+        env:
+          LIBRARY_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: make check-library-dev
+
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   library-e2e:
     name: Library real-stack e2e
     needs: plan
@@ -310,6 +404,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
+      PYTEST_ADDOPTS: --junitxml=${{ github.workspace }}/junit/library-e2e.xml
       PACKAGES: naapp/library
     steps:
       - name: Checkout
@@ -334,6 +429,48 @@ jobs:
       - name: Run real-stack e2e
         run: make e2e-library
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
+  library-image:
+    name: Library image starts and serves
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.packages), 'naapp/library')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PACKAGES: naapp/library
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Built from the repository root as the release builds it, started with a
+      # minimal configuration; /live must name Library and this build's commit.
+      - name: Build the Library image and check it serves
+        env:
+          IMAGE_SMOKE_SHA: ${{ github.sha }}
+          IMAGE_SMOKE_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: make image-smoke-library
+
   logs:
     name: Logs lint and tests
     needs: plan
@@ -341,7 +478,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/logs
+      REDIS_URL: redis://localhost:6379/0
     services:
       postgres:
         image: postgres:17
@@ -394,6 +533,14 @@ jobs:
       - name: Run unit and contract tests
         run: make test
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   secrets:
     name: Secrets lint and tests
     needs: plan
@@ -401,7 +548,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/secrets
+      REDIS_URL: redis://localhost:6379/0
       UV_MANAGED_PYTHON: "true"
     services:
       postgres:
@@ -427,8 +576,8 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-      # The Secrets partition runs both shards against separate service pairs.
-      postgres_shard:
+      # Each Secrets shard runs against its own service pair; shard 1 uses the pair above.
+      postgres_shard_2:
         image: postgres:16
         env:
           POSTGRES_USER: postgres
@@ -441,7 +590,29 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-      redis_shard:
+      redis_shard_2:
+        image: redis:7
+        ports:
+          - 6379/tcp
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres_shard_3:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis_shard_3:
         image: redis:7
         ports:
           - 6379/tcp
@@ -493,14 +664,24 @@ jobs:
       - name: Check that every test module is in exactly one shard
         run: make check-secrets-shards
 
-      - name: Run unit and contract tests in both shards
+      - name: Run unit and contract tests in every shard
         env:
           AWEB_SECRETS_SHARD_SERVICES: >-
             [{"postgres_port": 5432, "redis_port": 6379},
-             {"postgres_port": ${{ job.services.postgres_shard.ports[5432] }},
-              "redis_port": ${{ job.services.redis_shard.ports[6379] }}}]
+             {"postgres_port": ${{ job.services.postgres_shard_2.ports[5432] }},
+              "redis_port": ${{ job.services.redis_shard_2.ports[6379] }}},
+             {"postgres_port": ${{ job.services.postgres_shard_3.ports[5432] }},
+              "redis_port": ${{ job.services.redis_shard_3.ports[6379] }}}]
           PYTEST_ADDOPTS: -rs
         run: make test
+
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
 
   secrets-e2e:
     name: Secrets owner-acts journey
@@ -509,6 +690,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 40
     env:
+      PYTEST_ADDOPTS: --junitxml=${{ github.workspace }}/junit/secrets-e2e.xml
       PACKAGES: naapp/secrets
     steps:
       - name: Checkout
@@ -524,10 +706,25 @@ jobs:
       - name: Install locked dependencies
         run: make sync
 
+      - name: Install the pinned aw release
+        run: |
+          make aw
+          .tools/bin/aw version
+
       # The real aw against AWID, aweb and this app's image, with the holder's
       # human key in a real Secret Service, all in naapp/secrets/docker-compose.e2e.yml.
       - name: Run the owner-acts journey
+        env:
+          NAAPP_AW_BINARY: ${{ github.workspace }}/.tools/bin/aw
         run: make e2e-secrets
+
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
 
   secrets-runner:
     name: Secrets runner lint and tests
@@ -536,6 +733,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/secrets/runner
     steps:
       - name: Checkout
@@ -557,6 +755,14 @@ jobs:
       - name: Run tests
         run: make test
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   secrets-values:
     name: Secrets values codec lint and tests
     needs: plan
@@ -564,6 +770,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/secrets/values
     steps:
       - name: Checkout
@@ -585,6 +792,14 @@ jobs:
       - name: Run tests
         run: make test
 
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   result:
     name: naapp CI
     if: always()
@@ -594,8 +809,10 @@ jobs:
       - naapp-lib
       - folio
       - folio-e2e
+      - folio-image
       - library
       - library-e2e
+      - library-image
       - logs
       - secrets
       - secrets-e2e

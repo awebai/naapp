@@ -33,6 +33,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from nacl.signing import SigningKey
 
 from aweb_secrets import jobs, records, runners
+from aweb_secrets.change import MAX_REASON_CHARS
 from aweb_secrets.composition import create_service
 from aweb_secrets.custody import Custody, LocalKeyFileProvider, encode_value
 from aweb_secrets.destination import DestinationRecord
@@ -40,7 +41,7 @@ from aweb_secrets.grant import GrantRecord
 from aweb_secrets.manifest import MANIFEST_PATH
 from aweb_secrets.owners import OWNER_ROLE, owner_scope
 from aweb_secrets.policy import Policy
-from aweb_secrets.secret import SecretRecord
+from aweb_secrets.secret import SecretRecord, mint_secret_id
 from tests.human_owner import apply_holder, fixture_principal, member_key
 from tests.production_authority import authority, install, install_audit_receiver, no_dns_override
 from tests.test_composition import settings
@@ -62,7 +63,7 @@ async def envelopes(db, team_id):
 
 
 @pytest.fixture
-async def root(test_db_factory, registry, tmp_path, request, monkeypatch):
+async def root(production_database, authority_database, registry, tmp_path, request, monkeypatch):
     member = Member(team_id="root:example.com", member_key=member_key("alice"))
     options = getattr(request, "param", {})
 
@@ -76,9 +77,9 @@ async def root(test_db_factory, registry, tmp_path, request, monkeypatch):
 
     private = options.get("private_team", False)
     async with authority(
-        test_db_factory, registry, member, visibility="private" if private else "public"
+        authority_database, registry, member, visibility="private" if private else "public"
     ) as (aweb_db, transport):
-        database = await test_db_factory.create_db(suffix="production_bootstrap")
+        database = production_database
         with SmtpServer(tmp_path / "smtp") as smtp:
             configured = settings(database, tmp_path, smtp).model_copy(
                 update={
@@ -323,7 +324,93 @@ async def test_a_canonical_component_holder_logs_into_the_production_console(roo
             while any(dns.queries[query] == 0 for query in expected_queries):
                 await asyncio.sleep(0.01)
     except TimeoutError:
-        pytest.fail(f"Expected DNS queries {expected_queries!r} within 5s. Observed {dict(dns.queries)!r}")
+        pytest.fail(
+            f"Expected DNS queries {expected_queries!r} within 5s. Observed {dict(dns.queries)!r}"
+        )
+
+
+def native_value_entry(entered):
+    return {
+        "secret": {
+            "v": 1, "secret_id": mint_secret_id(), "ref": "native", "description": "",
+            "kind": "bearer", "kind_params": {}, "backend": "native",
+            "sensitivity": "standard", "approve_only": False,
+        },
+        "value": {"value": entered},
+        "reason": "Enter a native value",
+    }
+
+
+async def test_native_value_post_is_mounted_only_on_the_production_console(root):
+    service, client, configured, _, installed, *_ = root
+    owner = await enrolled_owner(root)
+    human = configured.console_origin
+    path = f"/installations/{installed['installation_id']}/native-values"
+    entered = secrets.token_urlsafe(24)
+    data = native_value_entry(entered)
+    csrf = {"X-CSRF-Token": owner.csrf_token}
+    assert (await client.post(AUDIENCE + path, json=data, headers=csrf)).status_code == 404
+    assert (await client.post(human + path, json=data)).status_code == 403
+
+    db = service.runtime.db()
+    refused = await client.post(
+        human + path, json={**data, "reason": "x" * (MAX_REASON_CHARS + 1)}, headers=csrf
+    )
+    assert (refused.status_code, refused.json()) == (409, {"detail": "change_malformed"})
+    assert await db.fetch_value("SELECT count(*) FROM sealed_versions") == 0
+    assert await db.fetch_value("SELECT count(*) FROM custody_secrets") == 0
+    assert await db.fetch_value("SELECT count(*) FROM change_sets") == 0
+
+    staged = await client.post(human + path, json=data, headers=csrf)
+    assert staged.status_code == 201
+    assert set(staged.json()) == {"version", "created_at"} and staged.json()["version"] == 1
+    assert await db.fetch_value("SELECT count(*) FROM change_set_sealed") == 1
+    assert await db.fetch_value("SELECT count(*) FROM secrets") == 0
+    if any(entered in response.text for response in (staged, refused)):
+        pytest.fail("production native ingress reflected the submitted value")
+
+
+async def test_native_value_post_rechecks_the_owner_holding_after_lookup(root, monkeypatch):
+    service, client, configured, member, installed, *_ = root
+    owner = await enrolled_owner(root)
+    console = mounted_owner_console(service)
+    resolve = console.session_installation
+    observed, resume = asyncio.Event(), asyncio.Event()
+
+    async def observe_installation(current, installation_id):
+        admitted = await resolve(current, installation_id)
+        observed.set()
+        await resume.wait()
+        return admitted
+
+    monkeypatch.setattr(console, "session_installation", observe_installation)
+    path = f"/installations/{installed['installation_id']}/native-values"
+    posting = asyncio.create_task(
+        client.post(
+            configured.console_origin + path,
+            json=native_value_entry(secrets.token_urlsafe(24)),
+            headers={"X-CSRF-Token": owner.csrf_token},
+        )
+    )
+    db = service.runtime.db()
+    try:
+        # The real session and installation lookup have passed. Revoke the
+        # holding before the native value transaction checks it again.
+        await asyncio.wait_for(observed.wait(), 10)
+        async with db.transaction() as tx:
+            await unassign(tx, PrincipalKey(member.team_id, owner.body["principal"]), OWNER_ROLE)
+        resume.set()
+        refused = await asyncio.wait_for(posting, 10)
+    finally:
+        if not posting.done():
+            posting.cancel()
+        await asyncio.gather(posting, return_exceptions=True)
+
+    assert refused.status_code == 403, refused.status_code
+    assert refused.json() == {"detail": "owner_required"}
+    assert await db.fetch_value("SELECT count(*) FROM sealed_versions") == 0
+    assert await db.fetch_value("SELECT count(*) FROM custody_secrets") == 0
+    assert await db.fetch_value("SELECT count(*) FROM change_sets") == 0
 
 
 async def test_the_production_console_serves_the_access_view_only_to_its_current_owner(root):
@@ -661,3 +748,28 @@ async def test_console_pages_offer_retry_and_scoped_sign_in(root, registry, monk
     sign_in = await client.get(console + scoped)
     assert sign_in.status_code == 200
     assert f'id="login" data-scope="{owner.scope}"' in sign_in.text
+
+
+@pytest.fixture
+def prompt_installation_status(monkeypatch):
+    """The coordination server lets Secrets reuse an installation status for
+    one second; the seconds to wait past it."""
+    monkeypatch.setenv("AWEB_APP_GRANT_MAX_AGE_SECONDS", "1")
+    return 1.1
+
+
+async def test_an_owner_signs_in_after_secrets_last_heard_of_its_installation(
+    prompt_installation_status, root
+):
+    # Nothing else happens in between: no owner act or delivery asks the
+    # coordination server about the installation again.
+    _, client, configured, *_ = root
+    owner = await enrolled_owner(root)
+    await asyncio.sleep(prompt_installation_status)
+    human = configured.console_origin
+    options = await client.post(human + "/login/options", json={"scope": owner.scope})
+    assert options.status_code == 200, options.text
+    logged = await client.post(
+        human + "/login", json={"scope": owner.scope, "assertion": owner.device.get(options.json())}
+    )
+    assert logged.status_code == 200, logged.text

@@ -8,12 +8,19 @@ The routes are built inside a function, so their annotations are evaluated
 eagerly (no postponed annotations) for FastAPI to see the session dependency.
 """
 
+from contextlib import aclosing
 from datetime import timedelta
+from time import monotonic_ns
+from types import SimpleNamespace
 from typing import Annotated, Any
 
 import httpx
 import pytest
+from aweb_naapp_testing import Member
+from aweb_naapp_testing.human_members import human_namespace
 from aweb_naapp_testing.webauthn import SoftAuthenticator
+from awid.registry import RegistryClient
+from awid_service.testing import REGISTRY_URL, SERVICE_TOKEN
 from fastapi import APIRouter, Depends, FastAPI
 
 from aweb_naapp.console import (
@@ -22,10 +29,13 @@ from aweb_naapp.console import (
     ConsoleSession,
     ConsoleSessions,
     LoginLimiter,
+    ScopeMember,
     console_login_router,
 )
+from aweb_naapp.runtime import human_member, team_auth
 from aweb_naapp.runtime.origins import split_origins
-from tests.console.support import HUMAN, OWNER_A, OWNER_B, Console
+from aweb_naapp.runtime.team_auth import AWIDTeamCache
+from tests.console.support import HUMAN, OWNER_A, OWNER_B, Console, NoInstallation
 
 AGENT = "https://api.console.example"
 
@@ -88,6 +98,114 @@ async def test_an_owner_logs_in_with_a_user_verified_passkey(console: Console) -
     assert whoami.json()["scope"] == OWNER_A
     assert whoami.json()["subject"]
 
+
+class MembershipDeadlineTransport(httpx.AsyncBaseTransport):
+    """Advance only the verifier's clock at a real registry response."""
+
+    def __init__(self, registry, expiry: str, certificate_id: str) -> None:
+        self.registry = registry
+        self.expiry = expiry
+        self.certificate_id = certificate_id
+        self.now = monotonic_ns()
+        self.team_reads = 0
+        self.kind_reads = 0
+
+    async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
+        response = await self.registry.transport.handle_async_request(request)
+        if request.method == "GET" and request.url.path == "/v1/namespaces/example.com/teams/people":
+            assert response.status_code == 200
+            self.team_reads += 1
+            if self.expiry == "retry_error" and self.team_reads == 2:
+                return httpx.Response(503, json={"detail": "fixture-no-log-value"})
+            if (self.expiry == "cold" and self.team_reads == 1) or (
+                self.expiry == "retry" and self.team_reads == 2
+            ):
+                self.now += 1_000_000_001
+        elif request.method == "POST" and request.url.path == "/v1/id-certificates/status":
+            assert response.status_code == 200
+            self.kind_reads += 1
+            if self.kind_reads == 1 and self.expiry != "cold":
+                self.now += 2
+                if self.expiry == "revoked":
+                    await self.registry.revoke(self.certificate_id)
+        return response
+
+
+@pytest.mark.parametrize(
+    ("expiry", "status", "code", "reads"),
+    [
+        ("cached", 200, None, 2),
+        ("cold", 503, "principal_status_unavailable", 1),
+        ("retry", 503, "principal_status_unavailable", 2),
+        ("retry_error", 503, "principal_status_unavailable", 2),
+        ("revoked", 403, "principal_not_member", 2),
+    ],
+)
+async def test_login_rechecks_membership_once_when_it_expires_during_identity_status(
+    console: Console, registry, monkeypatch, caplog, expiry, status, code, reads
+):
+    team = "people:example.com"
+    member = Member(team_id=team)
+    await registry.add_team(team, member.team_did_key)
+    _, device = await console.enrol(OWNER_A)
+    async with human_namespace(registry, "example.com") as namespace:
+        human = await namespace.register(member)
+        transport = MembershipDeadlineTransport(registry, expiry, member.certificate_id)
+
+        def clock() -> int:
+            return transport.now
+
+        monkeypatch.setattr(human_member, "monotonic_ns", clock)
+        monkeypatch.setattr(team_auth, "time", SimpleNamespace(monotonic_ns=clock))
+        cache = AWIDTeamCache(
+            registry_url=REGISTRY_URL,
+            ttl_seconds=1,
+            service_token=SERVICE_TOKEN,
+            transport=transport,
+        )
+        if expiry != "cold":
+            cached = await cache.get(team, member.certificate_id)
+            transport.now = cached.expires_at - 1
+
+        async with aclosing(RegistryClient(
+            REGISTRY_URL,
+            transport=transport,
+            service_token=SERVICE_TOKEN,
+            domain_verifier=namespace.authority,
+        )) as client:
+            async def membership(scope: str) -> ScopeMember:
+                assert scope == OWNER_A
+                return await human_member.check_human_member(
+                    cache, client, team_id=team, principal=human.principal,
+                    certificate=member.certificate(),
+                )
+
+            sessions = ConsoleSessions(
+                console.db, passkeys=console.passkeys, scopes=console.admits,
+                member=membership, installations=NoInstallation(),
+            )
+            async with _client(_app(console, _limiter(console), sessions=sessions)) as browser:
+                result = await _login(browser, device, OWNER_A)
+
+        assert (result.status_code, result.json().get("detail")) == (status, code)
+        assert transport.team_reads == reads
+        reasons = {
+            "cold": ("team_observation_stale", 1000),
+            "retry": ("team_refresh_stale", 1000),
+            "retry_error": ("team_refresh_unavailable", 0),
+        }
+        expected = []
+        if expiry in reasons:
+            reason, elapsed_ms = reasons[expiry]
+            expected = [f"principal_status_unavailable reason={reason} elapsed_ms={elapsed_ms}"]
+        assert [
+            record.getMessage()
+            for record in caplog.records
+            if record.name == "aweb_naapp.runtime.principal_status"
+        ] == expected
+        assert transport.kind_reads == (0 if expiry == "cold" else 1)
+        sessions_opened = await console.db.fetch_value("SELECT count(*) FROM {{tables.console_sessions}}")
+        assert sessions_opened == (1 if status == 200 else 0)
 
 async def test_login_without_user_verification_opens_no_session(console: Console) -> None:
     _, device = await console.enrol(OWNER_A)
@@ -213,9 +331,20 @@ async def test_team_auth_is_refused_on_the_console(
 
 
 async def test_the_console_is_not_served_on_the_agent_origin(console: Console) -> None:
-    async with _client(_app(console, _limiter(console)), AGENT) as client:
+    subject, device = await console.enrol(OWNER_A)
+    app = _app(console, _limiter(console))
+    async with _client(app, AGENT) as client:
         response = await client.post("/login/options", json={"scope": OWNER_A})
     assert response.status_code == 404
+    assert response.json() == {"detail": "Not Found"}
+    assert "set-cookie" not in response.headers
+
+    async with _client(app) as client:
+        login = await _login(client, device, OWNER_A)
+        assert login.status_code == 200
+        whoami = await client.get("/whoami", headers={"Cookie": _cookie(login)})
+    assert whoami.status_code == 200
+    assert whoami.json() == {"subject": subject, "scope": OWNER_A}
 
 
 async def test_login_responses_carry_the_console_headers(console: Console) -> None:

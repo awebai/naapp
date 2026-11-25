@@ -373,9 +373,15 @@ async def supervisor_result(command, request):
     )
     try:
         async with asyncio.timeout(5):
-            stdout, stderr = await driver.communicate(json.dumps(request).encode() + b"\n")
-        return driver.returncode, stdout, stderr
+            # The newline completes the request. Keep the control channel open
+            # until the driver exits because EOF tells the guardian to stop the worker.
+            driver.stdin.write(json.dumps(request).encode() + b"\n")
+            stdout, stderr, exit_status = await asyncio.gather(
+                driver.stdout.read(), driver.stderr.read(), driver.wait()
+            )
+        return exit_status, stdout, stderr
     finally:
+        driver.stdin.close()
         if driver.returncode is None:
             driver.kill()
             await driver.wait()

@@ -2,7 +2,7 @@
 
 import asyncio
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 
 import httpx
 import pytest
@@ -19,7 +19,7 @@ from aweb_secrets.custody import CustodyUnavailable, SealContext, decode_value
 from aweb_secrets.owners import OWNER_ROLE
 from tests.console_home import no_banner
 from tests.human_owner import fixture_member_admission
-from tests.test_change_sets import ALICE, ORIGIN, TEAM, enrol_owner
+from tests.test_change_sets import ALICE, ORIGIN, TEAM, enrol_owner, unreachable
 from tests.test_change_sets import world as _world
 from tests.test_console import API, login
 from tests.test_use_approvals import uses as _uses
@@ -218,9 +218,12 @@ async def test_ingress_preserves_f6_status_and_allocates_nothing(world, failure,
                     "UPDATE {{tables.installation_fences}} SET generation=generation+1 WHERE installation_id=$1",
                     INSTALLATION_ID,
                 )
-        response = await human.post(
-            PATH, json={"value": value}, headers={"X-CSRF-Token": logged.json()["csrf_token"]}
-        )
+        # A stale installation is observed again first; refused while its
+        # authority cannot be reached.
+        with unreachable() if failure == "stale" else nullcontext():
+            response = await human.post(
+                PATH, json={"value": value}, headers={"X-CSRF-Token": logged.json()["csrf_token"]}
+            )
         assert response.status_code == status
         assert response.json() == {"detail": code}
         no_value(response, value)

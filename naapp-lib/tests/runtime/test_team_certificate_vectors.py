@@ -94,8 +94,8 @@ async def test_the_runtime_verifier_answers_each_case_as_recorded(case: dict) ->
     if expected is None:
         assert response.status_code == 200, response.text
     else:
-        detail = expected["reason"] if "field" not in expected else f"{expected['reason']}: {expected['field']}"
-        assert (response.status_code, response.json()["detail"]) == (401, detail)
+        code = response.json()["detail"]["code"]
+        assert (response.status_code, code) == (401, f"certificate_{expected['reason']}")
 
 
 def test_a_cache_cannot_be_made_to_keep_team_facts_longer_than_the_limit() -> None:

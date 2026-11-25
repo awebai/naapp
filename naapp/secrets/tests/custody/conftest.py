@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 import pytest
+import pytest_asyncio
 
 from aweb_secrets.custody import LocalKeyFileProvider
 
@@ -66,3 +67,22 @@ async def record_tables(database):
     await AsyncMigrationManager(
         database, migrations_path=str(MIGRATIONS_PATH), module_name=MODULE_NAME
     ).apply_pending_migrations()
+
+
+@pytest_asyncio.fixture(scope="session")
+async def custody_template():
+    from aweb_naapp_testing.database_fixtures import database_template
+
+    from aweb_secrets.custody import apply_custody_migrations
+
+    async def migrate(db):
+        await record_tables(db)
+        await apply_custody_migrations(db)
+
+    async with database_template(migrate, suffix="custody_template") as template:
+        yield template
+
+
+@pytest.fixture
+async def db(clone_database, custody_template):
+    return await clone_database(custody_template, suffix="secrets_custody")

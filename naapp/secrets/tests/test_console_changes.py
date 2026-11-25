@@ -1,7 +1,7 @@
 """Human change drafts and fresh passkey confirmation on real PG/native custody."""
 
 import os
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
 
 import asyncpg
 import httpx
@@ -16,11 +16,15 @@ from fastapi import FastAPI, HTTPException, Request
 from aweb_secrets.approval_kind import approval_kind
 from aweb_secrets.console import OwnerConsole, owner_console_router
 from aweb_secrets.console_changes import ConsoleChanges, console_changes_router
-from aweb_secrets.console_values import ConsoleValues, console_values_router
+from aweb_secrets.console_values import (
+    ConsoleValues,
+    console_native_values_router,
+    console_values_router,
+)
 from aweb_secrets.use_context import apply_use_context_migrations
 from tests.human_owner import fixture_member_admission
 from tests.test_change_set_onepassword import view
-from tests.test_change_sets import ALICE, BOB, ORIGIN, TEAM, enrol_owner
+from tests.test_change_sets import ALICE, BOB, ORIGIN, TEAM, Installations, enrol_owner, unreachable
 from tests.test_change_sets import world as _world
 from tests.test_console import API
 
@@ -73,9 +77,8 @@ async def application(
     human_app.include_router(
         console_ui_router(shell=console.shell, sessions=console.sessions, banner=no_banner)
     )
-    human_app.include_router(
-        console_values_router(ConsoleValues(console=console, custody=w.custody))
-    )
+    values = ConsoleValues(console=console, custody=w.custody)
+    human_app.include_router(console_values_router(values))
     changes = ConsoleChanges(
         console=console,
         changes=w.change_sets,
@@ -85,6 +88,7 @@ async def application(
         after_commit=cleanup or w.containment.evict,
     )
     human_app.include_router(console_changes_router(changes))
+    human_app.include_router(console_native_values_router(values, changes=changes))
     if forms:
         from aweb_secrets.console_forms import console_forms_router
 
@@ -384,7 +388,10 @@ async def test_refused_confirmation_preserves_decision_and_inert_token_without_c
             with pytest.raises(asyncpg.CheckViolationError):
                 await human.post(path + "/confirm", json={}, headers=headers)
         else:
-            result = await human.post(path + "/confirm", json={}, headers=headers)
+            # A stale installation is observed again first; refused while its
+            # authority cannot be reached.
+            with unreachable() if failure == "fence" else nullcontext():
+                result = await human.post(path + "/confirm", json={}, headers=headers)
             assert result.status_code == (503 if failure == "fence" else 409)
         assert (
             await w.db.fetch_value("SELECT active_version FROM {{tables.onepassword_credentials}}")
@@ -579,7 +586,7 @@ async def test_personal_locator_resolves_only_the_current_candidates_frozen_chan
         assert approved.json()["can_confirm"] is True
 
 
-@pytest.mark.parametrize("reason", ["ended", "membership_unavailable"])
+@pytest.mark.parametrize("reason", ["ended", "membership_unavailable", "installation_unavailable"])
 async def test_lost_session_after_commit_returns_only_an_applied_receipt_and_reauth(world, reason):
     w = world
     scope = await enrol_owner(w, ALICE, "alice@acme.com")
@@ -591,15 +598,25 @@ async def test_lost_session_after_commit_returns_only_an_applied_receipt_and_rea
     async def cleanup(*args):
         if reason == "ended":
             await retire_owner(w, scope, holder.subject)
-        else:
+        elif reason == "membership_unavailable":
             w.console.sessions.member = unavailable
+        else:
+            # The installation goes stale and its authority cannot be reached
+            # between the commit and the session's re-admission.
+            await w.db.execute(
+                "UPDATE {{tables.installation_fences}} SET fresh_until=clock_timestamp()-interval '1 second'"
+            )
+            Installations.reachable = False
 
     async with clients(w, cleanup=cleanup) as (human, _):
         headers = await sign_in(w, human, scope)
         drafted = await token_draft(w, human, headers)
         path = await approve(w, human, headers, drafted)
-        result = await human.post(path + "/confirm", json={}, headers=headers)
-        assert result.status_code == 200
+        try:
+            result = await human.post(path + "/confirm", json={}, headers=headers)
+        finally:
+            Installations.reachable = True
+        assert result.status_code == 200, result.text
         assert result.json() == {
             "change_id": drafted["change_id"],
             "revision": 1,
@@ -608,9 +625,13 @@ async def test_lost_session_after_commit_returns_only_an_applied_receipt_and_rea
         }
         if reason == "ended":
             assert "Max-Age=0" in result.headers["set-cookie"]
-        else:
+        elif reason == "membership_unavailable":
             assert "set-cookie" not in result.headers
             assert (await human.get("/session")).status_code == 503
+        else:
+            # The session stays open: once the authority answers, it reads again.
+            assert "set-cookie" not in result.headers
+            assert (await human.get("/session")).status_code == 200
         assert (
             await w.db.fetch_value("SELECT active_version FROM {{tables.onepassword_credentials}}")
             == 1

@@ -27,7 +27,7 @@ from aweb_naapp.console import (
     KeyBoundConsoleSession,
     session_is_current,
 )
-from aweb_naapp.console.browser import member_refusal
+from aweb_naapp.console.browser import session_refusal
 from aweb_naapp.roles import PrincipalKey, members_of, roles_of
 from aweb_naapp.runtime.installation import AdmittedInstallation
 from fastapi import APIRouter, HTTPException, Request
@@ -549,7 +549,7 @@ def console_access_router(*, services: ConsoleAccess) -> APIRouter:
         )
 
     def _recovery(refused: HTTPException) -> Response:
-        if refused.status_code == 401 or member_refusal(refused) is not None:
+        if refused.status_code == 401 or session_refusal(refused) is not None:
             return shell.refused_page(refused)
         if refused.detail not in _RECOVERIES:
             raise refused

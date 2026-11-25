@@ -329,13 +329,8 @@ async def test_a_canonical_component_holder_logs_into_the_production_console(roo
         )
 
 
-async def test_native_value_post_is_mounted_only_on_the_production_console(root):
-    service, client, configured, _, installed, *_ = root
-    owner = await enrolled_owner(root)
-    human = configured.console_origin
-    path = f"/installations/{installed['installation_id']}/native-values"
-    entered = secrets.token_urlsafe(24)
-    data = {
+def native_value_entry(entered):
+    return {
         "secret": {
             "v": 1, "secret_id": mint_secret_id(), "ref": "native", "description": "",
             "kind": "bearer", "kind_params": {}, "backend": "native",
@@ -344,6 +339,15 @@ async def test_native_value_post_is_mounted_only_on_the_production_console(root)
         "value": {"value": entered},
         "reason": "Enter a native value",
     }
+
+
+async def test_native_value_post_is_mounted_only_on_the_production_console(root):
+    service, client, configured, _, installed, *_ = root
+    owner = await enrolled_owner(root)
+    human = configured.console_origin
+    path = f"/installations/{installed['installation_id']}/native-values"
+    entered = secrets.token_urlsafe(24)
+    data = native_value_entry(entered)
     csrf = {"X-CSRF-Token": owner.csrf_token}
     assert (await client.post(AUDIENCE + path, json=data, headers=csrf)).status_code == 404
     assert (await client.post(human + path, json=data)).status_code == 403
@@ -364,6 +368,49 @@ async def test_native_value_post_is_mounted_only_on_the_production_console(root)
     assert await db.fetch_value("SELECT count(*) FROM secrets") == 0
     if any(entered in response.text for response in (staged, refused)):
         pytest.fail("production native ingress reflected the submitted value")
+
+
+async def test_native_value_post_rechecks_the_owner_holding_after_lookup(root, monkeypatch):
+    service, client, configured, member, installed, *_ = root
+    owner = await enrolled_owner(root)
+    console = mounted_owner_console(service)
+    resolve = console.session_installation
+    observed, resume = asyncio.Event(), asyncio.Event()
+
+    async def observe_installation(current, installation_id):
+        admitted = await resolve(current, installation_id)
+        observed.set()
+        await resume.wait()
+        return admitted
+
+    monkeypatch.setattr(console, "session_installation", observe_installation)
+    path = f"/installations/{installed['installation_id']}/native-values"
+    posting = asyncio.create_task(
+        client.post(
+            configured.console_origin + path,
+            json=native_value_entry(secrets.token_urlsafe(24)),
+            headers={"X-CSRF-Token": owner.csrf_token},
+        )
+    )
+    db = service.runtime.db()
+    try:
+        # The real session and installation lookup have passed. Revoke the
+        # holding before the native value transaction checks it again.
+        await asyncio.wait_for(observed.wait(), 10)
+        async with db.transaction() as tx:
+            await unassign(tx, PrincipalKey(member.team_id, owner.body["principal"]), OWNER_ROLE)
+        resume.set()
+        refused = await asyncio.wait_for(posting, 10)
+    finally:
+        if not posting.done():
+            posting.cancel()
+        await asyncio.gather(posting, return_exceptions=True)
+
+    assert refused.status_code == 403, refused.status_code
+    assert refused.json() == {"detail": "owner_required"}
+    assert await db.fetch_value("SELECT count(*) FROM sealed_versions") == 0
+    assert await db.fetch_value("SELECT count(*) FROM custody_secrets") == 0
+    assert await db.fetch_value("SELECT count(*) FROM change_sets") == 0
 
 
 async def test_the_production_console_serves_the_access_view_only_to_its_current_owner(root):

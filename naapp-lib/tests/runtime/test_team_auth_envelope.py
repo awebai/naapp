@@ -142,9 +142,9 @@ async def test_authorization_header_must_be_didkey(registry, member, authorizati
 @pytest.mark.parametrize(
     "missing,code",
     [
-        ("Authorization", "authorization_invalid"),
+        ("Authorization", "authorization_missing"),
         ("X-AWEB-Timestamp", "timestamp_missing"),
-        ("X-AWEB-Signed-Payload", "signed_payload_invalid"),
+        ("X-AWEB-Signed-Payload", "signed_payload_missing"),
         ("X-AWID-Team-Certificate", "certificate_missing"),
     ],
 )

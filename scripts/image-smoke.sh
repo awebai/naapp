@@ -36,19 +36,25 @@ case "$app" in
     printf '%064d' 2 | tr 0 2 > "$keys/grant.hex"
     key_files='{"folio:emit-1": "/keys/emit.hex", "folio:grant-read-1": "/keys/grant.hex"}'
     ;;
+  library)
+    # Library signs nothing at startup: no key files.
+    key_files=
+    ;;
   *)
     echo "image-smoke.sh: no smoke configuration for $app" >&2
     exit 2
     ;;
 esac
 chmod 0755 "$keys"
-chmod 0644 "$keys"/*.hex
+if [ -n "$key_files" ]; then
+  chmod 0644 "$keys"/*.hex
+fi
 
 docker run --detach --name "$container" --network host \
   --volume "$keys:/keys:ro" \
   --env "${prefix}_DATABASE_URL=$database_url" \
-  --env "${prefix}_APP_KEY_FILES=$key_files" \
   --env "${prefix}_GIT_SHA=$sha" \
+  ${key_files:+--env "${prefix}_APP_KEY_FILES=$key_files"} \
   "$image" >/dev/null
 
 for _ in $(seq 60); do

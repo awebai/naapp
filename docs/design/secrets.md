@@ -2517,6 +2517,7 @@ Q8 decided that neither `--unsafe-inject` nor `result_handling: return` exists.
 | T11 | Team controller (owner act) | designating the first owner and re-designating after a lockout (§10.2) | It is the root of trust for the installation's policy. Install or admin authority alone cannot bootstrap or recover secrets. The controller key signs an owner act only after a live, exact-act passkey approval by the current team owner, consumed once (§10.2). |
 | T12 | Hook targets (logs) | storing redacted events | They receive metadata, hashes and identifiers, never values. |
 | T13 | Network path and DNS | nothing | TLS verification, address checks and connection pinning (§7.3) |
+| T14 | PostgreSQL operator, any holder of the database owner role, and any principal able to write Secrets’ authorization tables | integrity of authorization state | Secrets trusts the integrity of database writes to its authorization tables today. A writer can widen what the service authorizes even without the custody key. Custody encryption separately protects stored native values. |
 
 ### 14.2 The defensible claim
 
@@ -2530,7 +2531,8 @@ is:
 - recorded as durable intent and outcome in secrets' own store, with a signed
   hook event durably enqueued before any dispatch;
 
-all under T1–T13.
+all under T1–T14. This includes database write integrity in both hosted and
+dedicated deployments.
 
 **This design does not claim:**
 
@@ -2548,6 +2550,76 @@ all under T1–T13.
 It also does not claim audit completeness for credentials the agent can reach by
 other means. The guarantee holds only where secrets is the sole path to the
 credential (secrets SOT §8, item 5).
+
+### 14.3 Proposed integrity protection for authorization state
+
+**Design for future work.** The current boundary is T14. This proposal would
+let Secrets verify authorization state even when an operator can write to its
+PostgreSQL database. Scheduling and implementation are separate decisions.
+
+**Authority-integrity key.** Provision a dedicated MAC key to the Secrets
+service through its operator-controlled key store outside PostgreSQL. Keep it
+independent of custody encryption, hook signing and response commitment keys.
+Use a versioned, domain-separated HMAC over canonical records, binding the team,
+app, installation and generation, record type and identity, and revision. Only
+the service's verified publication path can authenticate an authority change.
+
+**Records and publication.** Authenticate the complete authority used by
+admission or dispatch.
+
+- Secret metadata that affects authorization, active version and backend
+  bindings, derived lineage, containment and revocation.
+- Grants and their subjects, policies, destinations, named operations and job
+  definitions. Include the active pointers and exact definitions they select,
+  all applicable scopes and restrictions, and runner registration and key
+  bindings.
+- Role assignments and owner holdings, approver coverage, enrolled credential
+  public keys and lifecycle state, and console session bindings. Include the
+  challenge context, effective times and revocations that affect live authority.
+- Approval request and decision bindings, joint approval associations, and the
+  dispatch identity and consumption state that determine whether a release may
+  proceed or be retried.
+
+Authenticate records at their normal commit boundaries, after verifying the
+authority that creates or changes them. Verify incoming controller acts against
+the current team key. Verify passkey decisions and session enrolment against
+authenticated credential bindings and the service's exact challenge. Apply each
+change to an already authenticated current state, recheck the actor's authority
+at the effect fence, and authenticate only the resulting scoped change. A
+database row, a stored proof commitment, or a restored snapshot alone supplies
+no authority to publish. Establish the first trusted revision by independent
+verification or fresh, independently authenticated owner approval of the
+complete baseline.
+
+**Read and release checks.** Verify the records and their membership in the
+current authenticated revision at admission and at the existing final fences
+for effects, broker and runner release, retries and reconciliation. Cover the
+selection as well as each record so the database cannot hide a revocation,
+substitute a different active pointer or omit an applicable restriction. Keep
+the existing shape, scope, membership, expiry and egress checks. Fail closed
+on missing evidence or a changed revision.
+
+The approval MAC binds the decision, approver and credential, exact frozen
+request digest, applicable policy revision, expiry and single-use approval ID.
+The frozen request binds the original principal and installation, secret
+version, and the operation and parameters that determine the wire request or
+runner job. The release fence checks those bindings against the actual prepared
+effect and records its consumption for that dispatch. A different effect needs
+its own approval.
+
+**Checkpoint outside PostgreSQL.** Keep the latest accepted revision and its
+authenticated root in an independently protected durable store. A root commits
+to the current authority set, including active selections and revocations, so an
+older valid MAC cannot make a restored record current. Stage each new revision
+in PostgreSQL before advancing the external checkpoint with a compare-and-swap.
+Only a checkpointed revision can authorize work. After an interruption or
+restore, load the revision named by the checkpoint and verify its root. If that
+revision is unavailable, refuse until the operator restores matching evidence.
+Anchor approval consumption and the dispatch reservation in the independent
+store so a restore cannot make a one-use decision available again. Order the
+reservation against revision advances in that store. Release only after the
+reservation has committed against the current revision. An uncertain release
+goes through reconciliation under the existing outcome rules.
 
 ## 15. Deploy
 

@@ -1700,10 +1700,10 @@ def test_library_s_package_metadata_names_the_naapp_repository() -> None:
     import tomllib
 
     urls = tomllib.loads((render_ops.APP_ROOT / "pyproject.toml").read_text())["project"]["urls"]
-    assert {name: url.split("/tree/")[0].split("/issues")[0] for name, url in urls.items()} == {
-        "Homepage": "https://github.com/awebai/naapp",
+    assert urls == {
+        "Homepage": "https://github.com/awebai/naapp/tree/main/naapp/library",
         "Repository": "https://github.com/awebai/naapp",
-        "Issues": "https://github.com/awebai/naapp",
+        "Issues": "https://github.com/awebai/naapp/issues",
     }
 
 

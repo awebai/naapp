@@ -12,7 +12,6 @@ Standard library only. Nothing here is imported by a naapp at runtime.
 from __future__ import annotations
 
 import json
-import os
 import re
 import subprocess
 import time
@@ -23,6 +22,8 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
+
+from aweb_naapp.ops.git import run_git as _run_git
 
 API_BASE = "https://api.render.com/v1"
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -50,12 +51,6 @@ NOT_YET_HEALTH_STATUSES = {404, 408, 425, 429, 500, 502, 503, 504}
 # User-Agent with its browser-signature 403, which would hide a healthy service and
 # make a real outage look the same.
 HEALTH_USER_AGENT = "aweb-naapp-deploy-check/1.0"
-# Git variables that would point git at a repository other than the one named.
-GIT_REPOSITORY_ENV = frozenset(
-    {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"}
-)
-
-
 class OpsError(RuntimeError):
     pass
 
@@ -278,12 +273,6 @@ def canonical_git_repo(value: str) -> str:
     if normalized.startswith("git@github.com/"):
         normalized = "github.com/" + normalized.removeprefix("git@github.com/")
     return normalized.removesuffix(".git").rstrip("/")
-
-
-def _run_git(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]:
-    """Run git against the repository named in args, never an inherited Git context."""
-    env = {key: value for key, value in os.environ.items() if key not in GIT_REPOSITORY_ENV}
-    return subprocess.run(["git", *args], env=env, **kwargs)
 
 
 def _git_ok(repo_root: Path, *args: str) -> bool:

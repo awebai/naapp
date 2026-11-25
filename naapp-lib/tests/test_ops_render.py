@@ -352,6 +352,15 @@ def test_deploy_ships_the_branch_tip_and_waits_for_it_live(history) -> None:
     assert result["rollback"]["id"] == LIVE_DEPLOY
 
 
+def test_deploy_reads_the_named_repository_whatever_git_namespace_it_inherits(history, monkeypatch) -> None:
+    state, config, client, work, live, _approved, tip = history
+    monkeypatch.setenv("GIT_NAMESPACE", "elsewhere")
+
+    result = _deploy(client, config, work, tip, live)
+
+    assert result["deploy"]["commit"] == tip
+
+
 def test_deploy_ships_an_approved_commit_the_branch_has_moved_past(history) -> None:
     state, config, client, work, live, approved, _tip = history
 

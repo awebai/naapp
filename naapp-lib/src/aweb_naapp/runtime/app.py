@@ -39,6 +39,7 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from ipaddress import IPv4Network, IPv6Network
 from pathlib import Path
+from time import monotonic_ns
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 from uuid import UUID
@@ -104,6 +105,11 @@ from aweb_naapp.runtime.human_member import (
 )
 from aweb_naapp.runtime.installation import InstallationFence
 from aweb_naapp.runtime.manifest_hooks import ManifestEvidence, bounded_body, prepare
+from aweb_naapp.runtime.principal_status import (
+    PrincipalStatusReason,
+    PrincipalStatusUnavailable,
+    log_principal_status_unavailable,
+)
 from aweb_naapp.runtime.settings import NaappSettings
 from aweb_naapp.runtime.team_auth import (
     AWIDTeamCache,
@@ -553,6 +559,7 @@ class NaappRuntime:
                 raise TeamCertificateError("malformed")
         except TeamCertificateError:
             raise OwnerActDeliveryRefused("principal_not_member") from None
+        started = monotonic_ns()
         try:
             proof = await self.check_human_member(
                 team_id,
@@ -568,11 +575,14 @@ class NaappRuntime:
                 code = "principal_not_human"
             else:
                 code = "principal_status_unavailable"
+                if not isinstance(exc, PrincipalStatusUnavailable):
+                    log_principal_status_unavailable(PrincipalStatusReason.OWNER_MEMBER_OBSERVATION_ERROR, started)
             raise OwnerActDeliveryRefused(code) from None
         except Exception:
             # The delivery boundary cannot turn an unclassified dependency
             # failure into a definitive non-member result or expose its detail.
             # Cancellation inherits BaseException and still propagates.
+            log_principal_status_unavailable(PrincipalStatusReason.OWNER_MEMBER_OBSERVATION_ERROR, started)
             raise OwnerActDeliveryRefused("principal_status_unavailable") from None
         return CheckedHumanRoleMember(certificate, proof)
 

@@ -78,6 +78,26 @@ class AuthorityEvidenceInvalid(ValueError):
         super().__init__(self.code)
 
 
+async def invalidate_authority(
+    tx: TransactionManager,
+    installation_id: str,
+    team_id: str,
+    kind: str,
+    identity: tuple[str, ...],
+) -> None:
+    """Withdraw current evidence in the narrowing transaction, without a key."""
+    await tx.execute(
+        """
+        DELETE FROM {{tables.authority_records}}
+        WHERE installation_id = $1 AND team_id = $2 AND kind = $3 AND identity = $4
+        """,
+        installation_id,
+        team_id,
+        kind,
+        list(identity),
+    )
+
+
 @dataclass(frozen=True)
 class AuthorityRecords:
     key: AuthorityIntegrityKey

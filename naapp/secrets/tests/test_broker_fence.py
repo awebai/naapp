@@ -138,6 +138,7 @@ async def publish_broker_authority(db, operation, admitted, *, unpublished=None)
         [destination] = await records.destinations(tx, INSTALLATION, secret_id)
         inputs = (
             ("secret", (secret_id,), SECRET),
+            ("secret_state", (secret_id,), {"state": "active"}),
             ("secret_version", (secret_id,), {"version": 4}),
             ("grant", (grant.grant_id,), grant.after),
             ("policy", (policy.digest,), policy.body),
@@ -152,7 +153,8 @@ async def publish_broker_authority(db, operation, admitted, *, unpublished=None)
 
 
 @pytest.mark.parametrize(
-    "unpublished", [None, "secret", "secret_version", "grant", "policy", "operation", "destination"]
+    "unpublished",
+    [None, "secret", "secret_state", "secret_version", "grant", "policy", "operation", "destination"],
 )
 async def test_broker_requires_published_records_at_each_effect_boundary(db, fence, unpublished):
     operation, request, admitted = await setup(db, fence)
@@ -206,12 +208,14 @@ async def test_release_refuses_a_changed_published_record(db, fence, change):
             altered = OperationTemplate.from_after({**operation.after, "timeout_s": 1})
             await records.create_operation(tx, INSTALLATION, TEAM, altered)
         else:
-            await records.remove_destination(tx, INSTALLATION, destination.destination_id)
-            altered_destination = DestinationRecord.from_after(
+            evidence = AuthorityRecords(key, admitted.installation)
+            await evidence.publish(
+                tx,
+                "destination",
+                (destination.destination_id,),
                 {**destination.after, "path": "/**"},
-                internal_destinations=InternalDestinations.DISABLED,
+                revision=1,
             )
-            await records.create_destination(tx, INSTALLATION, TEAM, altered_destination)
     async with db.transaction() as tx:
         with pytest.raises(AdmissionRefused) as unavailable:
             await authority(fence, admitted, request, uuid4(), integrity_key=key).prepare(tx)

@@ -16,7 +16,11 @@ from aweb_naapp.egress import InternalDestinations
 from pgdbm.core import TransactionManager
 
 from aweb_secrets import run_pin_store
-from aweb_secrets.authority_integrity import AuthorityEvidenceInvalid, AuthorityRecords
+from aweb_secrets.authority_integrity import (
+    AuthorityEvidenceInvalid,
+    AuthorityRecords,
+    invalidate_authority,
+)
 from aweb_secrets.destination import DestinationRecord
 from aweb_secrets.grant import GrantRecord, GrantTemplate
 from aweb_secrets.operation import OperationTemplate
@@ -44,13 +48,20 @@ class StoredSecret:
     active_version: int | None
 
 
+async def require_secret_definition(
+    tx: TransactionManager, authority: AuthorityRecords, stored: StoredSecret, *, ref: str
+) -> None:
+    if stored.record.ref != ref:
+        raise AuthorityEvidenceInvalid()
+    await authority.require(tx, "secret", (stored.record.secret_id,), stored.record.after)
+
+
 async def require_secret_authority(
     tx: TransactionManager, authority: AuthorityRecords, stored: StoredSecret, *, ref: str
 ) -> None:
+    await require_secret_definition(tx, authority, stored, ref=ref)
     secret_id = stored.record.secret_id
-    if stored.record.ref != ref:
-        raise AuthorityEvidenceInvalid()
-    await authority.require(tx, "secret", (secret_id,), stored.record.after)
+    await authority.require(tx, "secret_state", (secret_id,), {"state": stored.state})
     await authority.require(tx, "secret_version", (secret_id,), {"version": stored.active_version})
 
 
@@ -144,6 +155,20 @@ async def set_active_version(
     )
 
 
+async def disable_secret(
+    tx: TransactionManager, installation_id: str, team_id: str, secret_id: str
+) -> None:
+    """Disable a secret and withdraw its active-state evidence under the caller's lock."""
+    await tx.execute(
+        "UPDATE {{tables.secrets}} SET state='disabled', updated_at=NOW()"
+        " WHERE installation_id=$1 AND team_id=$2 AND secret_id=$3 AND state<>'disabled'",
+        installation_id,
+        team_id,
+        secret_id,
+    )
+    await invalidate_authority(tx, installation_id, team_id, "secret_state", (secret_id,))
+
+
 async def create_policy(
     tx: TransactionManager, installation_id: str, policy: Policy, *, team_id: str
 ) -> None:
@@ -232,6 +257,7 @@ async def revoke_grant(tx: TransactionManager, installation_id: str, grant_id: s
         grant_id,
     )
     if revoked is not None:
+        await invalidate_authority(tx, installation_id, revoked, "grant", (grant_id,))
         await bump_config_revision(tx, installation_id, team_id=revoked)
 
 
@@ -385,6 +411,7 @@ async def remove_destination(
         destination_id,
     )
     if removed is not None:
+        await invalidate_authority(tx, installation_id, removed, "destination", (destination_id,))
         await bump_config_revision(tx, installation_id, team_id=removed)
 
 

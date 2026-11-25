@@ -80,6 +80,7 @@ from aweb_secrets.authority_integrity import (
     AuthorityEvidenceInvalid,
     AuthorityIntegrityKey,
     AuthorityRecords,
+    invalidate_authority,
 )
 from aweb_secrets.change import (
     MAX_LIFETIME,
@@ -621,6 +622,9 @@ class ChangeSets:
                 installation_id,
                 team_id,
                 dependent["secret_id"],
+            )
+            await invalidate_authority(
+                tx, installation_id, team_id, "secret_version", (dependent["secret_id"],)
             )
             await self._custody.destroy(
                 tx,
@@ -1195,7 +1199,7 @@ class ChangeSets:
                 raise ChangeRefused(str(missing), code="record_missing") from None
         if item["kind"] == "reenable":
             try:
-                await self._containment.reenable(
+                enabled = await self._containment.reenable(
                     tx,
                     installation_id=installation_id,
                     team_id=team_id,
@@ -1204,9 +1208,20 @@ class ChangeSets:
                 )
             except ContainmentRefused as refused:
                 raise ChangeRefused("reenable refused", code=refused.code) from None
-            if after["target_kind"] == "secret":
-                return (await self._reenable_id(tx, installation_id, team_id, after["target_ref"]),)
-            return ()
+            if enabled is None:
+                return ()
+            if authority is not None:
+                await records.require_secret_definition(
+                    tx, authority, enabled, ref=after["target_ref"]
+                )
+                await authority.publish(
+                    tx,
+                    "secret_state",
+                    (enabled.record.secret_id,),
+                    {"state": enabled.state},
+                    revision=change["base_revision"] + 1,
+                )
+            return (enabled.record.secret_id,)
         if item["kind"] == "role":
             await assign(
                 tx, PrincipalKey(team_id=team_id, principal_did=after["principal"]), after["role"]
@@ -1325,6 +1340,14 @@ class ChangeSets:
                         raise ChangeRefused(
                             "the sealed secret's shape is fixed", code="sealed_secret_fixed"
                         )
+                    if authority is not None:
+                        await authority.publish(
+                            tx,
+                            "secret_state",
+                            (record.secret_id,),
+                            {"state": "active"},
+                            revision=change["base_revision"] + 1,
+                        )
                 else:
                     if await tx.fetch_value(
                         "SELECT 1 FROM {{tables.secrets}}"
@@ -1442,10 +1465,11 @@ class ChangeSets:
             raise records.RecordMissing(f"no secret {after['secret_ref']}")
         secret_id = stored.record.secret_id
         if authority is not None:
-            if stored.active_version is None:
-                await authority.require(tx, "secret", (secret_id,), stored.record.after)
-            else:
-                await records.require_secret_authority(tx, authority, stored, ref=after["secret_ref"])
+            await records.require_secret_definition(tx, authority, stored, ref=after["secret_ref"])
+            if stored.active_version is not None:
+                await authority.require(
+                    tx, "secret_version", (secret_id,), {"version": stored.active_version}
+                )
         context = SealContext(
             installation_id=installation_id,
             team_id=team_id,

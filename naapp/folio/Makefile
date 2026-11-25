@@ -5,6 +5,9 @@ API_PORT ?= 8765
 # The e2e stack's compose project; a gate passes its own with the NAAPP_E2E_* ports.
 export NAAPP_E2E_PROJECT ?= folio-e2e
 PROD_CONFIG ?= ops/render-production.json
+# A local .env configures the dev server only when it exists; Folio itself reads
+# no .env file.
+LOCAL_ENV_FILE := $(if $(wildcard .env),--env-file .env)
 
 test:
 	uv run pytest -q -m "not e2e"
@@ -37,11 +40,11 @@ compile:
 	uv run python -m compileall -q src tests
 
 run:
-	uv run python -m uvicorn folio.api:app --host 127.0.0.1 --port $(API_PORT) --reload
+	uv run $(LOCAL_ENV_FILE) python -m uvicorn folio.api:app --host 127.0.0.1 --port $(API_PORT) --reload
 
 api-serve:
 	@[ ! -f .api.pid ] || { echo "api server already running (pid $$(cat .api.pid)); make api-stop first"; exit 1; }
-	@nohup uv run python -m uvicorn folio.api:app --host 127.0.0.1 --port $(API_PORT) > .api.log 2>&1 & echo $$! > .api.pid
+	@nohup uv run $(LOCAL_ENV_FILE) python -m uvicorn folio.api:app --host 127.0.0.1 --port $(API_PORT) > .api.log 2>&1 & echo $$! > .api.pid
 	@echo "api serving at http://127.0.0.1:$(API_PORT)/ (pid $$(cat .api.pid))"
 
 api-stop:

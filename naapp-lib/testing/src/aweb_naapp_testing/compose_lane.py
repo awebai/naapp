@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import secrets
@@ -11,6 +12,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import quote
+
+import httpx
 
 from aweb_naapp_testing.network import Certificates, make_certificates
 
@@ -38,6 +41,53 @@ def docker(
         cwd=cwd,
         env=env,
         check=False,
+    )
+
+
+# What a lane machine runs for ComposeLane.http: one request read as JSON on
+# stdin, its answer written as JSON on stdout. Redirects are returned, not
+# followed, and an error status is an answer like any other. The machine's
+# SSL_CERT_FILE is the lane CA.
+LANE_HTTP_SCRIPT = """
+import base64, json, sys, urllib.error, urllib.request
+
+
+class Unfollowed(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+sent = json.load(sys.stdin)
+request = urllib.request.Request(
+    sent["url"],
+    data=None if sent["body"] is None else bytes.fromhex(sent["body"]),
+    method=sent["method"],
+)
+for name, value in sent["headers"]:
+    request.add_header(name, value)
+try:
+    response = urllib.request.build_opener(Unfollowed).open(request, timeout=sent["timeout"])
+except urllib.error.HTTPError as answered:
+    response = answered
+json.dump(
+    {
+        "status": response.status,
+        "headers": response.headers.items(),
+        "body": base64.b64encode(response.read()).decode(),
+    },
+    sys.stdout,
+)
+"""
+
+
+def lane_response(method: str, url: str, answer: str) -> httpx.Response:
+    """The answer LANE_HTTP_SCRIPT wrote, as the httpx response the request got."""
+    answered = json.loads(answer)
+    return httpx.Response(
+        answered["status"],
+        headers=[tuple(pair) for pair in answered["headers"]],
+        content=base64.b64decode(answered["body"]),
+        request=httpx.Request(method, url),
     )
 
 
@@ -321,6 +371,33 @@ class ComposeLane:
         )
         self._machines.append(container)
         return container
+
+    def http(
+        self,
+        machine: str,
+        method: str,
+        url: str,
+        *,
+        body: bytes | None = None,
+        headers: Iterable[tuple[str, str]] = (),
+        timeout: float = 30,
+    ) -> httpx.Response:
+        """Send one HTTP request from ``machine`` on the lane, through the
+        lane's DNS and TLS front, and return its first answer, error statuses
+        included. The request travels on stdin, never in argv."""
+        request = {
+            "method": method,
+            "url": url,
+            "headers": list(headers),
+            "body": None if body is None else body.hex(),
+            "timeout": timeout,
+        }
+        result = docker(
+            "exec", "-i", machine, "python3", "-c", LANE_HTTP_SCRIPT,
+            input=json.dumps(request),
+            timeout=int(timeout) + 30,
+        )
+        return lane_response(method, url, self.checked(result, f"{method} {url} from {machine}"))
 
     def query(self, user: str, database: str, select: str) -> str:
         return self.checked(

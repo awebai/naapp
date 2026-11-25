@@ -4,6 +4,9 @@
 	aatk-predicate-inventory aatk-spec-check aatk-validate-preplan aatk-validate-release
 
 API_PORT ?= 8765
+# A local .env configures the dev server only when it exists; Library itself reads
+# no .env file.
+LOCAL_ENV_FILE := $(if $(wildcard .env),--env-file .env)
 export NAAPP_E2E_PROJECT ?= library-e2e
 PROD_CONFIG ?= ops/render-production.json
 RENDER_ENV_FILE ?= $(HOME)/.aweb-render/env
@@ -47,10 +50,10 @@ lint:
 	uv run mypy src
 
 compile:
-	PYTHONPATH=src:../aweb/awid/src:../pgdbm/src python3 -m compileall -q src tests
+	uv run python -m compileall -q src tests
 
 run:
-	PYTHONPATH=src:../aweb/awid/src:../pgdbm/src python3 -m uvicorn library.api:app --host 127.0.0.1 --port $(API_PORT) --reload
+	uv run $(LOCAL_ENV_FILE) python -m uvicorn library.api:app --host 127.0.0.1 --port $(API_PORT) --reload
 
 e2e:
 	set -e; \
@@ -67,7 +70,7 @@ e2e-down:
 
 api-serve:
 	@[ ! -f .api.pid ] || { echo "api server already running (pid $$(cat .api.pid)); make api-stop first"; exit 1; }
-	@nohup env PYTHONPATH=src:../aweb/awid/src:../pgdbm/src python3 -m uvicorn library.api:app --host 127.0.0.1 --port $(API_PORT) > .api.log 2>&1 & echo $$! > .api.pid
+	@nohup uv run $(LOCAL_ENV_FILE) python -m uvicorn library.api:app --host 127.0.0.1 --port $(API_PORT) > .api.log 2>&1 & echo $$! > .api.pid
 	@echo "api serving at http://127.0.0.1:$(API_PORT)/ (pid $$(cat .api.pid))"
 
 api-stop:

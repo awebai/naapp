@@ -38,8 +38,9 @@ def _status(status: dict | None, *, ready_to_stream: object = False) -> object:
 
 
 def test_stream_iframe_url_requires_signing_config() -> None:
+    # A developer's .env (see .env.example) must not supply the signing key.
     with pytest.raises(HTTPException) as raised:
-        stream_iframe_url(settings=Settings(), stream_uid="uid123")
+        stream_iframe_url(settings=Settings(_env_file=None), stream_uid="uid123")
 
     assert raised.value.status_code == 503
 

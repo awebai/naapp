@@ -37,7 +37,7 @@ from aweb_naapp.runtime.hook_resolver import (
     OwnHookBinding,
 )
 from aweb_naapp.runtime.manifest_hooks import bounded_body
-from aweb_naapp.runtime.team_auth import CachedTeamFacts, raw_request_target
+from aweb_naapp.runtime.team_auth import CachedTeamFacts, raw_request_target, refusal_code
 from awid.log import canonical_server_origin
 from awid.team_certificate import decode_team_certificate
 from fastapi import HTTPException, Request
@@ -117,11 +117,7 @@ def _private_team_unreadable(exc: HTTPException) -> bool:
     """Whether the runtime's AWID authority refused because it cannot read the
     team's private facts: a configuration Logs' operator must fix, not an
     outage."""
-    return (
-        exc.status_code == 403
-        and isinstance(exc.detail, dict)
-        and exc.detail.get("code") == PRIVATE_TEAM_UNREADABLE
-    )
+    return exc.status_code == 403 and refusal_code(exc) == PRIVATE_TEAM_UNREADABLE
 
 
 class Ingestor:
@@ -277,8 +273,7 @@ class Ingestor:
         except HTTPException as exc:
             if _private_team_unreadable(exc):
                 raise IngestRefused(403, PRIVATE_TEAM_UNREADABLE) from exc
-            code = exc.detail.partition(":")[0] if isinstance(exc.detail, str) else None
-            if (exc.status_code, code) == (401, "team_key_unverified"):
+            if (exc.status_code, refusal_code(exc)) == (401, "team_key_unverified"):
                 # The registry names a key no namespace-controller act establishes.
                 raise IngestRefused(401, "team_key_unverified") from exc
             raise IngestRefused(503, "client_authority_unavailable") from exc

@@ -133,7 +133,8 @@ async def queried_content(world: World) -> dict[str, bool]:
 
 
 async def test_a_restored_logs_serves_no_content_purged_after_its_backup(world, tmp_path):
-    kept = await delivered(world, world.delivery("app"))
+    kept_ack = await acknowledged(world, world.delivery("app"))
+    kept = kept_ack["event_id"]
     erased = await delivered(world, world.delivery("app"))
     expired = await delivered(world, world.delivery("core"))
     backup = await back_up(world.db, tmp_path / "logs-content.dump")
@@ -160,8 +161,9 @@ async def test_a_restored_logs_serves_no_content_purged_after_its_backup(world, 
         assert await queried_content(world) == {kept: True, erased: False, expired: False}
         genesis, events = await load_epoch(world.db, world.member.team_id, 1)
         report = verify_chain(
-            genesis, events, receipt_keys=frozenset(), checkpoint_keys=frozenset()
+            genesis, events, receipt_keys=receipt_key(kept_ack), checkpoint_keys=frozenset()
         )
+        assert report.intact
         assert {item.act for item in report.purged} == {erase_act, retention_act}
 
 

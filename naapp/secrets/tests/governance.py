@@ -26,7 +26,9 @@ def view():
     )
 
 
-async def credential_audit(*, db, passkeys, owner, fence, admitted, origin, producer=None):
+async def credential_audit(
+    *, db, passkeys, owner, fence, admitted, origin, producer=None, migrate_schema=True
+):
     """Compose the real required B3 branch for caller fixtures."""
     import os
     from dataclasses import replace
@@ -43,7 +45,8 @@ async def credential_audit(*, db, passkeys, owner, fence, admitted, origin, prod
     )
     from aweb_secrets.owners import OWNER_ROLE
 
-    await apply_outbox_migrations(db)
+    if migrate_schema:
+        await apply_outbox_migrations(db)
     store = PgApprovalStore(db)
     if producer is None:
         producer = HookProducer(
@@ -79,6 +82,7 @@ async def credential_audit(*, db, passkeys, owner, fence, admitted, origin, prod
         max_backlog_age=timedelta(minutes=5),
         migration_module=CREDENTIAL_AUDIT_MIGRATIONS,
     )
-    await audit.migrate()
+    if migrate_schema:
+        await audit.migrate()
     passkeys._audit = audit
     return audit

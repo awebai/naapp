@@ -19,7 +19,7 @@ AW_DIR ?= $(abspath .tools/bin)
 SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_served_manifest_digests \
 	test_secrets_shards test_shipping
 
-.PHONY: affected sync lint test test-scripts production-awid-sync browsers aw \
+.PHONY: affected sync lint test test-scripts production-awid-sync browsers renderer-deps test-renderer image-smoke-folio image-smoke-library check-library-dev aw \
 	check-library-aatk check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets release-checks \
 	release-candidate release-publish
 
@@ -53,6 +53,8 @@ SECRETS_AW_TOOLS := $(if $(filter naapp/secrets,$(PACKAGES)),secrets-aw-tools)
 secrets-aw-tools: aw
 	scripts/build-lab-human-fixture.sh $(AW_DIR)
 
+# JUNIT_DIR, when set, receives one JUnit report per package (per shard for
+# Secrets), so two runs can be compared test by test.
 # The suites run offline behind the egress guard. AWS_EC2_METADATA_DISABLED
 # keeps the AWS SDK from probing a cloud host's metadata service for credentials.
 test: production-awid-sync $(SECRETS_AW_TOOLS)
@@ -63,6 +65,7 @@ test: production-awid-sync $(SECRETS_AW_TOOLS)
 			NAAPP_REQUIRE_TEST_DATABASE=1 LIBRARY_REQUIRE_TEST_DATABASE=1 \
 			AWS_EC2_METADATA_DISABLED=true \
 			NAAPP_AW_BINARY=$(AW_DIR)/aw NAAPP_LAB_HUMAN_FIXTURE=$(AW_DIR)/lab-human-fixture \
+			PYTEST_ADDOPTS="$$PYTEST_ADDOPTS $(if $(JUNIT_DIR),--junitxml=$(JUNIT_DIR)/$$(echo $$package | tr / _).xml)" \
 			$(TEST_EGRESS_RUNNER) $(MAKE) -C $$package test; \
 		git diff --exit-code -- $$package/uv.lock; \
 	done
@@ -82,6 +85,30 @@ browsers:
 		fi; \
 	done
 
+# The page renderer's npm lock and the Chromium of its own Playwright, which
+# naapp-lib's store/renderer browser test and the renderer's tests drive.
+renderer-deps:
+	npm ci --ignore-scripts --no-audit --no-fund --prefix naapp-lib/renderer
+	naapp-lib/renderer/node_modules/.bin/playwright install --with-deps --only-shell chromium
+
+# The page renderer's own tests (Node, then Playwright against the gallery).
+test-renderer:
+	cd naapp-lib/renderer && $(TEST_EGRESS_RUNNER) npm test
+
+# Folio's service image, built as the release builds it, starts and serves /live.
+image-smoke-folio:
+	bash scripts/image-smoke.sh folio
+
+# Library's service image, built as the release builds it, starts and serves /live.
+image-smoke-library:
+	bash scripts/image-smoke.sh library
+
+# Library's developer targets work from a naapp clone: compile, then the dev
+# server started by make run answers /live.
+check-library-dev:
+	$(MAKE) -C naapp/library compile
+	python3 scripts/dev_server_check.py library
+
 aw:
 	scripts/install-aw.sh $(AW_DIR)
 
@@ -98,7 +125,7 @@ e2e-library:
 	PATH="$(AW_DIR):$$PATH" $(MAKE) -C naapp/library e2e
 
 e2e-secrets:
-	$(MAKE) -C naapp/secrets e2e
+	NAAPP_AW_BINARY="$${NAAPP_AW_BINARY:-$(AW_DIR)/aw}" $(MAKE) -C naapp/secrets e2e
 
 # Each Secrets test module is in exactly one shard of candidate-gate/secrets-shards.json.
 check-secrets-shards:

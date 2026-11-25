@@ -9,7 +9,11 @@ from pydantic_settings import SettingsConfigDict
 class Settings(NaappSettings):
     """Runtime configuration for folio: the shared naapp settings under FOLIO_."""
 
-    model_config = SettingsConfigDict(env_prefix="FOLIO_", env_file=".env", extra="ignore")
+    # Only the environment configures Folio: folio.api builds its app on import,
+    # and a .env in whatever directory the process starts in is not its
+    # configuration. `make run` and `make api-serve` pass a local .env
+    # explicitly.
+    model_config = SettingsConfigDict(env_prefix="FOLIO_", env_file=None, extra="ignore")
 
     database_url: str = Field(default="postgresql://localhost/folio")
     public_origin: str = Field(default="http://127.0.0.1:8765")

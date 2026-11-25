@@ -12,8 +12,8 @@ import json
 import os
 import time
 import uuid
-from collections.abc import AsyncIterator
-from contextlib import asynccontextmanager
+from collections.abc import AsyncIterator, Iterator
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -46,7 +46,7 @@ from aweb_naapp.runtime.approvals import (
     DeliveryStatus,
     PgApprovalStore,
 )
-from aweb_naapp.runtime.authorization import Grant
+from aweb_naapp.runtime.authorization import Grant, GrantUnavailable
 from aweb_naapp.runtime.clock import seconds_to_ns
 from aweb_naapp.runtime.credential_audit import CredentialAudit
 from aweb_naapp.runtime.installation import (
@@ -55,6 +55,7 @@ from aweb_naapp.runtime.installation import (
     apply_installation_migrations,
 )
 from aweb_naapp.runtime.passkeys import Notice, Passkeys, RelyingParty
+from aweb_naapp_testing.database_fixtures import migrate_credential_audit, migrate_passkeys
 from aweb_naapp_testing.owner_acts import (
     INSTALLATION_ID,
     TeamOwner,
@@ -76,6 +77,7 @@ from aweb_secrets.change_sets import (
     apply_change_set_migrations,
 )
 from aweb_secrets.containment import Containment
+from aweb_secrets.credential_governance import CREDENTIAL_AUDIT_MIGRATIONS
 from aweb_secrets.custody import (
     Custody,
     CustodyUnavailable,
@@ -110,9 +112,23 @@ CAROL = PrincipalKey(
 APP_ID = "secrets"
 
 
+@contextmanager
+def unreachable() -> Iterator[None]:
+    """The installation authority cannot be reached inside the block: every
+    fence that observes :class:`Installations` is refused."""
+    Installations.reachable = False
+    try:
+        yield
+    finally:
+        Installations.reachable = True
+
+
 class Installations:
     """The installation's grant, as the app-to-team-server source reports it:
     fresh for 55 seconds from each observation, inside the fence's 60."""
+
+    # Whether the authority answers; :func:`unreachable` turns it off.
+    reachable = True
 
     def __init__(self, *, team_id: str = TEAM, app_id: str = APP_ID) -> None:
         self.team_id = team_id
@@ -132,6 +148,8 @@ class Installations:
         return self.grant if team_id == self.team_id else None
 
     async def status_for(self, team_id: str) -> SimpleNamespace | None:
+        if not Installations.reachable:
+            raise GrantUnavailable("the installation authority cannot be reached")
         if team_id != self.team_id:
             return None
         grant = self.grant
@@ -190,47 +208,12 @@ class World:
     registry: Any = None
 
 
-@pytest.fixture
-async def world(test_db_factory, tmp_path: Path, request, passkey_origin) -> AsyncIterator[World]:
-    async with build_world(
-        test_db_factory, tmp_path, origin=passkey_origin, options=getattr(request, "param", {})
-    ) as built:
-        yield built
-
-
-@asynccontextmanager
-async def build_world(
-    test_db_factory, tmp_path: Path, *, origin: str = ORIGIN, options: dict[str, Any] | None = None
-) -> AsyncIterator[World]:
-    db = await test_db_factory.create_db(suffix="secrets_change_sets")
-    if options:
-        # Keep the factory-owned manager and its cleanup registration. The
-        # upstream factory already passes min/max when constructing config.
-        await db.disconnect()
-        assert db.config is not None
-        db.config = db.config.model_copy(update=options)
-        await db.connect()
-    registry_db = await test_db_factory.create_db(suffix="secrets_change_sets_awid")
+async def migrate_change_set_world(db: AsyncDatabaseManager) -> None:
     await db.execute(
         "CREATE TABLE {{tables.audit_outbox}} (id SERIAL PRIMARY KEY, kind TEXT, details TEXT)"
     )
-    store = PgApprovalStore(db)
-    await store.migrate()
-    audit = Audit(db)
-    inbox = Inbox()
-    passkeys = Passkeys(
-        db,
-        rp=RelyingParty(origin=origin, name="secrets"),
-        delivery=inbox,
-        audit=audit,
-        retirement=ApprovalRevocation(store, audit),
-        enrolment_ttl=timedelta(hours=1),
-        challenge_ttl=timedelta(minutes=5),
-        owner_scopes=is_owner_scope,
-        holding_scopes=is_holding_scope,
-        proof_context=PasskeyContexts(app_id=APP_ID),
-    )
-    await passkeys.migrate()
+    await PgApprovalStore(db).migrate()
+    await migrate_passkeys(db)
     await AsyncMigrationManager(
         db, migrations_path=str(MIGRATIONS_PATH), module_name=MODULE_NAME
     ).apply_pending_migrations()
@@ -248,6 +231,61 @@ async def build_world(
         apply_outbox_migrations,
     ):
         await migrate(db)
+    await migrate_credential_audit(db, CREDENTIAL_AUDIT_MIGRATIONS)
+
+
+@pytest.fixture
+async def world(
+    change_set_databases, tmp_path: Path, request, passkey_origin
+) -> AsyncIterator[World]:
+    async with build_world(
+        *change_set_databases,
+        tmp_path,
+        origin=passkey_origin,
+        options=getattr(request, "param", {}),
+    ) as built:
+        yield built
+
+
+@pytest.fixture
+async def fresh_world(test_db_factory, tmp_path: Path) -> AsyncIterator[World]:
+    """Exercise the full migration chain from an empty database."""
+    db = await test_db_factory.create_db(suffix="secrets_change_sets_fresh")
+    registry_db = await test_db_factory.create_db(suffix="secrets_change_sets_awid_fresh")
+    await migrate_change_set_world(db)
+    async with build_world(db, registry_db, tmp_path) as built:
+        yield built
+
+
+@asynccontextmanager
+async def build_world(
+    db: AsyncDatabaseManager,
+    registry_db: AsyncDatabaseManager,
+    tmp_path: Path,
+    *,
+    origin: str = ORIGIN,
+    options: dict[str, Any] | None = None,
+) -> AsyncIterator[World]:
+    if options:
+        # Reconfigure the factory-owned manager without changing its cleanup.
+        await db.disconnect()
+        db.config = db.config.model_copy(update=options)
+        await db.connect()
+    store = PgApprovalStore(db)
+    audit = Audit(db)
+    inbox = Inbox()
+    passkeys = Passkeys(
+        db,
+        rp=RelyingParty(origin=origin, name="secrets"),
+        delivery=inbox,
+        audit=audit,
+        retirement=ApprovalRevocation(store, audit),
+        enrolment_ttl=timedelta(hours=1),
+        challenge_ttl=timedelta(minutes=5),
+        owner_scopes=is_owner_scope,
+        holding_scopes=is_holding_scope,
+        proof_context=PasskeyContexts(app_id=APP_ID),
+    )
     installations = Installations()
     fence = InstallationFence(db, app_id=APP_ID, grants=installations)
     await fence.refresh(TEAM)
@@ -289,6 +327,7 @@ async def build_world(
             admitted=admitted,
             origin=ORIGIN,
             producer=producer,
+            migrate_schema=False,
         )
         containment = Containment(
             db=db,
@@ -523,7 +562,8 @@ async def test_four_eyes_console_draft_has_no_candidate_after_other_owner_revoca
     assert await world.db.fetch_value("SELECT count(*) FROM {{tables.change_sets}}") == 0
 
 
-async def test_a_confirmed_change_set_applies_and_moves_the_revision_on(world: World) -> None:
+async def test_a_confirmed_change_set_applies_and_moves_the_revision_on(fresh_world: World) -> None:
+    world = fresh_world
     await enrol_owner(world, ALICE, "alice@acme.com")
     change = change_set(drafter=by_member(CAROL), changes=[grant_role(CAROL)])
     approval_id = await draft(world, change)

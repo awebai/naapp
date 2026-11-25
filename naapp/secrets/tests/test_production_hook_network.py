@@ -45,7 +45,14 @@ from tests.test_production_bootstrap import enrolled_owner
     ids=["listed", "not-listed", "deployment"],
 )
 async def test_production_hook_delivery_uses_explicit_dns_ca_and_internal_network(
-    test_db_factory, registry, tmp_path, monkeypatch, listed, deployment
+    test_db_factory,
+    production_database,
+    authority_database,
+    registry,
+    tmp_path,
+    monkeypatch,
+    listed,
+    deployment,
 ):
     member = Member(member_key=member_key("alice"), team_id="root:example.com")
     name = "logs.root-hooks.test"
@@ -75,20 +82,22 @@ async def test_production_hook_delivery_uses_explicit_dns_ca_and_internal_networ
 
     async with (
         team_server_site(tmp_path / "aweb", also_names=(name,)) as site,
-        authority(test_db_factory, registry, member, site) as aweb_db,
+        authority(authority_database, registry, member, site) as aweb_db,
     ):
         host, dns = site.host, site.dns
         target = TlsServer(site.certificates, host)
         target.respond = receive
         try:
-            if deployment:
-                dns.records[("_awid.example.com", "TXT")] = [
-                    '"' + awid_txt_value(member.team_did_key, REGISTRY_URL) + '"'
-                ]
-                system_dns = dns_api.Resolver(configure=False)
-                system_dns.nameservers = ["127.0.0.1"]
-                system_dns.port = dns.port
-                monkeypatch.setattr(dns_api, "default_resolver", system_dns)
+            system_dns = dns_api.Resolver(configure=False)
+            system_dns.nameservers = ["127.0.0.1"]
+            system_dns.port = dns.port
+            monkeypatch.setattr(dns_api, "default_resolver", system_dns)
+            # Secrets reads AWID's namespace evidence from DNS: publish the test
+            # registry's own namespace controller on the private server.
+            namespace = await registry.namespace_authority("example.com")
+            dns.records[("_awid.example.com", "TXT")] = [
+                '"' + awid_txt_value(namespace.controller_did, REGISTRY_URL) + '"'
+            ]
             async with AsyncExitStack() as stack:
                 if deployment:
                     origin, logs_manifest, logs_db = await stack.enter_async_context(
@@ -97,7 +106,7 @@ async def test_production_hook_delivery_uses_explicit_dns_ca_and_internal_networ
                 else:
                     await target.start()
                     origin = f"https://{name}:{target.port}"
-                database = await test_db_factory.create_db(suffix="production_hook_network")
+                database = production_database
                 with SmtpServer(tmp_path / "smtp") as smtp:
                     configured = settings(database, tmp_path, smtp).model_copy(
                         update={

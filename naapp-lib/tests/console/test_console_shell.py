@@ -276,6 +276,7 @@ def test_the_brand_escapes_what_it_inserts():
         ConsoleBrand(
             product='<b>"Example"</b>',
             app_id="example-app",
+            member_role="example.reader",
             csrf_key='key"><x',
             stylesheet=STYLESHEET,
             sign_in=SIGN_IN,

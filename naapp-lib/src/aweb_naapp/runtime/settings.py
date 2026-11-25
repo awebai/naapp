@@ -54,7 +54,10 @@ class AWIDMemberCredentialFiles(BaseModel):
 
 
 class NaappSettings(BaseSettings, OperatorNetworkSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore", hide_input_in_errors=True)
+    # Only the environment configures an app: some build when imported, and a
+    # .env in whatever directory the process starts in is not their
+    # configuration.
+    model_config = SettingsConfigDict(env_file=None, extra="ignore", hide_input_in_errors=True)
 
     @classmethod
     def settings_customise_sources(

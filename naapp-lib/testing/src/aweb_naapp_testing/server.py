@@ -27,9 +27,10 @@ for example the release production runs (``production_registry``).
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from pathlib import Path
 
 import httpx
 import pytest_asyncio
@@ -43,11 +44,11 @@ from awid_service.testing import (
     running_registry,
 )
 from nacl.signing import SigningKey
-from redis.asyncio import Redis
 
 from aweb_naapp.runtime.team_auth import AWIDTeamCache
 from aweb_naapp.runtime.team_server import TeamServerDirectory
 from aweb_naapp_testing import Member
+from aweb_naapp_testing.redis_database import KeyRecordingRedis, redis_test_url
 from aweb_naapp_testing.team_server_site import TeamServerSite, team_server_site
 
 
@@ -131,33 +132,44 @@ def awid_dns(registry: Registry):
 @pytest_asyncio.fixture
 async def coordination_registry(test_db_factory) -> AsyncIterator[Registry]:
     awid_db = await test_db_factory.create_db(suffix="coordination_awid")
-    async with Redis.from_url(
-        os.environ.get("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True
-    ) as redis:
+    async with KeyRecordingRedis.from_url(redis_test_url(), decode_responses=True) as redis:
         async with running_registry(awid_db.config.get_dsn(), redis=redis) as registry:
             yield registry
+
+
+@asynccontextmanager
+async def coordination_server(
+    registry: Registry, test_db_factory, monkeypatch, site_dir: Path
+) -> AsyncIterator[Coordination]:
+    """A coordination server on its own test database, reading ``registry``,
+    listening as an operator's team server whose TLS material is in ``site_dir``."""
+    monkeypatch.setenv("AWEB_DATABASE_URL", "postgresql://unused/aweb")
+    monkeypatch.setenv("AWID_SERVICE_TOKEN", SERVICE_TOKEN)
+    monkeypatch.setenv("AWID_REGISTRY_URL", REGISTRY_URL)
+    server_db = await test_db_factory.create_db(suffix="coordination_aweb")
+    # The server's AWID client caches what it reads in the Redis other runs
+    # share; the client removes exactly what it wrote when the server stops.
+    async with KeyRecordingRedis.from_url(redis_test_url(), decode_responses=True) as redis:
+        async with (
+            team_server_site(site_dir) as site,
+            running_server(
+                server_db.config.get_dsn(),
+                redis,
+                awid_transport=registry.transport,
+                domain_verifier=awid_dns(registry),
+                public_origin=site.origin,
+            ) as server,
+        ):
+            site.serve(server.app)
+            yield Coordination(registry=registry, server=server, site=site)
 
 
 @pytest_asyncio.fixture
 async def coordination(
     test_db_factory, monkeypatch, coordination_registry, tmp_path_factory
 ) -> AsyncIterator[Coordination]:
-    monkeypatch.setenv("AWEB_DATABASE_URL", "postgresql://unused/aweb")
-    monkeypatch.setenv("AWID_SERVICE_TOKEN", SERVICE_TOKEN)
-    monkeypatch.setenv("AWID_REGISTRY_URL", REGISTRY_URL)
-    server_db = await test_db_factory.create_db(suffix="coordination_aweb")
-    async with Redis.from_url(
-        os.environ.get("REDIS_URL", "redis://localhost:6379/0"), decode_responses=True
-    ) as redis:
-        async with (
-            team_server_site(tmp_path_factory.mktemp("coordination-site")) as site,
-            running_server(
-                server_db.config.get_dsn(),
-                redis,
-                awid_transport=coordination_registry.transport,
-                domain_verifier=awid_dns(coordination_registry),
-                public_origin=site.origin,
-            ) as server,
-        ):
-            site.serve(server.app)
-            yield Coordination(registry=coordination_registry, server=server, site=site)
+    async with coordination_server(
+        coordination_registry, test_db_factory, monkeypatch,
+        tmp_path_factory.mktemp("coordination-site"),
+    ) as served:
+        yield served

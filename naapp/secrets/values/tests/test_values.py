@@ -30,10 +30,9 @@ def test_every_kind_preserves_canonical_bytes_and_round_trips(kind):
 
 def test_existing_unicode_bytes_and_optional_fields_are_preserved():
     assert encode_value("bearer", {"value": "é"}) == b'{"value":"\\u00e9"}'
-    assert decode_value("basic", b'{"username":"","password":"fixture"}') == {
-        "username": "",
-        "password": "fixture",
-    }
+    basic = {"username": "", "password": "fixture"}
+    assert encode_value("basic", basic) == b'{"password":"fixture","username":""}'
+    assert decode_value("basic", b'{"username":"","password":"fixture"}') == basic
     assert decode_value(
         "aws-sigv4", b'{"access_key_id":"fixture","secret_access_key":"fixture"}'
     ) == {"access_key_id": "fixture", "secret_access_key": "fixture"}
@@ -46,6 +45,7 @@ def test_existing_unicode_bytes_and_optional_fields_are_preserved():
         b'{"value":42}',
         b'{"value":""}',
         b'{"value":"untrusted-codec-field","extra":"extra"}',
+        b"{",
         b"{}",
         b"null",
         b"[]",

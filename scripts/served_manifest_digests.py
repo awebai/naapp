@@ -83,17 +83,29 @@ def _folio(directory: Path) -> dict[str, bytes]:
 
 def _library(directory: Path) -> dict[str, bytes]:
     from fastapi.testclient import TestClient
+    from library.aweb_manifest import MANIFEST_PATH
 
     # library.api builds the served app from its environment when imported.
-    os.environ.update(LIBRARY_PUBLIC_ORIGIN=_origin("library"))
+    template = json.loads(MANIFEST_PATH.read_bytes())
+    os.environ.update(
+        LIBRARY_PUBLIC_ORIGIN=_origin("library"),
+        LIBRARY_APP_ID=_app_id("library"),
+        LIBRARY_APP_KEY_FILES=json.dumps(
+            {kid: str(path) for kid, path in _key_files("library", template, directory).items()}
+        ),
+    )
     import library.api
 
+    # Library keeps its runtime to itself: read what it serves, the documents
+    # _runtime_documents names.
     client = TestClient(library.api.app)
     documents = {}
-    for path in ("/aweb-app.json", "/.well-known/aweb-app.json"):
+    paths = ["/aweb-app.json", *(f"/manifests/v{version}.json" for version in (1, 2, 3))]
+    for path in [*paths, "/.well-known/aweb-app-versions.json"]:
         response = client.get(path)
-        assert response.status_code == 200, (path, response.status_code)
-        documents[path] = response.content
+        if path == "/aweb-app.json" or response.status_code != 404:
+            assert response.status_code == 200, (path, response.status_code)
+            documents[path] = response.content
     return documents
 
 

@@ -72,7 +72,9 @@ def test_only_authenticated_internal_holes_are_reported(kind):
 
 
 def test_late_events_fill_holes_without_inventing_a_restart():
-    assert verify_deliveries(GENESIS, _events([43, 40, 42, 41])).to_json()["gaps"] == []
+    report = verify_deliveries(GENESIS, _events([43, 40, 42, 41])).to_json()
+    # Every event was assessed: no gap is not the same as nothing checked.
+    assert (report["gaps"], report["unassessed"]) == ([], [])
 
 
 def test_key_rotation_does_not_hide_an_internal_hole():
@@ -103,7 +105,8 @@ def test_observation_does_not_bridge_provenance_intervals(boundary):
     if boundary == "activation":
         admission["production"]["active_from"] = "2026-10-20T12:00:00.000Z"
     events[1] = replace(events[1], key_evidence=evidence)
-    assert verify_deliveries(GENESIS, events).gaps == ()
+    report = verify_deliveries(GENESIS, events)
+    assert (report.gaps, report.unassessed) == ((), ())
 
 
 @pytest.mark.parametrize("binding_change", [None, "production", "registration"])

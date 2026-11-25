@@ -17,6 +17,7 @@ import pytest
 from aweb_naapp.hooks.owner_act import PREFIX
 from aweb_naapp.hooks.owner_act_nonces import apply_owner_act_migrations
 from aweb_naapp.hooks.strictjson import canonical
+from aweb_naapp.outbox import apply_outbox_migrations
 from aweb_naapp.roles import PrincipalKey, apply_roles_migrations, has_role, is_holding_scope
 from aweb_naapp.runtime.approvals import (
     ActionPolicy,
@@ -31,6 +32,7 @@ from aweb_naapp.runtime.installation import (
 )
 from aweb_naapp.runtime.passkeys import Passkeys, RelyingParty, contact_sha256
 from aweb_naapp_testing import did_key
+from aweb_naapp_testing.database_fixtures import migrate_credential_audit, migrate_passkeys
 from aweb_naapp_testing.owner_acts import (
     APP_ID,
     AUDIENCE,
@@ -40,11 +42,12 @@ from aweb_naapp_testing.owner_acts import (
 )
 from awid_service.testing import running_registry
 from nacl.signing import SigningKey
-from pgdbm import AsyncMigrationManager
+from pgdbm import AsyncDatabaseManager, AsyncMigrationManager
 
 from aweb_secrets.change_policy import apply_change_policy_migrations, require_four_eyes
 from aweb_secrets.change_sets import apply_change_set_migrations
 from aweb_secrets.console import OwnerConsole
+from aweb_secrets.credential_governance import CREDENTIAL_AUDIT_MIGRATIONS
 from aweb_secrets.owners import (
     OWNER_ROLE,
     OwnerDirectory,
@@ -101,30 +104,12 @@ class World:
         )
 
 
-@pytest.fixture
-async def world(test_db_factory, request) -> AsyncIterator[World]:
-    db = await test_db_factory.create_db(suffix="secrets_bootstrap")
-    registry_db = await test_db_factory.create_db(suffix="secrets_bootstrap_awid")
+async def migrate_owner_world(db: AsyncDatabaseManager, *, owner_history: bool = False) -> None:
     await db.execute(
         "CREATE TABLE {{tables.audit_outbox}} (id SERIAL PRIMARY KEY, kind TEXT, details TEXT)"
     )
-    store = PgApprovalStore(db)
-    await store.migrate()
-    audit = Audit(db)
-    contacts = Contacts()
-    passkeys = Passkeys(
-        db,
-        rp=RelyingParty(origin=ORIGIN, name="secrets"),
-        delivery=contacts,
-        audit=audit,
-        retirement=ApprovalRevocation(store, audit),
-        enrolment_ttl=timedelta(hours=1),
-        challenge_ttl=timedelta(minutes=5),
-        owner_scopes=is_owner_scope,
-        holding_scopes=is_holding_scope,
-        proof_context=PasskeyContexts(app_id=APP_ID),
-    )
-    await passkeys.migrate()
+    await PgApprovalStore(db).migrate()
+    await migrate_passkeys(db)
     from aweb_secrets.app import MIGRATIONS_PATH, MODULE_NAME
 
     await AsyncMigrationManager(
@@ -132,7 +117,7 @@ async def world(test_db_factory, request) -> AsyncIterator[World]:
     ).apply_pending_migrations()
     await apply_roles_migrations(db)
     await apply_owner_act_migrations(db)
-    if getattr(request, "param", {}).get("owner_history"):
+    if owner_history:
         # Migration tests load captured history into the actual old schema.
         from aweb_secrets.owners import MIGRATIONS_MODULE
         from aweb_secrets.owners import MIGRATIONS_PATH as OWNER_MIGRATIONS
@@ -153,6 +138,32 @@ async def world(test_db_factory, request) -> AsyncIterator[World]:
     await apply_installation_migrations(db)
     await apply_change_policy_migrations(db)
     await apply_revision_migrations(db)
+    await apply_outbox_migrations(db)
+    await migrate_credential_audit(db, CREDENTIAL_AUDIT_MIGRATIONS)
+
+
+@pytest.fixture
+async def world(request, clone_database, owner_templates, awid_template) -> AsyncIterator[World]:
+    # History cases start before the owner upgrade that the case applies.
+    current, historical = owner_templates
+    config = historical if getattr(request, "param", {}).get("owner_history") else current
+    db = await clone_database(config, suffix="secrets_bootstrap")
+    registry_db = await clone_database(awid_template, suffix="secrets_bootstrap_awid")
+    store = PgApprovalStore(db)
+    audit = Audit(db)
+    contacts = Contacts()
+    passkeys = Passkeys(
+        db,
+        rp=RelyingParty(origin=ORIGIN, name="secrets"),
+        delivery=contacts,
+        audit=audit,
+        retirement=ApprovalRevocation(store, audit),
+        enrolment_ttl=timedelta(hours=1),
+        challenge_ttl=timedelta(minutes=5),
+        owner_scopes=is_owner_scope,
+        holding_scopes=is_holding_scope,
+        proof_context=PasskeyContexts(app_id=APP_ID),
+    )
     installations = Installations(team_id=TEAM, app_id=APP_ID)
     fence = InstallationFence(db, app_id=APP_ID, grants=installations)
     await fence.refresh(TEAM)
@@ -169,6 +180,7 @@ async def world(test_db_factory, request) -> AsyncIterator[World]:
             fence=fence,
             admitted=admitted,
             origin=ORIGIN,
+            migrate_schema=False,
         )
         yield World(db, passkeys, owner, contacts, registry, fence, admitted, audit)
 

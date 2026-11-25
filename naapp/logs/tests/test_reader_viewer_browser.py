@@ -1,7 +1,7 @@
 """The reader's viewer in a real browser at phone and desktop widths: a
-designated reader enrols its passkey from its mailed link with a virtual
-authenticator, signs in, and reads, filters, follows and checks its team's
-log on the console origin logs composes."""
+designated reader, whose bound passkey the browser's virtual authenticator
+holds, signs in, and reads, filters, follows and checks its team's log on the
+console origin logs composes."""
 
 from __future__ import annotations
 
@@ -151,7 +151,7 @@ async def fits(page: Page) -> bool:
 
 @pytest.mark.parametrize("width", [375, 1440])
 async def test_a_reader_reads_filters_follows_and_checks_its_log_in_a_browser(
-    world: World, browser: Browser, service: str, width: int, tmp_path
+    world: World, browser: Browser, service: str, width: int
 ):
     async with await browser.new_context(
         viewport={"width": width, "height": 900}, ignore_https_errors=True
@@ -167,7 +167,6 @@ async def test_a_reader_reads_filters_follows_and_checks_its_log_in_a_browser(
         await expect(reported.locator(".mediation[data-agent-reported]")).to_be_visible()
         await expect(page.locator(f'article[data-event-id="{core}"]')).to_be_visible()
         assert await fits(page)
-        await page.screenshot(path=tmp_path / f"events-{width}.png", full_page=True)
 
         await page.locator("#filters summary").click()
         await page.locator("#filter-mediation").select_option("client")
@@ -180,7 +179,6 @@ async def test_a_reader_reads_filters_follows_and_checks_its_log_in_a_browser(
         await page.goto(service + "/events?" + urlencode({"occurred_from": "yesterday"}))
         await expect(page.locator("#filter-occurred_from")).to_be_focused()
         assert await fits(page)
-        await page.screenshot(path=tmp_path / f"refused-{width}.png", full_page=True)
 
         await page.goto(service + "/follow")
         await expect(page.locator("#follow-status")).to_be_visible()
@@ -189,21 +187,18 @@ async def test_a_reader_reads_filters_follows_and_checks_its_log_in_a_browser(
         await expect(arrived).to_be_visible(timeout=10_000)
         await expect(arrived.locator("[data-agent-reported]").first).to_be_visible()
         assert await fits(page)
-        await page.screenshot(path=tmp_path / f"follow-{width}.png", full_page=True)
 
         await page.goto(service + "/integrity")
         await expect(page.locator("section#chain[data-intact=true]")).to_be_visible()
         await expect(page.locator("section#observed")).to_be_visible()
         assert await fits(page)
-        await page.screenshot(path=tmp_path / f"integrity-{width}.png", full_page=True)
+        # The dark scheme lays the same pages out within the width as well.
         await page.emulate_media(color_scheme="dark")
-        await page.screenshot(path=tmp_path / f"integrity-{width}-dark.png", full_page=True)
+        assert await fits(page)
         await page.goto(service + "/events")
-        await page.screenshot(path=tmp_path / f"events-{width}-dark.png", full_page=True)
+        assert await fits(page)
         await page.goto(service + "/")
-        await page.screenshot(path=tmp_path / f"home-{width}-dark.png", full_page=True)
-        await page.emulate_media(color_scheme="light")
-        await page.screenshot(path=tmp_path / f"home-{width}.png", full_page=True)
+        assert await fits(page)
 
 
 async def test_the_follow_page_stops_and_offers_sign_in_when_the_session_ends(

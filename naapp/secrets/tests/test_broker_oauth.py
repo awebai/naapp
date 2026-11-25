@@ -89,10 +89,21 @@ async def test_the_token_is_cached_and_not_exchanged_again(tmp_path: Path) -> No
 
 async def test_a_token_is_cached_for_its_lifetime_less_sixty_seconds(tmp_path: Path) -> None:
     async with running_upstream(tmp_path, token_lifetime_seconds=600) as upstream:
-        tokens = ProcessTokenCache()
-        await _call(upstream, tokens)
-        (_, _, expires_at) = tokens._tokens[_key(upstream).digest()]
-        assert timedelta(seconds=535) < expires_at - datetime.now(UTC) <= timedelta(seconds=540)
+        before = datetime.now(UTC)
+        clock = [before]
+        tokens = ProcessTokenCache(now=lambda: clock[0])
+        assert (await _call(upstream, tokens)).result.status == 200
+        received = datetime.now(UTC)
+        cache_lifetime = timedelta(seconds=600 - 60)
+
+        # The initial exchange took place between these two wall-clock samples.
+        clock[0] = before + cache_lifetime - timedelta(seconds=1)
+        assert (await _call(upstream, tokens)).result.status == 200
+        assert upstream.issued() == 1
+
+        clock[0] = received + cache_lifetime
+        assert (await _call(upstream, tokens)).result.status == 200
+        assert upstream.issued() == 2
 
 
 async def test_a_token_that_lives_sixty_seconds_or_less_is_not_cached(tmp_path: Path) -> None:
@@ -170,14 +181,12 @@ async def test_a_new_version_of_the_secret_never_reuses_an_old_token(tmp_path: P
 async def test_another_scope_never_reuses_a_token(tmp_path: Path) -> None:
     async with running_upstream(tmp_path) as upstream:
         tokens = ProcessTokenCache()
-        await _call(upstream, tokens)
-        await tokens.put(
-            TokenKey(**{**_key(upstream).__dict__, "scope": "admin"}),
-            "a-token-for-another-scope",
-            datetime.now(UTC) + timedelta(hours=1),
-        )
-        call = await _call(upstream, tokens)
-        assert call.result.status == 200
+        assert (await _call(upstream, tokens)).result.status == 200
+        with pytest.raises(TokenExchangeFailed):
+            await _call(upstream, tokens, kind_params=_kind_params(upstream, scope="write:things"))
+        assert (await _call(upstream, tokens)).result.status == 200
+
+        assert upstream.paths == ["/oauth2/token", "/oauth2/echo", "/oauth2/token", "/oauth2/echo"]
         assert upstream.issued() == 1
 
 

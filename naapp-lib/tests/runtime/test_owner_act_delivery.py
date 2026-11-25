@@ -106,3 +106,37 @@ async def test_delivery_keeps_the_original_proof_deadline(human, registry, tmp_p
         checked.require_fresh()
     assert refused.value.code == "principal_status_unavailable"
     assert checked.proof.fresh_until == original_deadline
+
+
+@pytest.mark.parametrize("typed", [False, True])
+async def test_delivery_mapping_logs_the_observation_error_once(human, registry, tmp_path, monkeypatch, caplog, typed):
+    from fastapi import HTTPException
+
+    from aweb_naapp.runtime.principal_status import (
+        PrincipalStatusReason,
+        PrincipalStatusUnavailable,
+    )
+
+    member, principal, client, _, _ = human
+    runtime = _runtime(tmp_path, registry=registry, database_url=registry.db.config.get_dsn())
+
+    async def unavailable(*args, **kwargs):
+        if typed:
+            raise PrincipalStatusUnavailable(PrincipalStatusReason.IDENTITY_KIND_UNAVAILABLE, monotonic_ns())
+        raise HTTPException(503, "fixture-no-log-value")
+
+    monkeypatch.setattr(runtime, "check_human_member", unavailable)
+    with pytest.raises(OwnerActDeliveryRefused) as refused:
+        await runtime.check_human_role_member(
+            TEAM, principal=principal, certificate=json.dumps(member.certificate()).encode(),
+            identity_client=client,
+        )
+    assert refused.value.code == "principal_status_unavailable"
+    messages = [
+        r.getMessage() for r in caplog.records if r.name == "aweb_naapp.runtime.principal_status"
+    ]
+    reason = "identity_kind_unavailable" if typed else "owner_member_observation_error"
+    assert len(messages) == 1
+    import re
+
+    assert re.fullmatch(f"principal_status_unavailable reason={reason} elapsed_ms=[0-9]+", messages[0])

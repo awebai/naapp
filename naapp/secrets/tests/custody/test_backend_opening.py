@@ -7,9 +7,6 @@ import pytest
 from aweb_secrets.custody import Custody, CustodyUnavailable
 from tests.custody.conftest import value_bytes
 from tests.custody.test_backend_tokens import stage
-from tests.custody.test_store import db as _db
-
-db = _db
 
 
 async def test_console_preview_pairs_exact_unsealed_context_without_activation(

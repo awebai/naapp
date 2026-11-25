@@ -40,15 +40,16 @@ def aweb_test_environment():
             os.environ[name] = value
 
 
-# The Redis keys the copied stack writes and never removes.
-SUITE_KEY_PATTERNS = ("presence-transitions:*",)
+# The Redis key families the aweb server's presence code writes (aweb/presence.py,
+# aweb/presence_transitions.py), which a run that starts the server can leave.
+SUITE_KEY_PATTERNS = ("presence:*", "presence_coordinates:*", "presence-transitions:*")
 
 
 @pytest.fixture(scope="session", autouse=True)
 def redis_left_as_found():
-    """Delete the Redis keys of the kinds the copied stack writes (presence
-    transitions) that appeared during the run, and fail if any remain. Other
-    keys are left alone, so a run never removes another process's keys."""
+    """Delete the Redis keys of the kinds the aweb server's presence code writes
+    that appeared during the run, and fail if any remain. Other keys are left
+    alone, so a run never removes another process's keys."""
     url = os.environ.get("REDIS_URL")
     if not url:
         pytest.fail("set REDIS_URL to a Redis database for this run's own keys")

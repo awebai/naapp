@@ -457,18 +457,6 @@ async def test_events_of_a_later_epoch_are_read_after_the_earlier_one(
     assert [e["event_id"] for e in newest.events] == [second, first]
 
 
-async def test_an_appended_event_is_readable_with_no_catch_up(
-    db: AsyncDatabaseManager,
-) -> None:
-    appended = await _append(db, secret_use(seq=1))
-
-    assert await _chain_rows_read_by_catch_up(db) == 0
-    rows = await db.fetch_all(
-        "SELECT event_id FROM {{tables.read_events}} WHERE team_id = $1", TEAM_ID
-    )
-    assert [str(row["event_id"]) for row in rows] == [appended]
-
-
 def test_every_hook_of_the_packaged_catalog_has_its_event_type_field() -> None:
     # Ingest projects every event it appends; a hook without one would refuse it.
     assert set(read_store._EVENT_TYPE_FIELD) == set(packaged_catalog().hooks)

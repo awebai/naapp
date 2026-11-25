@@ -44,6 +44,8 @@ from awid_service.testing import (
 )
 from pgdbm import AsyncDatabaseManager, DatabaseConfig
 
+from aweb_naapp_testing.redis_database import redis_test_url
+
 _SCHEMA_PREFIX = "production_awid_"
 
 # Runs in the release's own environment: its app, its migrations, and a domain
@@ -190,7 +192,7 @@ async def running_production_registry(
         env.update(
             AWID_DATABASE_URL=database_url,
             AWID_DB_SCHEMA=schema,
-            AWID_REDIS_URL=redis_url or os.environ.get("REDIS_URL", "redis://localhost:6379/0"),
+            AWID_REDIS_URL=redis_url or redis_test_url(),
             AWID_RATE_LIMIT_BACKEND="memory",
             AWID_PUBLIC_ORIGINS=REGISTRY_URL,
             AWID_SERVICE_TOKEN=SERVICE_TOKEN,

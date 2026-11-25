@@ -84,6 +84,16 @@ def get_items(member):
     return member.headers(aud=ORIGIN, method="GET", path="/v1/items")
 
 
+def refused(response) -> tuple[int, str]:
+    """A refusal's status and stable code."""
+    return response.status_code, response.json()["detail"]["code"]
+
+
+def code(caught) -> tuple[int, str]:
+    """A raised refusal's status and stable code."""
+    return caught.value.status_code, caught.value.detail["code"]
+
+
 # --- Service-token history path ---------------------------------------------------
 
 
@@ -96,7 +106,10 @@ async def test_history_finds_the_certificate_beyond_the_first_page(registry, tea
     cache = history_cache(registry)
     async with relying_app(registry, public_origin=ORIGIN, cache=cache) as (client, _):
         response = await client.get("/v1/items", headers=get_items(team_past_first_page))
-    assert response.status_code == (401 if revoked else 200), response.text
+    if revoked:
+        assert refused(response) == (401, "certificate_revoked")
+    else:
+        assert response.status_code == 200, response.text
     pages = certificate_pages(registry)
     assert len(pages) == 2 and pages[1].url.params["cursor"]
     assert all(
@@ -110,7 +123,10 @@ async def test_history_finds_the_certificate_beyond_the_first_page(registry, tea
 async def test_history_refuses_a_certificate_awid_never_published(registry, team):
     unpublished = Member(team_id=TEAM_ID, team_key=team.team_key, certificate_id="unpublished", alias="ghost")
     async with relying_app(registry, public_origin=ORIGIN, cache=history_cache(registry)) as (client, _):
-        assert (await client.get("/v1/items", headers=get_items(unpublished))).status_code == 401
+        assert refused(await client.get("/v1/items", headers=get_items(unpublished))) == (
+            401,
+            "certificate_unregistered",
+        )
         assert (await client.get("/v1/items", headers=get_items(team))).status_code == 200
 
 
@@ -136,13 +152,22 @@ async def test_history_page_bound_never_authorizes_from_partial_or_expired_facts
     registry.transport.calls.clear()
     incomplete = history_cache(registry)
     async with relying_app(registry, public_origin=ORIGIN, cache=incomplete) as (client, _):
-        assert (await client.get("/v1/items", headers=get_items(team_past_first_page))).status_code == 503
+        assert refused(await client.get("/v1/items", headers=get_items(team_past_first_page))) == (
+            503,
+            "registry_pagination_failed",
+        )
         assert not incomplete._cache
         assert len(certificate_pages(registry)) == 100
-        assert (await client.get("/v1/items", headers=get_items(team_past_first_page))).status_code == 503
+        assert refused(await client.get("/v1/items", headers=get_items(team_past_first_page))) == (
+            503,
+            "registry_pagination_failed",
+        )
         assert len(certificate_pages(registry)) == 100
         history_clock[0] += seconds_to_ns(5)
-        assert (await client.get("/v1/items", headers=get_items(team_past_first_page))).status_code == 503
+        assert refused(await client.get("/v1/items", headers=get_items(team_past_first_page))) == (
+            503,
+            "registry_pagination_failed",
+        )
     assert not incomplete._cache
     assert len(certificate_pages(registry)) == 200
 
@@ -152,7 +177,10 @@ async def test_history_page_bound_never_authorizes_from_partial_or_expired_facts
     caplog.clear()
     registry.transport.calls.clear()
     async with relying_app(registry, public_origin=ORIGIN, cache=complete) as (client, _):
-        assert (await client.get("/v1/items", headers=get_items(team_past_first_page))).status_code == 503
+        assert refused(await client.get("/v1/items", headers=get_items(team_past_first_page))) == (
+            503,
+            "registry_pagination_failed",
+        )
     assert len(certificate_pages(registry)) == 100
     assert complete._cache[TEAM_ID] is expired
     assert "AWID team facts refresh failed" in caplog.text
@@ -211,24 +239,46 @@ def later_page_fault(kind: str, first_cursor: dict):
     return fault
 
 
-@pytest.mark.parametrize("kind", [
-    "payload", "json", "missing_has_more", "has_more", "certificates", "row", "missing_revoked_at",
-    "missing_certificate_id", "oversized_page", "missing_cursor", "repeated_cursor", "blank_cursor",
-    "invalid_cursor", "cycling_cursor", "http", "forbidden", "transport",
+@pytest.mark.parametrize("kind,expected", [
+    ("payload", "registry_unavailable"),
+    ("json", "registry_unavailable"),
+    ("missing_has_more", "registry_response_incomplete"),
+    ("has_more", "registry_response_incomplete"),
+    ("certificates", "registry_response_incomplete"),
+    ("row", "registry_response_incomplete"),
+    ("missing_revoked_at", "registry_response_incomplete"),
+    ("missing_certificate_id", "registry_response_incomplete"),
+    ("oversized_page", "registry_response_incomplete"),
+    ("missing_cursor", "registry_pagination_failed"),
+    ("repeated_cursor", "registry_pagination_failed"),
+    ("blank_cursor", "registry_pagination_failed"),
+    ("invalid_cursor", "registry_pagination_failed"),
+    ("cycling_cursor", "registry_pagination_failed"),
+    ("http", "revocation_lookup_unavailable"),
+    ("forbidden", "revocation_lookup_unavailable"),
+    ("transport", "registry_unavailable"),
 ])
-async def test_history_later_page_fault_fails_closed_then_recovers(registry, team_past_first_page, kind, caplog, history_clock):
+async def test_history_later_page_fault_fails_closed_then_recovers(
+    registry, team_past_first_page, kind, expected, caplog, history_clock
+):
     cache = history_cache(registry)
     first_cursor: dict = {}
     registry.transport.fault = later_page_fault(kind, first_cursor)
     async with relying_app(registry, public_origin=ORIGIN, cache=cache) as (client, _):
-        assert (await client.get("/v1/items", headers=get_items(team_past_first_page))).status_code == 503
+        assert refused(await client.get("/v1/items", headers=get_items(team_past_first_page))) == (
+            503,
+            expected,
+        )
         assert not cache._cache
         pages = certificate_pages(registry)
         assert len(pages) == (3 if kind == "cycling_cursor" else 2)
         assert pages[1].url.params["cursor"] == first_cursor["value"]
         assert "AWID team facts refresh failed" in caplog.text
         registry.transport.fault = None
-        assert (await client.get("/v1/items", headers=get_items(team_past_first_page))).status_code == 503
+        assert refused(await client.get("/v1/items", headers=get_items(team_past_first_page))) == (
+            503,
+            expected,
+        )
         assert len(certificate_pages(registry)) == len(pages)
         history_clock[0] += seconds_to_ns(5)
         assert (await client.get("/v1/items", headers=get_items(team_past_first_page))).status_code == 200
@@ -287,11 +337,11 @@ async def test_history_with_a_wrong_token_reads_public_but_not_private_teams(reg
 
 
 @pytest.mark.parametrize("status,body,expected", [
-    (403, {"detail": {"code": "other"}}, 503),
-    (403, {"detail": "team_private"}, 503),
-    (403, None, 503),
-    (500, {"detail": {"code": "team_private"}}, 503),
-    (404, {"detail": "Team not found"}, 401),
+    (403, {"detail": {"code": "other"}}, (503, "registry_unavailable")),
+    (403, {"detail": "team_private"}, (503, "registry_unavailable")),
+    (403, None, (503, "registry_unavailable")),
+    (500, {"detail": {"code": "team_private"}}, (503, "registry_unavailable")),
+    (404, {"detail": "Team not found"}, (401, "unknown_team")),
 ])
 async def test_history_team_lookup_refusals_map_to_distinct_outcomes(registry, team, status, body, expected):
     def fault(request, response):
@@ -303,7 +353,7 @@ async def test_history_team_lookup_refusals_map_to_distinct_outcomes(registry, t
     cache = history_cache(registry)
     with pytest.raises(HTTPException) as caught:
         await cache.get(TEAM_ID, "target")
-    assert caught.value.status_code == expected
+    assert code(caught) == expected
     assert not cache._cache
 
 
@@ -409,11 +459,14 @@ async def test_history_cold_outage_coalesces_failures_and_retries_after_window(
         responses = await asyncio.gather(
             *(client.get("/v1/items", headers=get_items(team)) for _ in range(16))
         )
-        assert all(response.status_code == 503 for response in responses)
+        assert all(refused(response) == (503, "registry_unavailable") for response in responses)
         assert len(team_lookups(registry)) == 1
         assert TEAM_ID not in cache._cache
         history_clock[0] += seconds_to_ns(4)
-        assert (await client.get("/v1/items", headers=get_items(team))).status_code == 503
+        assert refused(await client.get("/v1/items", headers=get_items(team))) == (
+            503,
+            "registry_unavailable",
+        )
         assert len(team_lookups(registry)) == 1
         history_clock[0] += seconds_to_ns(1)
         registry.transport.fault = None
@@ -432,7 +485,7 @@ async def test_history_nonexistent_team_flood_does_not_retain_refresh_state(regi
         responses = await asyncio.gather(
             *(client.get("/v1/items", headers=get_items(member)) for member in ghosts)
         )
-    assert all(response.status_code == 401 for response in responses)
+    assert all(refused(response) == (401, "unknown_team") for response in responses)
     assert cache._team_refresh_locks == locks_before
     assert cache._unknown_refresh_at == attempts_before
     assert not cache._team_refresh_errors
@@ -452,7 +505,7 @@ async def test_history_unknown_refresh_failure_never_authorizes_or_renews_old_fa
         await cache.check_current_member(
             TEAM_ID, certificate_id="unknown", team_did_key=team.team_did_key
         )
-    assert refused.value.status_code == 503
+    assert code(refused) == (503, "current_membership_unavailable")
     assert cache._cache[TEAM_ID] is old_facts
     assert old_facts.expires_at == old_facts.fetched_at + seconds_to_ns(60)
     # Previously known members keep only the original accepted TTL.
@@ -460,7 +513,7 @@ async def test_history_unknown_refresh_failure_never_authorizes_or_renews_old_fa
     history_clock[0] = old_facts.expires_at + seconds_to_ns(1)
     with pytest.raises(HTTPException) as refused:
         await cache.get(TEAM_ID, team.certificate_id)
-    assert refused.value.status_code == 503
+    assert code(refused) == (503, "registry_unavailable")
     assert cache._cache[TEAM_ID] is old_facts
 
 
@@ -481,14 +534,20 @@ async def test_status_path_verifies_without_a_token_and_reuses_for_at_most_a_min
         await registry.revoke("target")
         assert (await client.get("/v1/items", headers=get_items(team))).status_code == 200
         cache._certificate_cache[(TEAM_ID, "target")] = replace(cached, expires_at=-1)
-        assert (await client.get("/v1/items", headers=get_items(team))).status_code == 401
+        assert refused(await client.get("/v1/items", headers=get_items(team))) == (
+            401,
+            "certificate_revoked",
+        )
 
 
 async def test_status_path_refuses_an_unpublished_certificate(registry, team):
     unpublished = Member(team_id=TEAM_ID, team_key=team.team_key, certificate_id="unpublished", alias="ghost")
     cache = status_cache(registry)
     async with relying_app(registry, public_origin=ORIGIN, cache=cache) as (client, _):
-        assert (await client.get("/v1/items", headers=get_items(unpublished))).status_code == 401
+        assert refused(await client.get("/v1/items", headers=get_items(unpublished))) == (
+            401,
+            "certificate_unregistered",
+        )
         assert (await client.get("/v1/items", headers=get_items(team))).status_code == 200
     assert (TEAM_ID, "unpublished") not in cache._certificate_cache
 
@@ -498,7 +557,7 @@ async def test_status_cache_is_per_certificate(registry, team):
     await cache.get(TEAM_ID, "target")
     with pytest.raises(HTTPException) as caught:
         await cache.get(TEAM_ID, "unpublished")
-    assert caught.value.status_code == 401
+    assert code(caught) == (401, "certificate_unregistered")
     assert [r.url.path.rsplit("/", 2)[-2] for r in registry.transport.calls] == [
         "target", "unpublished"]
 
@@ -535,7 +594,11 @@ async def test_status_refresh_failure_has_no_stale_fallback(registry, team, kind
     registry.transport.fault = fault
     with pytest.raises(HTTPException) as caught:
         await cache.get(TEAM_ID, "target")
-    assert caught.value.status_code == (401 if kind == 404 else 503)
+    assert code(caught) == (
+        (401, "certificate_unregistered")
+        if kind == 404
+        else (503, "certificate_status_unavailable")
+    )
     assert cache._certificate_cache[(TEAM_ID, "target")] is expired
     registry.transport.fault = None
     assert (await cache.get(TEAM_ID, "target")).team_did_key == team.team_did_key
@@ -572,5 +635,5 @@ async def test_malformed_status_is_unavailable_and_not_cached(registry, team, ch
     cache = status_cache(registry)
     with pytest.raises(HTTPException) as caught:
         await cache.get(TEAM_ID, "target")
-    assert caught.value.status_code == 503
+    assert code(caught) == (503, "certificate_status_unavailable")
     assert not cache._certificate_cache

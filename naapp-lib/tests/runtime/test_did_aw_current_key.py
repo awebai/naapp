@@ -29,6 +29,11 @@ TEAM_ID = "backend:example.com"
 UNREGISTERED_DID_AW = stable_id_from_did_key(did_key(SigningKey.generate()))
 
 
+def refusal(response) -> tuple[int, str]:
+    """A refusal's status and stable code."""
+    return response.status_code, response.json()["detail"]["code"]
+
+
 def did_lookups(registry) -> list[httpx.Request]:
     return [r for r in registry.transport.calls if r.method == "GET" and r.url.path.endswith("/key")]
 
@@ -85,7 +90,7 @@ async def test_a_rotated_out_key_is_refused_and_the_current_key_accepted(registr
     async with relying_app(registry, public_origin=ORIGIN) as (client, _):
         refused = await client.get("/v1/items", headers=get_items(old_member))
         accepted = await client.get("/v1/items", headers=get_items(new_member))
-    assert refused.status_code == 401, refused.text
+    assert refusal(refused) == (401, "did_aw_key_mismatch")
     assert accepted.status_code == 200, accepted.text
     assert accepted.json()["did_aw_registry_verified"] is True
 
@@ -95,7 +100,7 @@ async def test_a_did_the_registry_does_not_know_is_refused(registry, team_key, d
     member = await certified(registry, member_key=SigningKey.generate(), did_aw=did_aw, team_key=team_key)
     async with relying_app(registry, public_origin=ORIGIN) as (client, _):
         response = await client.get("/v1/items", headers=get_items(member))
-    assert response.status_code == 401, response.text
+    assert refusal(response) == (401, "did_aw_unregistered")
 
 
 async def test_a_did_key_only_member_needs_no_global_identity(registry, team_key):
@@ -130,7 +135,7 @@ async def test_an_unavailable_registry_fails_closed_with_503(registry, global_me
     registry.transport.fault = did_lookup_fault(kind)
     async with relying_app(registry, public_origin=ORIGIN) as (client, cache):
         response = await client.get("/v1/items", headers=get_items(global_member))
-    assert response.status_code == 503, response.text
+    assert refusal(response) == (503, "did_aw_resolution_unavailable")
     assert not cache._did_keys
     assert "AWID did:aw resolution failed" in caplog.text
 
@@ -142,7 +147,10 @@ async def test_an_expired_resolution_is_never_reused_when_the_registry_fails(reg
         expired = replace(cache._did_keys[key], expires_at=-1)
         cache._did_keys[key] = expired
         registry.transport.fault = did_lookup_fault("http")
-        assert (await client.get("/v1/items", headers=get_items(global_member))).status_code == 503
+        assert refusal(await client.get("/v1/items", headers=get_items(global_member))) == (
+            503,
+            "did_aw_resolution_unavailable",
+        )
     assert cache._did_keys[key] is expired
     assert "AWID did:aw resolution failed" in caplog.text
 
@@ -167,7 +175,10 @@ async def test_a_rotation_is_seen_once_the_cached_resolution_expires(registry, t
         await registry.rotate_did(did_aw, old, new)
         [key] = cache._did_keys
         cache._did_keys[key] = replace(cache._did_keys[key], expires_at=-1)
-        assert (await client.get("/v1/items", headers=get_items(old_member))).status_code == 401
+        assert refusal(await client.get("/v1/items", headers=get_items(old_member))) == (
+            401,
+            "did_aw_key_mismatch",
+        )
 
 
 async def test_an_unregistered_answer_is_reused_until_it_expires_then_a_new_registration_resolves(registry, team_key):
@@ -175,10 +186,16 @@ async def test_an_unregistered_answer_is_reused_until_it_expires_then_a_new_regi
     did_aw = stable_id_from_did_key(did_key(key))
     member = await certified(registry, member_key=key, did_aw=did_aw, team_key=team_key)
     async with relying_app(registry, public_origin=ORIGIN) as (client, cache):
-        assert (await client.get("/v1/items", headers=get_items(member))).status_code == 401
+        assert refusal(await client.get("/v1/items", headers=get_items(member))) == (
+            401,
+            "did_aw_unregistered",
+        )
         await registry.register_did(key)
         lookups = len(did_lookups(registry))
-        assert (await client.get("/v1/items", headers=get_items(member))).status_code == 401
+        assert refusal(await client.get("/v1/items", headers=get_items(member))) == (
+            401,
+            "did_aw_unregistered",
+        )
         assert len(did_lookups(registry)) == lookups
         cache_key = (canonical_server_origin(REGISTRY_URL), did_aw)
         assert 0 < cache._did_keys[cache_key].expires_at - time.monotonic_ns() <= seconds_to_ns(60)

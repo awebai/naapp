@@ -13,7 +13,7 @@ from aweb_logs.ingest import ClientQuota
 
 
 class LogsSettings(NaappSettings):
-    model_config = SettingsConfigDict(env_prefix="LOGS_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="LOGS_", env_file=None, extra="ignore")
 
     app_id: str = Field(default="logs")
     # The purge ledger's database (design §B6): one tombstone per purged event,

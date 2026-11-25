@@ -9,7 +9,7 @@ from pydantic_settings import SettingsConfigDict
 class Settings(NaappSettings):
     """Runtime configuration for library: the shared naapp settings under LIBRARY_."""
 
-    model_config = SettingsConfigDict(env_prefix="LIBRARY_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="LIBRARY_", env_file=None, extra="ignore")
 
     database_url: str = Field(default="postgresql://localhost/library")
     public_origin: str = Field(default="https://library.aweb.ai")

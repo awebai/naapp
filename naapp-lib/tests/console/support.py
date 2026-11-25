@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from aweb_naapp_testing.database_fixtures import migrate_passkeys
 from aweb_naapp_testing.owner_acts import (
     TeamOwner,
     designation_subject,
@@ -35,6 +36,19 @@ from tests.runtime.approvals.support import AuditOutbox
 from tests.runtime.approvals.test_passkeys import Contacts
 
 HUMAN = "https://console.example"
+
+
+class NoInstallation:
+    """The installations of a console whose scopes belong to no app
+    installation: none is ever stale, so none is observed."""
+
+    async def stale(self, scope: str) -> str | None:
+        return None
+
+    async def refresh(self, team_id: str) -> None:
+        raise AssertionError("a scope of no installation is never refreshed")
+
+
 OWNER_A = "app.owner.a"
 OWNER_B = "app.owner.b"
 
@@ -58,7 +72,12 @@ class Console:
 
     def sessions(self, ttl: timedelta = MAX_SESSION) -> ConsoleSessions:
         return ConsoleSessions(
-            self.db, passkeys=self.passkeys, scopes=self.admits, member=self.member, ttl=ttl
+            self.db,
+            passkeys=self.passkeys,
+            scopes=self.admits,
+            member=self.member,
+            installations=NoInstallation(),
+            ttl=ttl,
         )
 
     async def enrol(self, scope: str, contact: str | None = None) -> tuple[str, SoftAuthenticator]:
@@ -129,14 +148,19 @@ class Console:
         return approver.subject, device
 
 
+async def migrate_console_world(db: AsyncDatabaseManager) -> None:
+    await AuditOutbox(db).create()
+    await PgApprovalStore(db).migrate()
+    await migrate_passkeys(db)
+    await apply_owner_act_migrations(db)
+    await apply_console_migrations(db)
+
+
 async def console_world(
-    test_db_factory, registry: Registry, suffix: str, origin: str = HUMAN
+    db: AsyncDatabaseManager, registry: Registry, origin: str = HUMAN
 ) -> Console:
-    db = await test_db_factory.create_db(suffix=suffix, schema="app")
     audit = AuditOutbox(db)
-    await audit.create()
     store = PgApprovalStore(db)
-    await store.migrate()
     contacts = Contacts()
 
     async def resolve_context(scope, *, tx):
@@ -161,7 +185,4 @@ async def console_world(
         challenge_ttl=timedelta(minutes=5),
         proof_context=resolve_context,
     )
-    await passkeys.migrate()
-    await apply_owner_act_migrations(db)
-    await apply_console_migrations(db)
     return Console(db, passkeys, contacts, await team_owner(registry), origin)

@@ -5,7 +5,7 @@ import math
 from collections.abc import Mapping
 from dataclasses import dataclass
 from time import monotonic_ns
-from typing import Any, ClassVar, Literal
+from typing import Any
 
 from awid.did import validate_stable_id
 from awid.identity_observation import (
@@ -17,6 +17,7 @@ from awid.registry import RegistryClient
 from awid.team_certificate import TeamCertificateError, verify_team_certificate_signature
 from fastapi import HTTPException
 
+from aweb_naapp.runtime.principal_status import PrincipalStatusReason, PrincipalStatusUnavailable
 from aweb_naapp.runtime.team_auth import (
     AWIDTeamCache,
     MembershipProof,
@@ -51,45 +52,65 @@ class HumanMemberProof:
 
     def require_fresh(self) -> None:
         """Recheck the original remote deadline after local authority waits."""
-        if not self.is_fresh():
-            raise PrincipalStatusUnavailable()
+        now = monotonic_ns()
+        membership_fresh = self.membership.is_fresh_at(now)
+        if self.checked_at <= now <= self.fresh_until and membership_fresh:
+            return
+        if (
+            not membership_fresh
+            and self.checked_at <= now
+            and self.membership.fresh_until <= self.fresh_until
+        ):
+            raise PrincipalStatusUnavailable(
+                PrincipalStatusReason.MEMBERSHIP_DEADLINE, self.membership.checked_at, now=now
+            )
+        raise PrincipalStatusUnavailable(
+            PrincipalStatusReason.IDENTITY_DEADLINE, self.checked_at, now=now
+        )
 
 
-HumanMemberCode = Literal[
-    "principal_not_member", "principal_not_human", "principal_status_unavailable"
-]
+def _refused(status: int, code: str) -> HTTPException:
+    return HTTPException(status_code=status, detail=code)
 
 
-class HumanMemberRefused(HTTPException):
-    """A human-member check that refused. The HTTP boundary answers ``status``
-    with the refusal's ``code`` as its detail."""
-
-    code: ClassVar[HumanMemberCode]
-    status: ClassVar[int]
-
-    def __init__(self) -> None:
-        super().__init__(status_code=self.status, detail=self.code)
-
-
-class PrincipalNotMember(HumanMemberRefused):
-    """The evidence definitively shows no current membership of the team."""
-
-    code = "principal_not_member"
-    status = 403
-
-
-class PrincipalNotHuman(HumanMemberRefused):
-    """The member is current, but its own identity is not a human's."""
-
-    code = "principal_not_human"
-    status = 403
-
-
-class PrincipalStatusUnavailable(HumanMemberRefused):
-    """The membership or identity evidence could not be read fresh enough."""
-
-    code = "principal_status_unavailable"
-    status = 503
+async def _check_team_certificate(
+    team_cache: AWIDTeamCache,
+    team_id: str,
+    certificate_id: str,
+    certificate: Mapping[str, Any],
+    *,
+    refresh: bool = False,
+) -> MembershipProof:
+    started = monotonic_ns()
+    try:
+        facts = await require_active_certificate(
+            team_cache, team_id=team_id, certificate_id=certificate_id
+        )
+    except HTTPException as exc:
+        # The public verifier uses 401 for definitive unknown/revoked evidence;
+        # an unreadable private listing is unavailable, including its 403.
+        if exc.status_code == 401:
+            raise _refused(403, "principal_not_member") from None
+        reason = (
+            PrincipalStatusReason.TEAM_REFRESH_UNAVAILABLE
+            if refresh
+            else PrincipalStatusReason.TEAM_OBSERVATION_UNAVAILABLE
+        )
+        raise PrincipalStatusUnavailable(reason, started, now=monotonic_ns()) from None
+    try:
+        verify_team_certificate_signature(certificate, facts.team_did_key)
+    except TeamCertificateError:
+        raise _refused(403, "principal_not_member") from None
+    proof = facts.membership_proof(team_id, certificate_id)
+    now = monotonic_ns()
+    if not proof.is_fresh_at(now):
+        reason = (
+            PrincipalStatusReason.TEAM_REFRESH_STALE
+            if refresh
+            else PrincipalStatusReason.TEAM_OBSERVATION_STALE
+        )
+        raise PrincipalStatusUnavailable(reason, proof.checked_at, now=now)
+    return proof
 
 
 async def check_human_member(
@@ -122,42 +143,27 @@ async def check_human_member(
         ):
             raise ValueError()
     except (TypeError, ValueError, RecursionError):
-        raise PrincipalNotMember() from None
-    try:
-        facts = await require_active_certificate(
-            team_cache, team_id=team_id, certificate_id=certificate_id
-        )
-    except HTTPException as exc:
-        # The public verifier uses 401 for definitive unknown/revoked evidence;
-        # an unreadable private listing is unavailable, including its 403.
-        raise (
-            PrincipalNotMember() if exc.status_code == 401 else PrincipalStatusUnavailable()
-        ) from None
-    try:
-        verify_team_certificate_signature(cert, facts.team_did_key)
-    except TeamCertificateError:
-        raise PrincipalNotMember() from None
-    try:
-        membership = await team_cache.check_current_member(
-            team_id, certificate_id=certificate_id, team_did_key=facts.team_did_key
-        )
-    except HTTPException as exc:
-        raise (
-            PrincipalNotMember() if exc.status_code == 403 else PrincipalStatusUnavailable()
-        ) from None
+        raise _refused(403, "principal_not_member") from None
+    membership = await _check_team_certificate(team_cache, team_id, certificate_id, cert)
     binding_started = monotonic_ns()
     try:
         binding = await observe_identity_binding(registry, did_key=did_key, did_aw=principal)
     except IdentityObservationRefused as exc:
         if exc.code == "identity_binding_unavailable":
-            raise PrincipalStatusUnavailable() from None
-        raise PrincipalNotMember() from None
+            raise PrincipalStatusUnavailable(
+                PrincipalStatusReason.IDENTITY_BINDING_UNAVAILABLE,
+                binding_started,
+                now=monotonic_ns(),
+            ) from None
+        raise _refused(403, "principal_not_member") from None
     kind_started = monotonic_ns()
     observation = await observe_identity_kind(registry, binding)
     if observation.result["outcome"] == "unavailable":
-        raise PrincipalStatusUnavailable()
+        raise PrincipalStatusUnavailable(
+            PrincipalStatusReason.IDENTITY_KIND_UNAVAILABLE, kind_started, now=monotonic_ns()
+        )
     if not observation.is_human:
-        raise PrincipalNotHuman()
+        raise _refused(403, "principal_not_human")
     age = observation.evidence_age_seconds
     if (
         not isinstance(age, (int, float))
@@ -167,17 +173,27 @@ async def check_human_member(
     ):
         # A legacy hand-constructed classification does not retain evidence age.
         # It keeps its old classification, but cannot mint current effect proof.
-        raise PrincipalStatusUnavailable()
+        raise PrincipalStatusUnavailable(
+            PrincipalStatusReason.IDENTITY_AGE_UNAVAILABLE, kind_started, now=monotonic_ns()
+        )
+    identity_fresh_until = min(
+        binding_started + 60_000_000_000,
+        kind_started + math.floor((60 - age) * 1_000_000_000),
+    )
+    now = monotonic_ns()
+    if binding_started <= now <= identity_fresh_until and not membership.is_fresh_at(now):
+        # One new team observation can replace expired membership evidence.
+        # Recheck the same signed certificate against the current team key and
+        # active list. The independent binding and kind keep their own deadline.
+        membership = await _check_team_certificate(
+            team_cache, team_id, certificate_id, cert, refresh=True
+        )
     proof = HumanMemberProof(
         principal,
         did_key,
         membership,
         binding_started,
-        min(
-            binding_started + 60_000_000_000,
-            kind_started + math.floor((60 - age) * 1_000_000_000),
-            membership.fresh_until,
-        ),
+        min(identity_fresh_until, membership.fresh_until),
     )
     proof.require_fresh()
     return proof

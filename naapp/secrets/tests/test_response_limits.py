@@ -3,12 +3,13 @@
 import asyncio
 import copy
 import json
-from threading import Event
+from threading import Event, get_ident
 
 import pytest
+from aweb_secrets_values import credential_shapes
 from fastapi import Response
 
-from aweb_secrets import responses
+from aweb_secrets import broker as broker_module
 from aweb_secrets.change import ChangeRefused, covered_bytes, parse_change, validate_change
 from aweb_secrets.console_forms.grants import _configuration
 from aweb_secrets.destination import DestinationInvalid, DestinationRecord
@@ -216,23 +217,27 @@ async def test_small_broker_request_completes_while_maximum_response_is_processe
         )
 
     loop = asyncio.get_running_loop()
+    loop_thread = get_ident()
     entered, release = asyncio.Event(), Event()
-    scan = responses.has_credential_shape
+    inspect = broker_module.handle_response
 
-    def hold_large_scan(body, **kwargs):
-        if len(body) == CEILING:
+    def hold_large_inspection(**kwargs):
+        if len(kwargs["body"]) == CEILING:
+            assert get_ident() != loop_thread, "large response inspection ran on the event loop"
             loop.call_soon_threadsafe(entered.set)
-            assert release.wait(10), "peer did not release the large scanner"
-        return scan(body, **kwargs)
+            release.wait()
+        return inspect(**kwargs)
 
-    monkeypatch.setattr(responses, "has_credential_shape", hold_large_scan)
-    async with asyncio.TaskGroup() as tasks:
+    # This test controls when inspection may finish. Broker service tests
+    # exercise the production deadline with a held inspection separately.
+    monkeypatch.setattr(credential_shapes, "_SCAN_SECONDS", float("inf"))
+    monkeypatch.setattr(broker_module, "handle_response", hold_large_inspection)
+    async with asyncio.timeout(60), asyncio.TaskGroup() as tasks:
         large = tasks.create_task(_send(upstream, request("ch_large")))
         inspecting = tasks.create_task(entered.wait())
         try:
-            # The transport owns the download deadline. Start the peer at scanner entry.
             await asyncio.wait((inspecting, large), return_when=asyncio.FIRST_COMPLETED)
-            assert not large.done(), "large request finished before the scanner rendezvous"
+            assert not large.done(), "large request exited before the inspection was held"
             small = await _send(upstream, request("ch_small"))
             assert small.result.body == small_body
             assert not large.done()

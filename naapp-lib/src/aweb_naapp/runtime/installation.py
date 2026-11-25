@@ -371,6 +371,21 @@ class InstallationFence:
 
         return status
 
+    async def is_stale(self, team_id: str) -> bool:
+        """Whether the team's installation, active as last observed, needs
+        observing again before a SQL-only reader can rely on it: its freshness
+        has run out, or an outage cleared it. A local read; a missing, inactive
+        or uninstalled record is not stale, it is refused as it stands."""
+        return bool(
+            await self.db.fetch_value(
+                """SELECT state = 'active' AND active_installation_id IS NOT NULL
+                          AND (fresh_until IS NULL OR fresh_until <= clock_timestamp())
+                   FROM {{tables.installation_fences}}
+                   WHERE app_id = $1 AND team_id = $2""",
+                self.app_id, team_id,
+            )
+        )
+
     async def permit(self, team_id: str) -> InstallationPermit:
         """Refresh outside app locks, then require an active typed installation."""
         status = await self.refresh(team_id)

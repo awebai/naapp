@@ -14,7 +14,7 @@ import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 import pytest
@@ -302,6 +302,16 @@ class ProducerKind(StrEnum):
     CLIENT = "client"
 
 
+async def _appended_hook(world, response) -> str:
+    """The hook of the event the response says was appended, as the chain stores it."""
+    answer = response.json()
+    assert answer["disposition"] == "appended", answer
+    return await world.db.fetch_value(
+        "SELECT hook FROM {{tables.chain_events}} WHERE team_id=$1 AND event_id=$2",
+        world.member.team_id, UUID(answer["event_id"]),
+    )
+
+
 def _code(response):
     return response.json()["detail"]["code"]
 
@@ -536,8 +546,8 @@ async def test_an_app_production_without_a_hook_event_key_is_refused(world):
 
 async def test_schema_refusal_follows_valid_authority(world):
     response = await world.send(world.delivery("core", payload={"unknown": "field"}))
-    assert response.status_code == 422
-    assert _code(response).startswith("schema_")
+    assert (response.status_code, _code(response)) == (422, "schema_missing_field")
+    assert await world.db.fetch_value("SELECT count(*) FROM {{tables.chain_events}}") == 0
 
 
 async def test_a_revoked_client_certificate_is_refused_by_the_certificate_check(world):
@@ -698,6 +708,7 @@ async def test_backend_version_observation_uses_the_packaged_catalog(world):
         )
     )
     assert response.status_code == 200, response.text
+    assert await _appended_hook(world, response) == "post-governance-hook"
 
 
 async def test_invalid_observed_value_refusal_uses_the_packaged_catalog(world):
@@ -715,6 +726,7 @@ async def test_invalid_observed_value_refusal_uses_the_packaged_catalog(world):
         )
     )
     assert response.status_code == 200, response.text
+    assert await _appended_hook(world, response) == "post-secret-use-hook"
 
 
 @pytest.mark.parametrize("lookup", list(Lookup))

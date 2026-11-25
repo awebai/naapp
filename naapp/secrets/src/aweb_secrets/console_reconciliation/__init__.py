@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 import asyncpg
 from aweb_naapp.console import ConsoleRoute, ConsoleSession, session_is_current
-from aweb_naapp.console.browser import member_refusal
+from aweb_naapp.console.browser import session_refusal
 from aweb_naapp.dispatch import State
 from aweb_naapp.runtime.approvals import (
     ApprovalRefused,
@@ -330,7 +330,7 @@ def console_reconciliation_router(*, services: ConsoleReconciliation) -> APIRout
     router = APIRouter(route_class=ConsoleRoute)
 
     def _read_refusal(error: HTTPException) -> Response:
-        if error.status_code == 401 or member_refusal(error) is not None:
+        if error.status_code == 401 or session_refusal(error) is not None:
             return shell.refused_page(error)
         return shell.recovery_page(
             error,

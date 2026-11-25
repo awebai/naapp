@@ -21,6 +21,7 @@ JOBS = {
     'naapp-lib': 'naapp-lib',
     'folio': 'naapp/folio',
     'folio-e2e': 'naapp/folio',
+    'folio-image': 'naapp/folio',
     'library': 'naapp/library',
     'library-e2e': 'naapp/library',
     'logs': 'naapp/logs',

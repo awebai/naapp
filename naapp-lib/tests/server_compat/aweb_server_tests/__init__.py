@@ -1,4 +1,4 @@
-"""aweb's server test helpers at server-v1.27.53, one module per aweb file."""
+"""aweb's server test helpers at 2788969b6fce509437eab53637927bb97cf18b58, one module per aweb file."""
 
 # Module names that copied definitions import inside their bodies, as aweb
 # lays its tests out, with the copy each one names.

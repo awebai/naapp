@@ -28,19 +28,39 @@ from aweb_naapp.runtime.clock import seconds_to_ns
 from aweb_naapp.runtime.team_auth import Principal
 from aweb_naapp.runtime.team_grants import AppIdentity, TeamGrantSource
 from tests.server_compat.aweb_server_tests.installation_fixtures import install_fixture_app
-from tests.server_compat.naapp_discovery import team_server_directory
 
 TEAM = "backend:grants.example"
 # Public deterministic test material; the identity names the actual pinned bytes.
 READ_KEY = SigningKey(bytes(range(32)))
-MANIFEST = json.dumps({
-    "manifest_version": 2,
-    "app": {"id": "notebook", "origin": "https://notebook.example", "version": "1.0.0"},
-    "tools": [{"name": "list", "method": "GET", "path": "/items", "scopes": ["notebook:read"]}],
-    "app_keys": [{"kid": "read", "did_key": did_from_public_key(bytes(READ_KEY.verify_key)), "purposes": [APP_GRANT_READ]}],
-}).encode()
+MANIFEST = json.dumps(
+    {
+        "manifest_version": 2,
+        "app": {
+            "id": "notebook",
+            "origin": "https://notebook.example",
+            "version": "1.0.0",
+        },
+        "tools": [
+            {
+                "name": "list",
+                "method": "GET",
+                "path": "/items",
+                "scopes": ["notebook:read"],
+            }
+        ],
+        "app_keys": [
+            {
+                "kid": "read",
+                "did_key": did_from_public_key(bytes(READ_KEY.verify_key)),
+                "purposes": [APP_GRANT_READ],
+            }
+        ],
+    }
+).encode()
 IDENTITY = AppIdentity(
-    app_id="notebook", origin="https://notebook.example", digest="sha256:" + hashlib.sha256(MANIFEST).hexdigest()
+    app_id="notebook",
+    origin="https://notebook.example",
+    digest="sha256:" + hashlib.sha256(MANIFEST).hexdigest(),
 )
 pytestmark = pytest.mark.asyncio
 
@@ -63,8 +83,13 @@ async def team_controller(real_stack):
 async def installed(real_stack, team_controller):
     db = real_stack.aweb_db
     await install_fixture_app(
-        db, team_id=TEAM, app_id=IDENTITY.app_id, origin=IDENTITY.origin,
-        manifest_version=2, manifest=MANIFEST, granted_scopes=["notebook:read"],
+        db,
+        team_id=TEAM,
+        app_id=IDENTITY.app_id,
+        origin=IDENTITY.origin,
+        manifest_version=2,
+        manifest=MANIFEST,
+        granted_scopes=["notebook:read"],
     )
     key = READ_KEY
     did = did_from_public_key(bytes(key.verify_key))
@@ -77,8 +102,8 @@ async def installed(real_stack, team_controller):
     source = TeamGrantSource(
         identity=IDENTITY,
         signer=signer,
-        discovery=team_server_directory(real_stack, clock=clock),
-        transport=real_stack.aweb,
+        discovery=real_stack.directory(clock=clock),
+        reach=real_stack.team_server_reach(),
         monotonic=clock,
     )
     return real_stack, source, clock, signer
@@ -102,7 +127,9 @@ async def test_reads_only_its_own_grant_and_shares_status_cache(installed):
     assert status.digest == IDENTITY.digest
     assert status.origin == IDENTITY.origin
     assert status.state == "active"
-    assert status.installed_at == await stack.aweb_db.fetch_value("SELECT installed_at FROM {{tables.team_app_installs}} WHERE team_id=$1", TEAM)
+    assert status.installed_at == await stack.aweb_db.fetch_value(
+        "SELECT installed_at FROM {{tables.team_app_installs}} WHERE team_id=$1", TEAM
+    )
     assert status.granted_scopes == grant.scopes == frozenset({"notebook:read"})
     assert status.installation_id == grant.installation_id
     assert status.installation_id
@@ -200,20 +227,28 @@ async def test_revoked_key_means_no_grant_without_claiming_uninstall(installed):
     assert await source.grant_for(TEAM) is None
 
 
-async def test_install_retry_refreshes_a_missing_key_denial_after_five_seconds(installed):
+async def test_install_retry_refreshes_a_missing_key_denial_after_five_seconds(
+    installed,
+):
     stack, source, clock, _ = installed
     # The key's registry entry alone grants nothing before the team installs.
     await stack.aweb_db.execute(
         "DELETE FROM {{tables.team_app_installs}} WHERE team_id = $1 AND app_id = $2",
-        TEAM, IDENTITY.app_id,
+        TEAM,
+        IDENTITY.app_id,
     )
     assert await source.grant_for(TEAM) is None
     assert await source.status_for(TEAM) is None
     assert len(stack.aweb.calls) == 1
 
     await install_fixture_app(
-        stack.aweb_db, team_id=TEAM, app_id=IDENTITY.app_id, origin=IDENTITY.origin,
-        manifest_version=2, manifest=MANIFEST, granted_scopes=["notebook:read"],
+        stack.aweb_db,
+        team_id=TEAM,
+        app_id=IDENTITY.app_id,
+        origin=IDENTITY.origin,
+        manifest_version=2,
+        manifest=MANIFEST,
+        granted_scopes=["notebook:read"],
     )
     clock.now += seconds_to_ns(4)
     assert await source.grant_for(TEAM) is None
@@ -268,8 +303,8 @@ async def test_bounded_timeout_covers_discovery_and_read(installed):
     source = TeamGrantSource(
         identity=IDENTITY,
         signer=signer,
-        discovery=team_server_directory(stack, clock=clock),
-        transport=stack.aweb,
+        discovery=stack.directory(clock=clock),
+        reach=stack.team_server_reach(),
         monotonic=clock,
         timeout=0.02,
     )
@@ -303,7 +338,9 @@ async def test_answer_already_expired_on_arrival_is_unavailable(installed):
         await source.status_for(TEAM)
 
 
-async def test_b1_maps_missing_to_403_and_unavailable_to_503(installed, team_controller):
+async def test_b1_maps_missing_to_403_and_unavailable_to_503(
+    installed, team_controller
+):
     stack, source, clock, _ = installed
 
     async def receive():
@@ -326,37 +363,55 @@ async def test_b1_maps_missing_to_403_and_unavailable_to_503(installed, team_con
         _encode_certificate,
         _make_certificate,
     )
+
     member = SigningKey.generate()
     member_did = did_from_public_key(bytes(member.verify_key))
     controller_did = did_from_public_key(bytes(team_controller.verify_key))
     certificate = _make_certificate(
-        bytes(team_controller), controller_did, member_did,
-        team_id=TEAM, alias="member", certificate_id=str(uuid4()),
+        bytes(team_controller),
+        controller_did,
+        member_did,
+        team_id=TEAM,
+        alias="member",
+        certificate_id=str(uuid4()),
     )
     await stack.awid_db.execute(
         "INSERT INTO {{tables.team_certificates}} "
         "(team_uuid,certificate_id,member_did_key,alias,identity_scope,certificate) "
         "SELECT team_uuid,$1,$2,'member','global',$3 FROM {{tables.teams}} "
         "WHERE domain='grants.example' AND name='backend'",
-        certificate["certificate_id"], member_did, _encode_certificate(certificate),
+        certificate["certificate_id"],
+        member_did,
+        _encode_certificate(certificate),
     )
     principal = Principal(
-        team_id=TEAM, did_key=member_did, did_aw=None, address=None, alias="member",
-        certificate_id=certificate["certificate_id"], team_did_key=controller_did,
+        team_id=TEAM,
+        did_key=member_did,
+        did_aw=None,
+        address=None,
+        alias="member",
+        certificate_id=certificate["certificate_id"],
+        team_did_key=controller_did,
     )
     manifest = load_manifest(
-        json.dumps({
-            "manifest_version": 1,
-            "app": {"id": IDENTITY.app_id, "version": "1.0", "origin": IDENTITY.origin},
-            "tools": [
-                {
-                    "name": "list",
-                    "method": "GET",
-                    "path": "/items",
-                    "scopes": ["notebook:read"],
-                }
-            ]
-        }).encode()
+        json.dumps(
+            {
+                "manifest_version": 1,
+                "app": {
+                    "id": IDENTITY.app_id,
+                    "version": "1.0",
+                    "origin": IDENTITY.origin,
+                },
+                "tools": [
+                    {
+                        "name": "list",
+                        "method": "GET",
+                        "path": "/items",
+                        "scopes": ["notebook:read"],
+                    }
+                ],
+            }
+        ).encode()
     )
     tools = DeclaredTools.from_manifest(manifest)
 
@@ -393,9 +448,16 @@ async def test_b1_maps_missing_to_403_and_unavailable_to_503(installed, team_con
 @pytest.mark.parametrize("purpose", ["app-event", "hook-resolve"])
 async def test_another_purpose_is_refused_at_construction(installed, purpose):
     stack, _, _, signer = installed
-    other = AppCredentialSigner(app_id=IDENTITY.app_id, key=signer._key, purpose=purpose)
+    other = AppCredentialSigner(
+        app_id=IDENTITY.app_id, key=signer._key, purpose=purpose
+    )
     with pytest.raises(ValueError):
-        TeamGrantSource(identity=IDENTITY, signer=other, discovery=team_server_directory(stack))
+        TeamGrantSource(
+            identity=IDENTITY,
+            signer=other,
+            discovery=stack.directory(),
+            reach=stack.team_server_reach(),
+        )
     assert not stack.aweb.calls
 
 
@@ -411,20 +473,24 @@ async def test_malformed_or_oversize_body_fails_closed(installed, content):
 async def test_server_window_is_honored_and_capped(installed, max_age, window):
     stack, source, clock, _ = installed
     change_answer(stack, max_age_seconds=max_age)
-    assert (await source.status_for(TEAM)).fresh_until == clock.now + seconds_to_ns(window)
+    assert (await source.status_for(TEAM)).fresh_until == clock.now + seconds_to_ns(
+        window
+    )
     clock.now += seconds_to_ns(window)
     stack.aweb.down = True
     with pytest.raises(GrantUnavailable):
         await source.grant_for(TEAM)
 
 
-async def test_server_move_discards_cached_grant_and_signs_the_mount_prefix(installed, team_controller):
+async def test_server_move_discards_cached_grant_and_signs_the_mount_prefix(
+    installed, team_controller
+):
     stack, _, clock, signer = installed
     source = TeamGrantSource(
         identity=IDENTITY,
         signer=signer,
-        discovery=team_server_directory(stack, clock=clock, ttl_seconds=0),
-        transport=stack.aweb,
+        discovery=stack.directory(clock=clock, ttl_seconds=0),
+        reach=stack.team_server_reach(),
         monotonic=clock,
     )
     assert await source.grant_for(TEAM) is not None
@@ -435,7 +501,7 @@ async def test_server_move_discards_cached_grant_and_signs_the_mount_prefix(inst
     await stack.publish_server(
         TEAM,
         team_controller,
-        server_url="https://aweb.example/api",
+        server_url=f"{stack.aweb_url}/api",
         issued_at=datetime.now(UTC) + timedelta(seconds=1),
     )
     assert await source.grant_for(TEAM) is not None

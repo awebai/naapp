@@ -19,7 +19,7 @@ AW_DIR ?= $(abspath .tools/bin)
 SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_served_manifest_digests \
 	test_secrets_shards test_shipping
 
-.PHONY: affected sync lint test test-scripts production-awid-sync browsers renderer-deps test-renderer image-smoke-folio image-smoke-library aw \
+.PHONY: affected sync lint test test-scripts production-awid-sync browsers renderer-deps test-renderer image-smoke-folio image-smoke-library check-library-dev aw \
 	check-library-aatk check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets release-checks \
 	release-candidate release-publish
 
@@ -102,6 +102,12 @@ image-smoke-folio:
 # Library's service image, built as the release builds it, starts and serves /live.
 image-smoke-library:
 	bash scripts/image-smoke.sh library
+
+# Library's developer targets work from a naapp clone: compile, then the dev
+# server started by make run answers /live.
+check-library-dev:
+	$(MAKE) -C naapp/library compile
+	python3 scripts/dev_server_check.py library
 
 aw:
 	scripts/install-aw.sh $(AW_DIR)

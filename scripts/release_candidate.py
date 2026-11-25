@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run this repository's complete release checks and create requested local tags."""
+"""Tag a commit of main that a fully green CI run tested, with the requested local tags."""
 
 from __future__ import annotations
 
@@ -8,15 +8,15 @@ import json
 import re
 import subprocess
 import sys
-import tomllib
+from collections.abc import Callable
 from pathlib import Path
 
 from release_versions import (
     VersionRefusal as CandidateRefusal,
+    manifest_version_at,
     require_open_lane,
     require_runner_values,
     tag_parts,
-    valid_version,
 )
 
 MANIFESTS = {
@@ -57,22 +57,17 @@ def run(
     return completed.stdout.strip() if capture else ""
 
 
-def manifest_version(root: Path, path: str) -> str:
-    with (root / path).open("rb") as handle:
-        value = tomllib.load(handle)["project"]["version"]
-    if not valid_version(value):
-        raise CandidateRefusal(f"{path} has invalid version {value!r}")
-    return value
+# The workflow whose runs qualify a commit, and its single required check.
+CI_WORKFLOW = "ci.yml"
+RESULT_JOB = "naapp CI"
 
 
-def validate_tags(root: Path, tags: list[str]) -> tuple[str, dict[str, str]]:
+def validate_tags(root: Path, tags: list[str], source: str = "HEAD") -> tuple[str, dict[str, str]]:
     if not tags:
         raise CandidateRefusal("at least one release tag is required")
     if len(tags) != len(set(tags)):
         raise CandidateRefusal("release tags contain a duplicate")
-    if run(root, "git", "status", "--porcelain", "--untracked-files=all"):
-        raise CandidateRefusal("the candidate checkout is dirty or has untracked files")
-    source_sha = run(root, "git", "rev-parse", "HEAD")
+    source_sha = run(root, "git", "rev-parse", "--verify", "--quiet", f"{source}^{{commit}}")
     if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
         raise CandidateRefusal("git did not return a full source SHA")
     versions: dict[str, str] = {}
@@ -83,9 +78,10 @@ def validate_tags(root: Path, tags: list[str]) -> tuple[str, dict[str, str]]:
             raise CandidateRefusal(f"more than one {prefix} tag was requested")
         versions[prefix] = version
         for manifest in [MANIFESTS[prefix], *LOCKSTEP.get(prefix, [])]:
-            if manifest_version(root, manifest) != version:
+            if manifest_version_at(root, source_sha, manifest) != version:
                 raise CandidateRefusal(
-                    f"{tag} does not match {manifest} version {manifest_version(root, manifest)}"
+                    f"{tag} does not match {manifest} version "
+                    f"{manifest_version_at(root, source_sha, manifest)}"
                 )
         if prefix == "aweb-secrets-runner-v":
             require_runner_values(root, source_sha)
@@ -94,18 +90,64 @@ def validate_tags(root: Path, tags: list[str]) -> tuple[str, dict[str, str]]:
     return source_sha, versions
 
 
-def create_candidate(root: Path, tags: list[str]) -> str:
+def ci_runs(root: Path, source_sha: str) -> list[dict]:
+    """Every run of the CI workflow on ``source_sha``, with its jobs, read through gh."""
+    repository = run(root, "gh", "repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner")
+    listed = json.loads(run(
+        root, "gh", "api", f"repos/{repository}/actions/workflows/{CI_WORKFLOW}/runs?head_sha={source_sha}&per_page=100"
+    ))
+    runs = []
+    for item in listed["workflow_runs"]:
+        jobs = json.loads(run(root, "gh", "api", f"repos/{repository}/actions/runs/{item['id']}/jobs?per_page=100"))
+        runs.append({
+            **{key: item[key] for key in
+               ("id", "head_sha", "event", "head_branch", "status", "conclusion", "html_url")},
+            "jobs": [{"name": job["name"], "conclusion": job["conclusion"]} for job in jobs["jobs"]],
+        })
+    return runs
+
+
+def qualifying_run(runs: list[dict], source_sha: str) -> dict:
+    """The run that qualifies ``source_sha``: a completed CI run of exactly that
+    commit, pushed to main or started by hand (both test every package), in which
+    every job succeeded, the required check among them. A skipped job is a
+    package the run did not test, so it does not qualify."""
+    reasons = []
+    for candidate in runs:
+        if candidate["head_sha"] != source_sha:
+            continue
+        label = f"run {candidate['id']}"
+        event, branch = candidate["event"], candidate["head_branch"]
+        if not (event == "push" and branch == "main") and event != "workflow_dispatch":
+            reasons.append(f"{label}: a {event} run on {branch} does not test every package")
+        elif candidate["status"] != "completed" or candidate["conclusion"] != "success":
+            reasons.append(f"{label}: {candidate['status']} {candidate['conclusion'] or ''}".rstrip())
+        elif unsuccessful := [f"{job['name']} {job['conclusion']}" for job in candidate["jobs"]
+                              if job["conclusion"] != "success"]:
+            reasons.append(f"{label}: " + ", ".join(unsuccessful))
+        elif RESULT_JOB not in {job["name"] for job in candidate["jobs"]}:
+            reasons.append(f"{label}: no {RESULT_JOB} job")
+        else:
+            return candidate
+    detail = "".join(f"\n  {reason}" for reason in reasons) or ": no CI run of it"
+    raise CandidateRefusal(f"no CI run qualifies {source_sha}{detail}")
+
+
+def create_candidate(
+    root: Path,
+    tags: list[str],
+    source: str = "HEAD",
+    runs: Callable[[Path, str], list[dict]] = ci_runs,
+) -> str:
     run(root, "git", "fetch", "--quiet", "origin", "main", "+refs/tags/*:refs/tags/*")
-    source_sha, _versions = validate_tags(root, tags)
-    run(root, "git", "merge-base", "--is-ancestor", source_sha, "origin/main")
-    # Every package and journey, whatever narrowing the caller's environment carries.
-    run(root, "make", "release-checks", capture=False)
-    if run(root, "git", "rev-parse", "HEAD") != source_sha:
-        raise CandidateRefusal("checkout HEAD changed while the release checks ran")
-    if run(root, "git", "status", "--porcelain", "--untracked-files=all"):
-        raise CandidateRefusal("the release checks left the candidate checkout dirty")
+    source_sha, _versions = validate_tags(root, tags, source)
+    on_main = subprocess.run(["git", "merge-base", "--is-ancestor", source_sha, "origin/main"],
+                             cwd=root, capture_output=True, check=False)
+    if on_main.returncode:
+        raise CandidateRefusal(f"{source_sha} is not on origin/main")
+    qualified = qualifying_run(runs(root, source_sha), source_sha)
     for tag in tags:
-        message = f"naapp {tag}\n\nRelease checks passed for {source_sha}."
+        message = f"naapp {tag}\n\nCI run {qualified['html_url']} passed every job for {source_sha}."
         run(root, "git", "tag", "-a", tag, source_sha, "-m", message)
     print(f"candidate PASSED: {source_sha}")
     for tag in tags:
@@ -118,10 +160,11 @@ def create_candidate(root: Path, tags: list[str]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--source", default="HEAD", help="the commit of main to tag (default HEAD)")
     parser.add_argument("tags", nargs="+")
     arguments = parser.parse_args(argv)
     try:
-        create_candidate(Path.cwd().resolve(), arguments.tags)
+        create_candidate(Path.cwd().resolve(), arguments.tags, arguments.source)
     except (
         CandidateRefusal,
         OSError,

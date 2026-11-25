@@ -12,7 +12,6 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,10 +20,10 @@ from pathlib import Path
 from release_versions import (
     VersionRefusal as PublishRefusal,
     final_version,
+    manifest_version_at,
     require_open_lane,
     require_runner_values,
     tag_parts,
-    valid_version,
 )
 
 MANIFESTS = {
@@ -69,14 +68,6 @@ def run(
         detail = (completed.stderr or completed.stdout or "").strip()
         raise PublishRefusal(f"{' '.join(argv)} failed: {detail}")
     return completed.stdout.strip() if capture else ""
-
-
-def manifest_version_at(root: Path, source_sha: str, path: str) -> str:
-    raw = run(root, "git", "show", f"{source_sha}:{path}", timeout=60)
-    value = tomllib.loads(raw)["project"]["version"]
-    if not valid_version(value):
-        raise PublishRefusal(f"{path} at {source_sha} has invalid version {value!r}")
-    return value
 
 
 def tag_identity(root: Path, tag: str) -> tuple[str, str, str]:

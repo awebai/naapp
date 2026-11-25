@@ -67,6 +67,13 @@ def _read(root: Path, revision: str, path: str) -> dict:
     return tomllib.loads(raw)
 
 
+def manifest_version_at(root: Path, revision: str, path: str) -> str:
+    value = _read(root, revision, path)["project"]["version"]
+    if not valid_version(value):
+        raise VersionRefusal(f"{path} at {revision} has invalid version {value!r}")
+    return value
+
+
 def require_runner_values(root: Path, revision: str) -> None:
     """The two published packages are lockstep, including the runner dependency."""
     runner = _read(root, revision, "naapp/secrets/runner/pyproject.toml")["project"]

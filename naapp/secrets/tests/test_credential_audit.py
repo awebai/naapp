@@ -38,8 +38,8 @@ from tests.test_change_sets import (
 
 
 @pytest.fixture
-async def world(test_db_factory, tmp_path):
-    async with build_world(test_db_factory, tmp_path) as built:
+async def world(change_set_databases, tmp_path):
+    async with build_world(*change_set_databases, tmp_path) as built:
         await enrol_owner(built, ALICE, "owner@example.com")
         # The contact-model tests exercise an ordinary approver, never a new
         # legacy owner. Its app binding refers to a real B2 draft.

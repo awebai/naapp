@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
+from aweb_naapp_testing.database_fixtures import migrate_passkeys
 from aweb_naapp_testing.owner_acts import (
     TeamOwner,
     designation_subject,
@@ -147,14 +148,19 @@ class Console:
         return approver.subject, device
 
 
+async def migrate_console_world(db: AsyncDatabaseManager) -> None:
+    await AuditOutbox(db).create()
+    await PgApprovalStore(db).migrate()
+    await migrate_passkeys(db)
+    await apply_owner_act_migrations(db)
+    await apply_console_migrations(db)
+
+
 async def console_world(
-    test_db_factory, registry: Registry, suffix: str, origin: str = HUMAN
+    db: AsyncDatabaseManager, registry: Registry, origin: str = HUMAN
 ) -> Console:
-    db = await test_db_factory.create_db(suffix=suffix, schema="app")
     audit = AuditOutbox(db)
-    await audit.create()
     store = PgApprovalStore(db)
-    await store.migrate()
     contacts = Contacts()
 
     async def resolve_context(scope, *, tx):
@@ -179,7 +185,4 @@ async def console_world(
         challenge_ttl=timedelta(minutes=5),
         proof_context=resolve_context,
     )
-    await passkeys.migrate()
-    await apply_owner_act_migrations(db)
-    await apply_console_migrations(db)
     return Console(db, passkeys, contacts, await team_owner(registry), origin)

@@ -282,7 +282,7 @@ async def test_a_revoked_holding_ends_the_aw_session(aw: Aw):
     await revoked_reader(aw.world, aw.principal)
     for path in ("/v1/export", "/v1/events"):
         response = await aw.get(key, issued, path)
-        assert response.status_code in (401, 403), (path, response.status_code)
+        assert (response.status_code, response.json()) == (403, {"detail": "role_not_held"}), path
         assert b"aweb.logs-export" not in response.content
 
 

@@ -169,16 +169,44 @@ class CachedDidKey:
     expires_at: int
 
 
+# awid's detail is "<code>: <message>"; the refusal carries the two apart.
+_TEAM_KEY_UNVERIFIED_CODE, _, _TEAM_KEY_UNVERIFIED_MESSAGE = TEAM_KEY_UNVERIFIED_DETAIL.partition(
+    ": "
+)
+
+
+def refusal(status_code: int, code: str, message: str) -> HTTPException:
+    """A team-auth refusal: a stable ``code`` callers branch on, and a safe
+    ``message`` for people. The status carries the class of failure."""
+    return HTTPException(status_code=status_code, detail={"code": code, "message": message})
+
+
+def refusal_code(exc: HTTPException) -> str | None:
+    """The code of a coded refusal, or None for any other detail (including the
+    released bare-string refusals, which stay as they are)."""
+    detail = exc.detail
+    if isinstance(detail, dict) and isinstance(detail.get("code"), str):
+        return detail["code"]
+    return None
+
+
 def _require_active_certificate(facts: CachedTeamFacts, certificate_id: str) -> None:
     if certificate_id not in facts.published_certificate_ids:
-        raise HTTPException(status_code=401, detail="Unknown AWID certificate")
+        raise refusal(401, "certificate_unknown", "The team certificate is not published in AWID")
     if certificate_id in facts.revoked_certificate_ids:
-        raise HTTPException(status_code=401, detail="Team certificate has been revoked")
+        raise refusal(401, "certificate_revoked", "The team certificate has been revoked")
 
 
 def _current_member_refusal(status_code: int) -> HTTPException:
-    code = "current_member_required" if status_code == 403 else "current_membership_unavailable"
-    return HTTPException(status_code=status_code, detail={"code": code})
+    if status_code == 403:
+        return refusal(
+            403, "current_member_required", "The caller is not a current member of the team"
+        )
+    return refusal(
+        status_code,
+        "current_membership_unavailable",
+        "Current team membership could not be checked; retry later",
+    )
 
 
 def _raise_if_private_team_unreadable(response: httpx.Response, team_id: str) -> None:
@@ -300,14 +328,16 @@ class AWIDTeamCache:
                 async with self._client() as client:
                     response = await client.get(url, headers=self._read_headers(url))
             except httpx.HTTPError as exc:
-                raise HTTPException(status_code=503, detail="AWID registry unavailable") from exc
+                raise refusal(
+                    503, "registry_unavailable", "The AWID registry is unavailable"
+                ) from exc
             if response.status_code == 404:
                 return None
             if response.status_code >= 400:
                 logger.warning(
                     "AWID team key act read for %s answered %s", team_id, response.status_code
                 )
-                raise HTTPException(status_code=503, detail="AWID registry unavailable")
+                raise refusal(503, "registry_unavailable", "The AWID registry is unavailable")
             try:
                 return response.json()
             except ValueError:
@@ -323,7 +353,7 @@ class AWIDTeamCache:
                 enforce=self._enforce_team_key_pins,
             )
         except TeamKeyUnverified:
-            raise HTTPException(status_code=401, detail=TEAM_KEY_UNVERIFIED_DETAIL) from None
+            raise refusal(401, _TEAM_KEY_UNVERIFIED_CODE, _TEAM_KEY_UNVERIFIED_MESSAGE) from None
         self._team_key_memo.put(team_id, served_key, key)
         return key
 
@@ -432,7 +462,7 @@ class AWIDTeamCache:
             try:
                 facts = await self._refresh_team_facts(team_id, now)
             except HTTPException as exc:
-                if exc.status_code == 401 and exc.detail == "Unknown AWID team":
+                if exc.status_code == 401 and refusal_code(exc) == "unknown_team":
                     # Do not retain attacker-selected nonexistent teams. Check
                     # identity because another waiter may still own this lock.
                     if self._team_refresh_locks.get(team_id) is lock:
@@ -464,18 +494,20 @@ class AWIDTeamCache:
             async with self._client() as client:
                 response = await client.get(team_url, headers=self._read_headers(team_url))
         except httpx.HTTPError as exc:
-            raise HTTPException(status_code=503, detail="AWID registry unavailable") from exc
+            raise refusal(503, "registry_unavailable", "The AWID registry is unavailable") from exc
         _raise_if_private_team_unreadable(response, team_id)
         if response.status_code == 404:
             return None
         if response.status_code >= 400:
-            raise HTTPException(status_code=503, detail="AWID registry unavailable")
+            raise refusal(503, "registry_unavailable", "The AWID registry is unavailable")
         try:
             team_did_key = str(response.json().get("team_did_key") or "").strip()
         except (ValueError, AttributeError) as exc:
-            raise HTTPException(status_code=503, detail="AWID registry unavailable") from exc
+            raise refusal(503, "registry_unavailable", "The AWID registry is unavailable") from exc
         if not team_did_key:
-            raise HTTPException(status_code=503, detail="AWID team response missing team_did_key")
+            raise refusal(
+                503, "registry_response_incomplete", "The AWID team response has no team key"
+            )
         return await self._pinned_team_key(team_id, team_did_key)
 
     async def check_member_credentials(self) -> None:
@@ -514,15 +546,17 @@ class AWIDTeamCache:
                 team_resp = await client.get(team_url, headers=self._read_headers(team_url))
                 _raise_if_private_team_unreadable(team_resp, team_id)
                 if team_resp.status_code == 404:
-                    raise HTTPException(status_code=401, detail="Unknown AWID team")
+                    raise refusal(401, "unknown_team", "The team is not registered in AWID")
                 if team_resp.status_code >= 400:
-                    raise HTTPException(status_code=503, detail="AWID registry unavailable")
+                    raise refusal(503, "registry_unavailable", "The AWID registry is unavailable")
                 team_payload = team_resp.json()
 
                 team_did_key = str(team_payload.get("team_did_key") or "").strip()
                 if not team_did_key:
-                    raise HTTPException(
-                        status_code=503, detail="AWID team response missing team_did_key"
+                    raise refusal(
+                        503,
+                        "registry_response_incomplete",
+                        "The AWID team response has no team key",
                     )
 
                 published: set[str] = set()
@@ -546,8 +580,10 @@ class AWIDTeamCache:
                     )
                     _raise_if_private_team_unreadable(cert_resp, team_id)
                     if cert_resp.status_code >= 400:
-                        raise HTTPException(
-                            status_code=503, detail="AWID certificate revocation lookup unavailable"
+                        raise refusal(
+                            503,
+                            "revocation_lookup_unavailable",
+                            "AWID's certificate revocation lookup is unavailable",
                         )
                     cert_payload = cert_resp.json()
                     page = cert_payload.get("certificates")
@@ -564,9 +600,10 @@ class AWIDTeamCache:
                             for item in page
                         )
                     ):
-                        raise HTTPException(
-                            status_code=503,
-                            detail="AWID certificate revocation response is incomplete",
+                        raise refusal(
+                            503,
+                            "registry_response_incomplete",
+                            "AWID's certificate revocation response is incomplete",
                         )
                     published.update(item["certificate_id"] for item in page)
                     revoked.update(
@@ -580,21 +617,25 @@ class AWIDTeamCache:
                         or not next_cursor.strip()
                         or next_cursor in seen_cursors
                     ):
-                        raise HTTPException(
-                            status_code=503, detail="AWID certificate pagination did not advance"
+                        raise refusal(
+                            503,
+                            "registry_pagination_failed",
+                            "AWID's certificate pagination did not advance",
                         )
                     seen_cursors.add(next_cursor)
                     cursor = next_cursor
                 else:
-                    raise HTTPException(
-                        status_code=503, detail="AWID certificate pagination limit exceeded"
+                    raise refusal(
+                        503,
+                        "registry_pagination_failed",
+                        "AWID's certificate pagination exceeded its limit",
                     )
         except HTTPException as exc:
             logger.warning("AWID team facts refresh failed: %s", exc.detail)
             raise
         except Exception as exc:
             logger.exception("AWID team facts refresh failed")
-            raise HTTPException(status_code=503, detail="AWID registry unavailable") from exc
+            raise refusal(503, "registry_unavailable", "The AWID registry is unavailable") from exc
 
         if store:
             # A check (store=False) reads without changing pins.
@@ -626,7 +667,11 @@ class AWIDTeamCache:
                 if response.status_code == 404:
                     # The registry answers one 404 for an unknown team and for a
                     # certificate it never published.
-                    raise HTTPException(status_code=401, detail="unregistered")
+                    raise refusal(
+                        401,
+                        "certificate_unregistered",
+                        "The team certificate is not registered in AWID",
+                    )
                 response.raise_for_status()
                 payload = response.json()
             if (
@@ -654,8 +699,8 @@ class AWIDTeamCache:
             raise
         except Exception as exc:
             logger.warning("AWID certificate status lookup failed", exc_info=True)
-            raise HTTPException(
-                status_code=503, detail="AWID certificate status unavailable"
+            raise refusal(
+                503, "certificate_status_unavailable", "AWID certificate status is unavailable"
             ) from exc
         facts = CachedTeamFacts(
             team_did_key=await self._pinned_team_key(team_id, payload["team_did_key"]),
@@ -701,8 +746,8 @@ class AWIDTeamCache:
                 public_key_from_did(current_did_key)
         except Exception as exc:
             logger.warning("AWID did:aw resolution failed for %s", did_aw, exc_info=True)
-            raise HTTPException(
-                status_code=503, detail="AWID did:aw resolution unavailable"
+            raise refusal(
+                503, "did_aw_resolution_unavailable", "AWID did:aw resolution is unavailable"
             ) from exc
         self._did_keys[cache_key] = CachedDidKey(
             current_did_key=current_did_key, expires_at=now + seconds_to_ns(self.ttl_seconds)
@@ -727,8 +772,12 @@ async def _did_aw_registry_verified(
         else:
             outcome = "key_mismatch"
         if outcome != "match" and profile is DidAwProfile.REQUIRE:
-            raise HTTPException(
-                status_code=401, detail="did:aw current key does not match the signer"
+            raise refusal(
+                401,
+                f"did_aw_{outcome}",
+                "The did:aw is not registered in AWID"
+                if outcome == "unregistered"
+                else "The did:aw current key does not match the signer",
             )
     if profile is DidAwProfile.OBSERVE:
         # The measurement before an app requires the check: a stable outcome
@@ -749,9 +798,11 @@ def _parse_didkey_auth(header: str) -> tuple[str, str]:
             header, profile=DIDKeyHeaderProfile.WHITESPACE_SEPARATED
         )
     except HTTPException as exc:
-        raise HTTPException(status_code=401, detail="Invalid Authorization header") from exc
+        raise refusal(
+            401, "authorization_invalid", "The Authorization header is not DIDKey"
+        ) from exc
     if not did_key.startswith("did:key:") or not signature:
-        raise HTTPException(status_code=401, detail="Invalid DIDKey Authorization header")
+        raise refusal(401, "authorization_invalid", "The DIDKey Authorization header is invalid")
     return did_key, signature
 
 
@@ -759,18 +810,20 @@ def _parse_rfc3339_utc(value: str) -> datetime:
     try:
         return parse_zoned_timestamp(value)
     except ValueError as exc:
-        detail = (
-            "X-AWEB-Timestamp must include timezone"
-            if "timezone" in str(exc)
-            else "Invalid X-AWEB-Timestamp"
-        )
-        raise HTTPException(status_code=401, detail=detail) from exc
+        raise refusal(
+            401, "timestamp_invalid", "X-AWEB-Timestamp must be an RFC 3339 time with a zone"
+        ) from exc
 
 
 def _certificate_refusal(error: TeamCertificateError) -> HTTPException:
     """The answer for a certificate the shared check refuses (awid's one table)."""
-    status_code, detail = refusal_answer(error)
-    return HTTPException(status_code=status_code, detail=detail)
+    status_code, diagnostic = refusal_answer(error)
+    if diagnostic == "authority_unavailable":
+        # The registry's key does not decode: the authority's fault, not the caller's.
+        return refusal(status_code, diagnostic, "The team's AWID key is unusable")
+    return refusal(
+        status_code, f"certificate_{error.reason.value}", f"Team certificate refused: {diagnostic}"
+    )
 
 
 def _certificate_locator(header: str) -> tuple[str, str]:
@@ -790,11 +843,11 @@ def _certificate_locator(header: str) -> tuple[str, str]:
 def _decode_signed_payload_header(value: str) -> bytes:
     text = value.strip()
     if not text:
-        raise HTTPException(status_code=401, detail="Missing X-AWEB-Signed-Payload")
+        raise refusal(401, "signed_payload_missing", "X-AWEB-Signed-Payload is required")
     try:
         return decode_signed_payload_header(text, profile=RequestAuthProfile.NAAPP_V2)
     except ValueError as exc:
-        raise HTTPException(status_code=401, detail="Invalid X-AWEB-Signed-Payload") from exc
+        raise refusal(401, "signed_payload_invalid", "X-AWEB-Signed-Payload is invalid") from exc
 
 
 def signed_payload_bytes(request: Request) -> bytes:
@@ -808,7 +861,7 @@ def raw_request_target(request: Request) -> str:
     try:
         return _raw_request_target(request)
     except UnicodeDecodeError as exc:
-        raise HTTPException(status_code=400, detail="Request target is not ASCII") from exc
+        raise refusal(400, "request_target_not_ascii", "The request target is not ASCII") from exc
 
 
 def _verified_signed_payload(
@@ -833,22 +886,18 @@ def _verified_signed_payload(
             profile=RequestAuthProfile.NAAPP_V2,
         )
     except UnicodeDecodeError as exc:
-        raise HTTPException(status_code=400, detail="Request target is not ASCII") from exc
+        raise refusal(400, "request_target_not_ascii", "The request target is not ASCII") from exc
     except (ValueError, TypeError, RecursionError) as exc:
-        detail = str(exc)
-        if detail == "missing X-AWEB-Signed-Payload header":
-            detail = "Missing X-AWEB-Signed-Payload"
-        elif detail == "invalid X-AWEB-Signed-Payload header":
-            detail = "Invalid X-AWEB-Signed-Payload"
-        else:
-            detail = detail[:1].upper() + detail[1:]
-        raise HTTPException(status_code=401, detail=detail) from exc
+        # awid's verifier raises untyped errors, so every one is
+        # signed_payload_invalid and its text is only the message.
+        message = str(exc)
+        raise refusal(401, "signed_payload_invalid", message[:1].upper() + message[1:]) from exc
     canonical, payload = envelope.canonical_payload, envelope.payload
 
     try:
         verify_did_key_signature(did_key=did_key, payload=canonical, signature_b64=signature)
     except ValueError as exc:
-        raise HTTPException(status_code=401, detail="Invalid DIDKey signature") from exc
+        raise refusal(401, "signature_invalid", "The DIDKey signature is invalid") from exc
 
     return payload
 
@@ -890,11 +939,11 @@ async def authenticate_request(
         request.headers.get("X-AWEB-Timestamp") or request.headers.get("x-aweb-timestamp") or ""
     )
     if not timestamp:
-        raise HTTPException(status_code=401, detail="Missing X-AWEB-Timestamp")
+        raise refusal(401, "timestamp_missing", "X-AWEB-Timestamp is required")
     parsed_timestamp = _parse_rfc3339_utc(timestamp)
     skew = abs((now() - parsed_timestamp).total_seconds())
     if skew > min(timestamp_skew_seconds, MAX_TIMESTAMP_SKEW_SECONDS):
-        raise HTTPException(status_code=401, detail="X-AWEB-Timestamp outside allowed clock skew")
+        raise refusal(401, "timestamp_skew", "X-AWEB-Timestamp is outside the allowed clock skew")
 
     cert_header = (
         request.headers.get("X-AWID-Team-Certificate")
@@ -902,7 +951,7 @@ async def authenticate_request(
         or ""
     )
     if not cert_header:
-        raise HTTPException(status_code=401, detail="Missing X-AWID-Team-Certificate")
+        raise refusal(401, "certificate_missing", "X-AWID-Team-Certificate is required")
     team_id, certificate_id = _certificate_locator(cert_header)
 
     body = await request.body()

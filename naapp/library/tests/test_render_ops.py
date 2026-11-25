@@ -1696,9 +1696,9 @@ def test_production_config_rejects_build_paths_outside_the_repository(
         render_ops.ProductionConfig.load(path)
 
 
-def test_production_config_builds_library_from_the_aweb_repository_root() -> None:
+def test_production_config_builds_library_from_the_naapp_repository_root() -> None:
     config = render_ops.ProductionConfig.load(render_ops.APP_ROOT / "ops" / "render-production.json")
-    assert render_ops.canonical_git_repo(config.repo) == "github.com/awebai/aweb"
+    assert render_ops.canonical_git_repo(config.repo) == "github.com/awebai/naapp"
     assert config.root_dir == ""
     assert config.docker_context == "."
     assert (render_ops.REPOSITORY_ROOT / config.dockerfile_path).resolve() == render_ops.APP_ROOT / "Dockerfile"
@@ -2761,6 +2761,7 @@ def test_public_runtime_identifier_is_the_pinned_slug_not_api_display_name() -> 
         service_name="library-02jf",
         hostname="library-02jf.onrender.com",
         origin_url=production.origin_url,
+        repo="awebai/naapp",
     )
     assert (
         render_ops.verify_public_deployment_identity(observed, production) == observed["deployment"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import uuid
 from collections.abc import AsyncIterator
 from dataclasses import replace
@@ -417,6 +418,9 @@ async def test_verify_reports_conflicts_in_this_team_epoch_without_returning_ref
     assert conflict["team_seq"] == 1
     assert conflict["kind"] == "event_conflict"
     assert set(conflict) == {"fault_id", "event_id", "team_seq", "kind", "refused_sha256", "recorded_at"}
+    # The digest names the refused bytes, which the report never returns.
+    refused, _ = signed_event("core", event_id=event_id, seq=41, team_id=TEAM_ID)
+    assert conflict["refused_sha256"] == hashlib.sha256(refused).hexdigest()
     assert (await verify_epoch(db, OTHER_TEAM, 1, receipt_keys=LOGS_KEYS, checkpoint_keys=LOGS_KEYS))["conflicts"] == []
     await open_next_epoch(db, SIGNER, TEAM_ID, at=START + timedelta(hours=1))
     assert (await verify_epoch(db, TEAM_ID, 2, receipt_keys=LOGS_KEYS, checkpoint_keys=LOGS_KEYS))["conflicts"] == []

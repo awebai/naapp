@@ -11,18 +11,23 @@ Standard library only. Nothing here is imported by a naapp at runtime.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import subprocess
 import time
-from collections.abc import Callable
-from dataclasses import MISSING, dataclass, fields
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
+from dataclasses import MISSING, dataclass, field, fields
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
+from aweb_naapp.ops.evidence import HealthEvidenceRun
+from aweb_naapp.ops.evidence import _health_event as health_event
 from aweb_naapp.ops.git import run_git as _run_git
 
 API_BASE = "https://api.render.com/v1"
@@ -51,6 +56,8 @@ NOT_YET_HEALTH_STATUSES = {404, 408, 425, 429, 500, 502, 503, 504}
 # User-Agent with its browser-signature 403, which would hide a healthy service and
 # make a real outage look the same.
 HEALTH_USER_AGENT = "aweb-naapp-deploy-check/1.0"
+
+
 class OpsError(RuntimeError):
     pass
 
@@ -80,15 +87,21 @@ class ProductionConfig:
     app_id: str
     # Render's service slug, as the running deploy reports it (RENDER_SERVICE_NAME).
     service_slug: str | None = None
+    # "required": every deploy, verify and rollback writes an evidence directory.
+    evidence: str | None = None
+    # The digest of the config file's bytes, for evidence; not a config field.
+    source_sha256: str = field(default="", init=False, compare=False, repr=False)
 
     @classmethod
     def load(cls, path: Path) -> ProductionConfig:
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
+            snapshot = path.read_bytes()
+            raw = json.loads(snapshot.decode("utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise OpsError(f"invalid production config: {path}") from exc
-        required = {item.name for item in fields(cls) if item.default is MISSING}
-        optional = {item.name for item in fields(cls)} - required
+        named = [item for item in fields(cls) if item.init]
+        required = {item.name for item in named if item.default is MISSING}
+        optional = {item.name for item in named} - required
         if not isinstance(raw, dict) or not required <= set(raw) <= required | optional:
             raise OpsError(
                 f"production config must have the fields {sorted(required)}"
@@ -97,6 +110,9 @@ class ProductionConfig:
         if not all(isinstance(value, str) for value in raw.values()):
             raise OpsError("production config values must be strings")
         config = cls(**raw)
+        object.__setattr__(config, "source_sha256", hashlib.sha256(snapshot).hexdigest())
+        if config.evidence not in (None, "required"):
+            raise OpsError('production config evidence may only be "required"')
         if not SERVICE_RE.fullmatch(config.service_id):
             raise OpsError("production config has an invalid Render service ID")
         if not config.origin_url.startswith("https://") or not config.public_url.startswith(
@@ -427,22 +443,49 @@ class _NoRedirects(HTTPRedirectHandler):
         return None
 
 
-def _health_answer(url: str) -> tuple[int, bytes]:
+def _health_answer(url: str, evidence: HealthEvidenceRun | None = None) -> tuple[int, bytes]:
     request = Request(
         url, method="GET", headers={"Accept": "application/json", "User-Agent": HEALTH_USER_AGENT}
     )
+    started_wall, started_mono = datetime.now(UTC).isoformat(), time.monotonic()
+
+    def record(
+        status: int | None, headers: Any, body: bytes, phase: str, error: str | None = None
+    ) -> None:
+        if evidence is not None:
+            evidence.record(
+                health_event(
+                    url=url,
+                    user_agent=HEALTH_USER_AGENT,
+                    started_wall=started_wall,
+                    started_mono=started_mono,
+                    status=status,
+                    headers=headers,
+                    body=body[:HEALTH_BODY_LIMIT],
+                    body_complete=len(body) <= HEALTH_BODY_LIMIT,
+                    phase=phase,
+                    error_class=error,
+                )
+            )
+
     try:
         with build_opener(_NoRedirects()).open(request, timeout=HEALTH_TIMEOUT_SECONDS) as response:
-            return response.status, response.read(HEALTH_BODY_LIMIT + 1)
+            body = response.read(HEALTH_BODY_LIMIT + 1)
+            record(response.status, response.headers, body, "response")
+            return response.status, body
     except HTTPError as exc:
+        record(exc.code, exc.headers, b"", "http-error", "HTTPError")
         return exc.code, b""
     except (URLError, TimeoutError, OSError) as exc:
+        record(None, None, b"", "transport-error", type(exc).__name__)
         raise _HealthNotYet(f"health request to {url} failed: {type(exc).__name__}") from exc
 
 
-def _health_identity(config: ProductionConfig, url: str, commit: str) -> dict[str, str]:
+def _health_identity(
+    config: ProductionConfig, url: str, commit: str, evidence: HealthEvidenceRun | None
+) -> dict[str, str]:
     """The service and build ``url`` answers, when they are this deploy's."""
-    status, body = _health_answer(url)
+    status, body = _health_answer(url, evidence)
     if status in NOT_YET_HEALTH_STATUSES:
         raise _HealthNotYet(f"health at {url} answered HTTP {status}")
     if status != 200:
@@ -529,6 +572,7 @@ def verify_health_surfaces(
     retry_interval_seconds: float = HEALTH_RETRY_SECONDS,
     sleep: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    evidence: HealthEvidenceRun | None = None,
 ) -> dict[str, dict[str, str]]:
     """Wait until the origin and public health URLs both answer ``commit``'s build.
 
@@ -545,7 +589,7 @@ def verify_health_surfaces(
     while True:
         attempts += 1
         try:
-            return {url: _health_identity(config, url, commit) for url in urls}
+            return {url: _health_identity(config, url, commit, evidence) for url in urls}
         except _HealthNotYet as not_yet:
             if monotonic() + retry_interval_seconds > deadline:
                 raise OpsError(
@@ -587,6 +631,32 @@ def status(client: RenderClient, config: ProductionConfig) -> dict[str, Any]:
     }
 
 
+@contextmanager
+def _evidenced(
+    config: ProductionConfig, evidence: HealthEvidenceRun | None, stage: str
+) -> Iterator[None]:
+    """Close ``evidence`` with the stage's outcome; refuse to start without it when
+    the config requires evidence."""
+    if evidence is None:
+        if config.evidence == "required":
+            raise OpsError(f"{config.service_name} requires an evidence directory for {stage}")
+        yield
+        return
+    try:
+        yield
+    except BaseException as exc:
+        evidence.finish(
+            {
+                "probe_kind": "run-outcome",
+                "outcome": "failed",
+                "stage": stage,
+                "error_class": type(exc).__name__,
+            }
+        )
+        raise
+    evidence.finish({"probe_kind": "run-outcome", "outcome": "passed", "stage": stage})
+
+
 def deploy(
     client: RenderClient,
     config: ProductionConfig,
@@ -600,45 +670,48 @@ def deploy(
     interval_seconds: float = 10.0,
     readiness_timeout_seconds: float = HEALTH_READINESS_SECONDS,
     retry_interval_seconds: float = HEALTH_RETRY_SECONDS,
+    evidence: HealthEvidenceRun | None = None,
 ) -> dict[str, Any]:
     """Deploy ``commit``; ``rollback_commit`` is the live commit it moves forward from."""
-    require_commit(commit)
-    require_commit(rollback_commit, "rollback commit")
-    require_deploy_id(rollback_deploy_id, "rollback deploy ID")
-    validate_service(client.service(config.service_id), config)
-    live = current_live(client.deploys(config.service_id))
-    require_rollback_artifact(live, deploy_id=rollback_deploy_id, commit=rollback_commit)
-    # The rollback artifact is the live deploy, so its commit is the one to move forward from.
-    verify_git_target(
-        repo_root,
-        commit,
-        expected_repo=config.repo,
-        branch=config.branch,
-        live_commit=rollback_commit,
-        from_repository=from_repository,
-    )
-    created = client.deploy_commit(config.service_id, commit)
-    deploy_id = require_deploy_id(str(created.get("id") or ""), "created deploy ID")
-    if deploy_commit(created) != commit:
-        raise OpsError("Render created a deploy for the wrong commit")
-    finished = wait_for_deploy(
-        client,
-        config,
-        deploy_id,
-        commit,
-        timeout_seconds=timeout_seconds,
-        interval_seconds=interval_seconds,
-    )
-    require_deploy(
-        current_live(client.deploys(config.service_id)), deploy_id=deploy_id, commit=commit
-    )
-    health = verify_health_surfaces(
-        config,
-        commit,
-        readiness_timeout_seconds=readiness_timeout_seconds,
-        retry_interval_seconds=retry_interval_seconds,
-    )
-    return {"deploy": safe_deploy(finished), "rollback": safe_deploy(live), "health": health}
+    with _evidenced(config, evidence, "deploy"):
+        require_commit(commit)
+        require_commit(rollback_commit, "rollback commit")
+        require_deploy_id(rollback_deploy_id, "rollback deploy ID")
+        validate_service(client.service(config.service_id), config)
+        live = current_live(client.deploys(config.service_id))
+        require_rollback_artifact(live, deploy_id=rollback_deploy_id, commit=rollback_commit)
+        # The rollback artifact is the live deploy, so its commit is the one to move forward from.
+        verify_git_target(
+            repo_root,
+            commit,
+            expected_repo=config.repo,
+            branch=config.branch,
+            live_commit=rollback_commit,
+            from_repository=from_repository,
+        )
+        created = client.deploy_commit(config.service_id, commit)
+        deploy_id = require_deploy_id(str(created.get("id") or ""), "created deploy ID")
+        if deploy_commit(created) != commit:
+            raise OpsError("Render created a deploy for the wrong commit")
+        finished = wait_for_deploy(
+            client,
+            config,
+            deploy_id,
+            commit,
+            timeout_seconds=timeout_seconds,
+            interval_seconds=interval_seconds,
+        )
+        require_deploy(
+            current_live(client.deploys(config.service_id)), deploy_id=deploy_id, commit=commit
+        )
+        health = verify_health_surfaces(
+            config,
+            commit,
+            readiness_timeout_seconds=readiness_timeout_seconds,
+            retry_interval_seconds=retry_interval_seconds,
+            evidence=evidence,
+        )
+        return {"deploy": safe_deploy(finished), "rollback": safe_deploy(live), "health": health}
 
 
 def wait(
@@ -672,26 +745,29 @@ def verify(
     commit: str,
     readiness_timeout_seconds: float = HEALTH_READINESS_SECONDS,
     retry_interval_seconds: float = HEALTH_RETRY_SECONDS,
+    evidence: HealthEvidenceRun | None = None,
 ) -> dict[str, Any]:
     """Require the deploy to be the live artifact, and both health URLs to answer its build.
     The readiness timing is verify_health_surfaces'."""
-    require_deploy_id(deploy_id)
-    require_commit(commit)
-    validate_service(client.service(config.service_id), config)
-    artifact = client.deploy_by_id(config.service_id, deploy_id)
-    require_deploy(artifact, deploy_id=deploy_id, commit=commit)
-    require_deploy(
-        current_live(client.deploys(config.service_id)), deploy_id=deploy_id, commit=commit
-    )
-    return {
-        "deploy": safe_deploy(artifact),
-        "health": verify_health_surfaces(
-            config,
-            commit,
-            readiness_timeout_seconds=readiness_timeout_seconds,
-            retry_interval_seconds=retry_interval_seconds,
-        ),
-    }
+    with _evidenced(config, evidence, "verify"):
+        require_deploy_id(deploy_id)
+        require_commit(commit)
+        validate_service(client.service(config.service_id), config)
+        artifact = client.deploy_by_id(config.service_id, deploy_id)
+        require_deploy(artifact, deploy_id=deploy_id, commit=commit)
+        require_deploy(
+            current_live(client.deploys(config.service_id)), deploy_id=deploy_id, commit=commit
+        )
+        return {
+            "deploy": safe_deploy(artifact),
+            "health": verify_health_surfaces(
+                config,
+                commit,
+                readiness_timeout_seconds=readiness_timeout_seconds,
+                retry_interval_seconds=retry_interval_seconds,
+                evidence=evidence,
+            ),
+        }
 
 
 def rollback(
@@ -706,41 +782,44 @@ def rollback(
     interval_seconds: float = 10.0,
     readiness_timeout_seconds: float = HEALTH_READINESS_SECONDS,
     retry_interval_seconds: float = HEALTH_RETRY_SECONDS,
+    evidence: HealthEvidenceRun | None = None,
 ) -> dict[str, Any]:
     """Redeploy an earlier deploy's built artifact. There is deliberately no path that
     deploys a commit here: a commit deploy rebuilds under the current service settings."""
-    require_deploy_id(rollback_deploy_id, "rollback deploy ID")
-    require_commit(rollback_commit, "rollback commit")
-    require_deploy_id(current_deploy_id, "current live deploy ID")
-    require_commit(current_commit, "current live commit")
-    if current_deploy_id == rollback_deploy_id:
-        raise OpsError("current live deploy and rollback artifact must be different")
-    validate_service(client.service(config.service_id), config)
-    live = current_live(client.deploys(config.service_id))
-    require_deploy(live, deploy_id=current_deploy_id, commit=current_commit)
-    artifact = client.deploy_by_id(config.service_id, rollback_deploy_id)
-    require_rollback_artifact(artifact, deploy_id=rollback_deploy_id, commit=rollback_commit)
-    created = client.rollback(config.service_id, rollback_deploy_id)
-    created_id = require_deploy_id(str(created.get("id") or ""), "created rollback deploy ID")
-    if deploy_commit(created) != rollback_commit:
-        raise OpsError("Render created a rollback for the wrong commit")
-    finished = wait_for_deploy(
-        client,
-        config,
-        created_id,
-        rollback_commit,
-        timeout_seconds=timeout_seconds,
-        interval_seconds=interval_seconds,
-    )
-    require_deploy(
-        current_live(client.deploys(config.service_id)),
-        deploy_id=created_id,
-        commit=rollback_commit,
-    )
-    health = verify_health_surfaces(
-        config,
-        rollback_commit,
-        readiness_timeout_seconds=readiness_timeout_seconds,
-        retry_interval_seconds=retry_interval_seconds,
-    )
-    return {"rollback_deploy": safe_deploy(finished), "health": health}
+    with _evidenced(config, evidence, "rollback"):
+        require_deploy_id(rollback_deploy_id, "rollback deploy ID")
+        require_commit(rollback_commit, "rollback commit")
+        require_deploy_id(current_deploy_id, "current live deploy ID")
+        require_commit(current_commit, "current live commit")
+        if current_deploy_id == rollback_deploy_id:
+            raise OpsError("current live deploy and rollback artifact must be different")
+        validate_service(client.service(config.service_id), config)
+        live = current_live(client.deploys(config.service_id))
+        require_deploy(live, deploy_id=current_deploy_id, commit=current_commit)
+        artifact = client.deploy_by_id(config.service_id, rollback_deploy_id)
+        require_rollback_artifact(artifact, deploy_id=rollback_deploy_id, commit=rollback_commit)
+        created = client.rollback(config.service_id, rollback_deploy_id)
+        created_id = require_deploy_id(str(created.get("id") or ""), "created rollback deploy ID")
+        if deploy_commit(created) != rollback_commit:
+            raise OpsError("Render created a rollback for the wrong commit")
+        finished = wait_for_deploy(
+            client,
+            config,
+            created_id,
+            rollback_commit,
+            timeout_seconds=timeout_seconds,
+            interval_seconds=interval_seconds,
+        )
+        require_deploy(
+            current_live(client.deploys(config.service_id)),
+            deploy_id=created_id,
+            commit=rollback_commit,
+        )
+        health = verify_health_surfaces(
+            config,
+            rollback_commit,
+            readiness_timeout_seconds=readiness_timeout_seconds,
+            retry_interval_seconds=retry_interval_seconds,
+            evidence=evidence,
+        )
+        return {"rollback_deploy": safe_deploy(finished), "health": health}

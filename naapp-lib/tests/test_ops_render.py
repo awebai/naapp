@@ -740,6 +740,58 @@ def test_the_config_may_pin_the_render_slug(tmp_path: Path) -> None:
         ProductionConfig.load(_write_config(tmp_path, unknown="x"))
 
 
+def _evidence_run(tmp_path: Path, label: str) -> Any:
+    from aweb_naapp.ops.evidence import HealthEvidenceRun
+
+    parent = tmp_path / "evidence-parent"
+    parent.mkdir(mode=0o700, exist_ok=True)
+    parent.chmod(0o700)
+    return HealthEvidenceRun(
+        parent / label, label=label, schema="folio.health-evidence.v1",
+        repository_root=Path(__file__).resolve().parents[2], metadata={"case": label},
+    )
+
+
+def _records(run: Any) -> list[dict[str, Any]]:
+    return [json.loads(path.read_text()) for path in sorted(run.path.glob("*.json"))]
+
+
+def test_verify_records_each_health_probe_and_its_outcome(fake, tmp_path) -> None:
+    state, config, client = _ready(fake)
+    state.health_not_yet = [(503, {"status": "starting"})]
+    run = _evidence_run(tmp_path, "verify-health")
+
+    render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT, evidence=run, **FAST)
+
+    records = _records(run)
+    assert [r["probe_kind"] for r in records] == [
+        "run-manifest", "unauthenticated-health", "unauthenticated-health", "run-outcome"
+    ]
+    assert {r["schema"] for r in records} == {"folio.health-evidence.v1"}
+    assert [r["status"] for r in records[1:3]] == [503, 200]
+    assert records[2]["request_headers"]["user-agent"] == render.HEALTH_USER_AGENT
+    assert (records[-1]["outcome"], records[-1]["stage"]) == ("passed", "verify")
+
+
+def test_a_failed_verify_records_its_outcome(fake, tmp_path) -> None:
+    state, config, client = _ready(fake)
+    state.health_service = "library"
+    run = _evidence_run(tmp_path, "verify-health")
+    with pytest.raises(OpsError):
+        render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT, evidence=run, **FAST)
+    outcome = _records(run)[-1]
+    assert (outcome["probe_kind"], outcome["outcome"], outcome["stage"]) == ("run-outcome", "failed", "verify")
+    assert outcome["error_class"] == "OpsError"
+
+
+def test_a_config_that_requires_evidence_refuses_a_deploy_without_it(history) -> None:
+    state, config, client, work, live, _approved, tip = history
+    config = replace(config, evidence="required")
+    with pytest.raises(OpsError, match="evidence"):
+        _deploy(client, config, work, tip, live)
+    assert state.posts() == []
+
+
 def test_wait_stops_on_a_failed_build(fake) -> None:
     state, config, client = _ready(fake)
     state.deploys.insert(0, {"id": "dep-failed01", "status": "build_failed", "commit": {"id": "c" * 40}})
@@ -773,7 +825,7 @@ def _cli(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedP
     clean = {
         key: value
         for key, value in os.environ.items()
-        if key not in {"APPLY", "CONFIRM_SERVICE_ID", "FROM_REPOSITORY", "CONFIRM_FROM_REPOSITORY"}
+        if key not in {"APPLY", "CONFIRM_SERVICE_ID", "FROM_REPOSITORY", "CONFIRM_FROM_REPOSITORY", "PROD_EVIDENCE_DIR"}
     }
     clean.update(env or {})
     return subprocess.run(
@@ -804,6 +856,20 @@ def test_cli_public_identity_reads_no_render_key(tmp_path: Path) -> None:
     result = _cli("--config", str(config), "--env-file", str(tmp_path / "absent"), "public-identity")
     assert result.returncode == 2
     assert "public identity" in result.stderr or "health request" in result.stderr
+    assert "Render env file" not in result.stderr
+
+
+@pytest.mark.parametrize("evidence_dir", ["", "relative/evidence"])
+def test_cli_refuses_a_required_evidence_directory_before_reading_any_key(
+    tmp_path: Path, evidence_dir: str
+) -> None:
+    result = _cli(
+        "--config", str(_write_config(tmp_path, evidence="required")),
+        "--env-file", str(tmp_path / "absent"), "verify",
+        env={"PROD_EVIDENCE_DIR": evidence_dir, "PROD_DEPLOY_ID": LIVE_DEPLOY, "PROD_COMMIT": LIVE_COMMIT},
+    )
+    assert result.returncode == 2
+    assert "evidence" in result.stderr
     assert "Render env file" not in result.stderr
 
 

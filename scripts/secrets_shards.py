@@ -2,6 +2,7 @@
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -75,10 +76,28 @@ def pytest_collection_finish(session):
         json.dumps({'nodes': nodes, 'modules': sorted(modules)}, indent=2) + '\n')
 
 
+def junit_environment(environ, run):
+    """``environ`` with PYTEST_ADDOPTS's --junitxml report named after ``run`` (shard-1,
+    shard-2), so parallel shards never write the same file, or removed for a
+    collection-only run (``run`` None)."""
+    options = shlex.split(environ.get('PYTEST_ADDOPTS', ''))
+    if not any(option.startswith('--junitxml=') for option in options):
+        return environ
+    rewritten = []
+    for option in options:
+        if option.startswith('--junitxml='):
+            if run is None:
+                continue
+            report = Path(option.removeprefix('--junitxml='))
+            option = f'--junitxml={report.with_name(f"{report.stem}-{run}{report.suffix}")}'
+        rewritten.append(option)
+    return dict(environ, PYTEST_ADDOPTS=shlex.join(rewritten))
+
+
 def collect(package, modules, evidence, name, command, environ):
     receipt = evidence / f'{name}.json'
     receipt.unlink(missing_ok=True)
-    env = dict(environ, AWEB_COLLECTION_RECEIPT=str(receipt))
+    env = dict(junit_environment(environ, None), AWEB_COLLECTION_RECEIPT=str(receipt))
     env['PYTHONPATH'] = os.pathsep.join(filter(None, [
         str(Path(__file__).resolve().parent), env.get('PYTHONPATH')]))
     args = [*command, '--collect-only', '-p', 'secrets_shards',
@@ -153,7 +172,8 @@ def run_shards(package, shards, environments, evidence, command):
         with log.open('w') as output:
             try:
                 status = subprocess.run(
-                    args, cwd=package, env=env, stdout=output, stderr=subprocess.STDOUT,
+                    args, cwd=package, env=junit_environment(env, f'shard-{index}'),
+                    stdout=output, stderr=subprocess.STDOUT,
                 ).returncode
             except OSError as error:
                 output.write(str(error) + '\n')

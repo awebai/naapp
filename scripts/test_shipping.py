@@ -258,6 +258,18 @@ class OciLaneContractTest(unittest.TestCase):
             workflow,
         )
 
+    def test_an_image_tag_dispatches_to_its_image_publisher_only(self):
+        root = repository(self)
+        command(root, "git", "tag", "-a", "logs-v0.1.0", "-m", "tagged")
+        published: list[tuple[str, str]] = []
+        with patch.object(PUBLISH, "publish_oci", lambda _root, prefix, version, *_a, **_kw:
+                          published.append((prefix, version))), \
+                patch.object(PUBLISH, "publish_pypi", lambda *_a, **_kw: self.fail("no PyPI lane")):
+            PUBLISH.publish(root, "logs-v0.1.0", only="oci")
+        self.assertEqual(published, [("logs-v", "0.1.0")])
+        with self.assertRaisesRegex(PUBLISH.PublishRefusal, "does not publish to pypi"):
+            PUBLISH.publish(root, "logs-v0.1.0", only="pypi")
+
     def test_each_image_builds_its_app_dockerfile_from_the_repository_root(self):
         for prefix, app in (("secrets-v", "secrets"), ("logs-v", "logs"),
                             ("folio-v", "folio"), ("library-v", "library")):

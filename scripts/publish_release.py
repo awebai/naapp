@@ -347,7 +347,7 @@ def publish(root: Path, tag: str, *, only: str | None = None, recovery: bool = F
     prefix, version, source_sha = tag_identity(root, tag)
     if only is not None and not (
         (only == "pypi" and prefix in PYPI_LANES)
-        or (only == "oci" and prefix in OCI_REPOSITORIES)
+        or (only == "oci" and prefix in OCI_APPS)
     ):
         raise PublishRefusal(f"{tag} does not publish to {only}")
     with tempfile.TemporaryDirectory(prefix="aweb-publish-") as temporary:
@@ -356,7 +356,7 @@ def publish(root: Path, tag: str, *, only: str | None = None, recovery: bool = F
         try:
             if prefix in PYPI_LANES and only != "oci":
                 publish_pypi(checkout, prefix, version)
-            if prefix in OCI_REPOSITORIES and only != "pypi":
+            if prefix in OCI_APPS and only != "pypi":
                 publish_oci(checkout, prefix, version, source_sha, recovery=recovery,
                             first_publication=first_publication)
         finally:

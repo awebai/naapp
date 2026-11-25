@@ -19,7 +19,7 @@ AW_DIR ?= $(abspath .tools/bin)
 SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_served_manifest_digests \
 	test_secrets_shards test_shipping
 
-.PHONY: affected sync lint test test-scripts production-awid-sync browsers renderer-deps test-renderer aw \
+.PHONY: affected sync lint test test-scripts production-awid-sync browsers renderer-deps test-renderer image-smoke-folio aw \
 	check-library-aatk check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets release-checks \
 	release-candidate release-publish
 
@@ -94,6 +94,10 @@ renderer-deps:
 # The page renderer's own tests (Node, then Playwright against the gallery).
 test-renderer:
 	cd naapp-lib/renderer && $(TEST_EGRESS_RUNNER) npm test
+
+# Folio's service image, built as the release builds it, starts and serves /live.
+image-smoke-folio:
+	bash scripts/image-smoke.sh folio
 
 aw:
 	scripts/install-aw.sh $(AW_DIR)

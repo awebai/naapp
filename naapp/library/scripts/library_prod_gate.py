@@ -29,10 +29,6 @@ from urllib.parse import urlsplit
 RUNTIMES = ("claude-code", "pi")
 REQUIRED_PUBLIC_URL = "https://library.aweb.ai"
 REQUIRED_ORIGIN_URL = "https://library-02jf.onrender.com"
-REQUIRED_INCUMBENT_SERVICE_ID = "srv-d8qm4jvavr4c73dhrmgg"
-REQUIRED_INCUMBENT_DEPLOY_ID = "dep-d9koecdbedkc73b582vg"
-REQUIRED_INCUMBENT_COMMIT = "3376af7ee4a571488441794047018af94b06057f"
-REQUIRED_INCUMBENT_SHAPE = "library-materialize.pre-aasb.no-runtime-managed"
 # Paths are selected only by the explicit private tool root; artifact hashes remain reviewed.
 REQUIRED_AW_PATH = Path("/unconfigured-library-tools/aw/package/bin/aw")
 REQUIRED_AW_SHA256 = "5530d448f06a6079d5f713e7743b1c7ccf5c70d8c5bbf6e154f58d8ae3931949"
@@ -59,7 +55,7 @@ PROMPT = (
 
 # Stable child predicates evaluated by the functional half of `make prod-verify`.
 # They are intentionally finer grained than command names so a composite command
-# cannot conceal an unproved child check in AATK's coverage manifest.
+# cannot conceal an unproved child check.
 POSTDEPLOY_PREDICATES = frozenset(
     {
         "gate.source-home.absolute",
@@ -95,291 +91,9 @@ POSTDEPLOY_PREDICATES = frozenset(
         "harness.pi.instructions",
     }
 )
-CANDIDATE_ONLY_POSTDEPLOY_PREDICATES = frozenset(
-    {
-        "materialize.runtime-kind.claude-code",
-        "materialize.runtime-kind.pi",
-        "materialize.managed-set.claude-code",
-        "materialize.managed-set.pi",
-        "strict-client.claude-code.materialize",
-        "strict-client.pi.materialize",
-        "strict-client.claude-code.profile-pin",
-        "strict-client.pi.profile-pin",
-        "strict-client.claude-code.runtime-kind",
-        "strict-client.pi.runtime-kind",
-        "strict-client.claude-code.managed-set",
-        "strict-client.pi.managed-set",
-        "strict-client.claude-code.managed-paths",
-        "strict-client.pi.managed-paths",
-        "harness.claude-code.command",
-        "harness.pi.command",
-        "harness.claude-code.instructions",
-        "harness.pi.instructions",
-    }
-)
-
-
-AATK_CAPABILITY_OBLIGATIONS = (
-    "runtime.path-fidelity",
-    "safety.boundary-invocation",
-    "controls.executed-same-path",
-)
-AATK_PREDICATE_COVERAGE = {
-    "client.aw.artifact-sha": ("release-infrastructure", "deferred"),
-    "client.aw.version-metadata": ("release-infrastructure", "deferred"),
-    "gate.profile-pin.arguments": ("release-infrastructure", "deferred"),
-    "gate.public-url.exact": ("release-infrastructure", "deferred"),
-    "gate.source-home.absolute": ("release-infrastructure", "deferred"),
-    "harness.claude-code.artifact": ("release-infrastructure", "deferred"),
-    "harness.claude-code.command": ("release-infrastructure", "deferred"),
-    "harness.claude-code.instructions": ("release-infrastructure", "deferred"),
-    "harness.pi.artifacts": ("release-infrastructure", "deferred"),
-    "harness.pi.command": ("release-infrastructure", "deferred"),
-    "harness.pi.instructions": ("release-infrastructure", "deferred"),
-    "materialize.managed-set.claude-code": ("library-service", "deferred"),
-    "materialize.managed-set.pi": ("library-service", "deferred"),
-    "materialize.profile-pin.claude-code": ("library-service", "deferred"),
-    "materialize.profile-pin.pi": ("library-service", "deferred"),
-    "materialize.public.claude-code.http-200": ("library-service", "deferred"),
-    "materialize.public.pi.http-200": ("library-service", "deferred"),
-    "materialize.response-contract.claude-code": ("library-service", "deferred"),
-    "materialize.response-contract.pi": ("library-service", "deferred"),
-    "materialize.runtime-kind.claude-code": ("library-service", "deferred"),
-    "materialize.runtime-kind.pi": ("library-service", "deferred"),
-    "strict-client.claude-code.managed-paths": ("library-service", "deferred"),
-    "strict-client.claude-code.managed-set": ("library-service", "deferred"),
-    "strict-client.claude-code.materialize": ("library-service", "deferred"),
-    "strict-client.claude-code.profile-pin": ("library-service", "deferred"),
-    "strict-client.claude-code.runtime-kind": ("library-service", "deferred"),
-    "strict-client.pi.managed-paths": ("library-service", "deferred"),
-    "strict-client.pi.managed-set": ("library-service", "deferred"),
-    "strict-client.pi.materialize": ("library-service", "deferred"),
-    "strict-client.pi.profile-pin": ("library-service", "deferred"),
-    "strict-client.pi.runtime-kind": ("library-service", "deferred"),
-}
-
-
 def postdeploy_predicate_inventory() -> list[str]:
     """Return stable child IDs emitted by the candidate postdeploy executor."""
     return sorted(POSTDEPLOY_PREDICATES)
-
-
-_CURRENT_INCUMBENT_PATH_PREFIX = (
-    "make.prod-gate-current-incumbent",
-    "library-prod-gate.current-incumbent",
-)
-CURRENT_INCUMBENT_PREDICATE_PATHS: dict[str, tuple[str, ...]] = {}
-for _runtime in RUNTIMES:
-    _origin_component = f"library-prod-gate.materialize.origin.{_runtime}"
-    _public_component = f"library-prod-gate.materialize.public.{_runtime}"
-    for _predicate in (
-        f"origin-route.{_runtime}.dns-public-disjoint",
-        f"origin-route.{_runtime}.ambient-proxy-isolated",
-        f"origin-route.{_runtime}.no-post-start-dns",
-        f"origin-route.{_runtime}.kernel-peer-selected",
-        f"origin-route.{_runtime}.canonical-authority",
-        f"materialize.origin.{_runtime}.http-200",
-        f"materialize.origin.response-contract.{_runtime}",
-    ):
-        CURRENT_INCUMBENT_PREDICATE_PATHS[_predicate] = (
-            *_CURRENT_INCUMBENT_PATH_PREFIX,
-            "library-prod-gate.origin-route",
-            _origin_component,
-            _predicate,
-        )
-    for _predicate in (
-        f"materialize.public.{_runtime}.http-200",
-        f"materialize.response-contract.{_runtime}",
-        f"materialize.profile-pin.{_runtime}",
-    ):
-        CURRENT_INCUMBENT_PREDICATE_PATHS[_predicate] = (
-            *_CURRENT_INCUMBENT_PATH_PREFIX,
-            _public_component,
-            _predicate,
-        )
-    _continuation_predicate = f"materialize.public-continuation.{_runtime}.fatal"
-    CURRENT_INCUMBENT_PREDICATE_PATHS[_continuation_predicate] = (
-        *_CURRENT_INCUMBENT_PATH_PREFIX,
-        "library-prod-gate.origin-route",
-        _origin_component,
-        _public_component,
-        _continuation_predicate,
-    )
-CURRENT_INCUMBENT_PREDICATES = frozenset(CURRENT_INCUMBENT_PREDICATE_PATHS)
-CURRENT_INCUMBENT_IDENTICAL_PREDICATES = frozenset(
-    {f"materialize.public.{runtime}.http-200" for runtime in RUNTIMES}
-    | {f"materialize.profile-pin.{runtime}" for runtime in RUNTIMES}
-)
-CANDIDATE_SEMANTIC_PREDICATES = frozenset(
-    CURRENT_INCUMBENT_IDENTICAL_PREDICATES
-    | {f"materialize.response-contract.{runtime}" for runtime in RUNTIMES}
-)
-CURRENT_INCUMBENT_RESPONSE_CONTRACT_PREDICATES = frozenset(
-    {f"materialize.origin.response-contract.{runtime}" for runtime in RUNTIMES}
-    | {f"materialize.response-contract.{runtime}" for runtime in RUNTIMES}
-)
-CURRENT_INCUMBENT_BASE_BLOCKERS = (
-    "controls.executed-same-path",
-    "execution.capability-obligation",
-    "orchestrator.falsification",
-    "runtime.path-fidelity",
-    "safety.boundary-invocation",
-)
-
-
-def current_incumbent_predicate_inventory() -> list[str]:
-    """Return source-owned current-incumbent predicate IDs."""
-    return sorted(CURRENT_INCUMBENT_PREDICATES)
-
-
-def candidate_semantic_predicate_inventory() -> list[str]:
-    """Return candidate predicates with source semantic descriptors."""
-    return sorted(CANDIDATE_SEMANTIC_PREDICATES)
-
-
-def current_incumbent_predicate_paths() -> dict[str, list[str]]:
-    """Return each current-incumbent predicate's exact ordered executor path."""
-    return {
-        predicate: list(CURRENT_INCUMBENT_PREDICATE_PATHS[predicate])
-        for predicate in current_incumbent_predicate_inventory()
-    }
-
-
-def _current_incumbent_owner(predicate_id: str) -> str:
-    if predicate_id.startswith("origin-route.") or predicate_id.startswith(
-        "materialize.public-continuation."
-    ):
-        return "release-infrastructure"
-    return "library-service"
-
-
-def _current_incumbent_mapping(predicate_id: str) -> dict[str, Any]:
-    if predicate_id in CURRENT_INCUMBENT_IDENTICAL_PREDICATES:
-        return {"state": "identical", "candidate_predicate_id": predicate_id}
-    blockers = list(CURRENT_INCUMBENT_BASE_BLOCKERS)
-    if predicate_id in CURRENT_INCUMBENT_RESPONSE_CONTRACT_PREDICATES:
-        blockers.append("candidate-only.runtime-proof")
-    return {"state": "deferred", "blocked_obligation_ids": sorted(blockers)}
-
-
-def _semantic_descriptor(
-    domain: str,
-    predicate_id: str,
-    runtime: str,
-    surface: str,
-    assertion: str,
-) -> dict[str, str]:
-    return {
-        "domain": domain,
-        "id": predicate_id,
-        "runtime": runtime,
-        "surface": surface,
-        "assertion": assertion,
-    }
-
-
-def aatk_semantic_descriptors() -> list[dict[str, str]]:
-    """Return source semantics used to prove exact cross-domain identities."""
-    rows: list[dict[str, str]] = []
-    for runtime in RUNTIMES:
-        shared = {
-            f"materialize.public.{runtime}.http-200": "exact-http-200",
-            f"materialize.profile-pin.{runtime}": "exact-profile-pin",
-        }
-        for predicate_id, assertion in shared.items():
-            for domain in ("candidate-postdeploy", "current-incumbent"):
-                rows.append(
-                    _semantic_descriptor(
-                        domain, predicate_id, runtime, "canonical-public", assertion
-                    )
-                )
-        response_id = f"materialize.response-contract.{runtime}"
-        rows.append(
-            _semantic_descriptor(
-                "candidate-postdeploy",
-                response_id,
-                runtime,
-                "canonical-public",
-                "strict-candidate-response-shape",
-            )
-        )
-        rows.append(
-            _semantic_descriptor(
-                "current-incumbent",
-                response_id,
-                runtime,
-                "canonical-public",
-                "legacy-incumbent-response-shape",
-            )
-        )
-        current_descriptors = {
-            f"origin-route.{runtime}.dns-public-disjoint": (
-                "generated-origin",
-                "numeric-origin-public-disjoint",
-            ),
-            f"origin-route.{runtime}.ambient-proxy-isolated": (
-                "generated-origin",
-                "ambient-proxy-isolated",
-            ),
-            f"origin-route.{runtime}.no-post-start-dns": (
-                "generated-origin",
-                "startup-only-dns",
-            ),
-            f"origin-route.{runtime}.kernel-peer-selected": (
-                "generated-origin",
-                "kernel-peer-equals-selected",
-            ),
-            f"origin-route.{runtime}.canonical-authority": (
-                "generated-origin",
-                "canonical-security-authority",
-            ),
-            f"materialize.origin.{runtime}.http-200": (
-                "generated-origin",
-                "exact-http-200",
-            ),
-            f"materialize.origin.response-contract.{runtime}": (
-                "generated-origin",
-                "legacy-incumbent-response-shape",
-            ),
-            f"materialize.public-continuation.{runtime}.fatal": (
-                "generated-origin-and-canonical-public",
-                "mandatory-public-continuation",
-            ),
-        }
-        rows.extend(
-            _semantic_descriptor(
-                "current-incumbent", predicate_id, runtime, surface, assertion
-            )
-            for predicate_id, (surface, assertion) in current_descriptors.items()
-        )
-    return sorted(rows, key=lambda row: (row["domain"], row["id"]))
-
-
-def aatk_predicate_coverage() -> list[dict[str, Any]]:
-    """Return source-owned per-obligation capability coverage for this executor."""
-    candidate_rows = [
-        {
-            "domain": "candidate-postdeploy",
-            "id": predicate_id,
-            "owner": owner,
-            "candidate_mapping": {"state": "self"},
-            "obligations": {obligation: state for obligation in AATK_CAPABILITY_OBLIGATIONS},
-        }
-        for predicate_id, (owner, state) in sorted(AATK_PREDICATE_COVERAGE.items())
-    ]
-    current_rows = [
-        {
-            "domain": "current-incumbent",
-            "id": predicate_id,
-            "owner": _current_incumbent_owner(predicate_id),
-            "candidate_mapping": _current_incumbent_mapping(predicate_id),
-            "obligations": {
-                obligation: "deferred" for obligation in AATK_CAPABILITY_OBLIGATIONS
-            },
-        }
-        for predicate_id in current_incumbent_predicate_inventory()
-    ]
-    return candidate_rows + current_rows
 
 
 class GateError(RuntimeError):
@@ -1205,105 +919,6 @@ def run_candidate(args: argparse.Namespace, root: Path) -> list[dict[str, Any]]:
     return summaries
 
 
-def validate_current_incumbent_identity(args: argparse.Namespace) -> dict[str, str]:
-    expected = {
-        "incumbent_service_id": REQUIRED_INCUMBENT_SERVICE_ID,
-        "incumbent_deploy_id": REQUIRED_INCUMBENT_DEPLOY_ID,
-        "incumbent_commit": REQUIRED_INCUMBENT_COMMIT,
-    }
-    for field, required in expected.items():
-        if str(getattr(args, field, "") or "").strip() != required:
-            label = field.replace("_", "-")
-            raise GateError(f"current-incumbent {label} must be exactly {required}")
-    return {
-        "gate": "current-incumbent-identity",
-        "service_id": REQUIRED_INCUMBENT_SERVICE_ID,
-        "deploy_id": REQUIRED_INCUMBENT_DEPLOY_ID,
-        "commit": REQUIRED_INCUMBENT_COMMIT,
-        "shape": REQUIRED_INCUMBENT_SHAPE,
-    }
-
-
-def _current_incumbent_origin_predicates(runtime: str) -> list[str]:
-    return sorted(
-        predicate
-        for predicate in CURRENT_INCUMBENT_PREDICATES
-        if predicate.startswith(f"origin-route.{runtime}.")
-        or predicate in {
-            f"materialize.origin.{runtime}.http-200",
-            f"materialize.origin.response-contract.{runtime}",
-        }
-    )
-
-
-def _current_incumbent_public_predicates(runtime: str) -> list[str]:
-    return sorted(
-        {
-            f"materialize.public.{runtime}.http-200",
-            f"materialize.response-contract.{runtime}",
-            f"materialize.profile-pin.{runtime}",
-            f"materialize.public-continuation.{runtime}.fatal",
-        }
-    )
-
-
-def run_current_incumbent(args: argparse.Namespace, root: Path) -> list[dict[str, Any]]:
-    summaries: list[dict[str, Any]] = [validate_current_incumbent_identity(args)]
-    for runtime in RUNTIMES:
-        with OriginConnectTunnel(
-            canonical_url=args.public_url, origin_url=args.origin_url
-        ) as origin_tunnel:
-            payload = raw_materialize(
-                REQUIRED_AW_PATH,
-                args.source_home,
-                args.public_url,
-                runtime,
-                root,
-                profile_ref=args.expected_profile_ref,
-                origin_tunnel=origin_tunnel,
-            )
-            summary = validate_recovery_payload(
-                payload,
-                runtime,
-                expected_ref=args.expected_profile_ref,
-                expected_version=args.expected_profile_version,
-                expected_digest=args.expected_profile_digest,
-            )
-            summary["gate"] = "raw-current-incumbent-origin"
-            summary["transport_route"] = "generated-origin-direct"
-            summary["transport_peer_ip"] = origin_tunnel.peer_ip
-            summary["predicate_ids"] = _current_incumbent_origin_predicates(runtime)
-            summaries.append(summary)
-    for runtime in RUNTIMES:
-        payload = raw_materialize(
-            REQUIRED_AW_PATH,
-            args.source_home,
-            args.public_url,
-            runtime,
-            root,
-            profile_ref=args.expected_profile_ref,
-        )
-        summary = validate_recovery_payload(
-            payload,
-            runtime,
-            expected_ref=args.expected_profile_ref,
-            expected_version=args.expected_profile_version,
-            expected_digest=args.expected_profile_digest,
-        )
-        summary["gate"] = "raw-current-incumbent-public"
-        summary["predicate_ids"] = _current_incumbent_public_predicates(runtime)
-        summaries.append(summary)
-    summaries.append(
-        {
-            "gate": "current-incumbent-predicate-inventory",
-            "predicate_paths": current_incumbent_predicate_paths(),
-        }
-    )
-    for summary in summaries:
-        summary["output_class"] = "current-incumbent-debug"
-    return summaries
-
-
 def run_recovery(args: argparse.Namespace, root: Path) -> list[dict[str, Any]]:
     summaries: list[dict[str, Any]] = []
     for runtime in RUNTIMES:
@@ -1352,7 +967,7 @@ def parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "mode",
-        choices=("candidate", "shelf-pin", "legacy-aasb", "current-incumbent", "runtime-managed-0c490a362"),
+        choices=("candidate", "shelf-pin", "legacy-aasb", "runtime-managed-0c490a362"),
     )
     p.add_argument(
         "--expected-profile-ref",
@@ -1365,18 +980,6 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--source-home", type=Path, default=Path(source_home) if source_home else None)
     p.add_argument("--public-url", default=REQUIRED_PUBLIC_URL)
     p.add_argument("--origin-url", default=REQUIRED_ORIGIN_URL)
-    p.add_argument(
-        "--incumbent-service-id",
-        default=os.environ.get("INCUMBENT_SERVICE_ID", ""),
-    )
-    p.add_argument(
-        "--incumbent-deploy-id",
-        default=os.environ.get("INCUMBENT_DEPLOY_ID", ""),
-    )
-    p.add_argument(
-        "--incumbent-commit",
-        default=os.environ.get("INCUMBENT_COMMIT", ""),
-    )
     p.add_argument(
         "--expected-profile-version",
         default=os.environ.get("EXPECTED_PROFILE_VERSION", ""),
@@ -1431,8 +1034,6 @@ def main() -> int:
             raise GateError(
                 "EXPECTED_PROFILE_DIGEST/--expected-profile-digest must be sha256-pinned"
             )
-        if args.mode == "current-incumbent":
-            validate_current_incumbent_identity(args)
         configure_tools(args.tools_root)
         verify_released_aw(REQUIRED_AW_PATH)
         if args.mode in {"candidate", "runtime-managed-0c490a362"}:
@@ -1463,8 +1064,6 @@ def main() -> int:
                 summaries = run_candidate(args, root)
             elif args.mode == "runtime-managed-0c490a362":
                 summaries = run_runtime_managed_recovery(args, root)
-            elif args.mode == "current-incumbent":
-                summaries = run_current_incumbent(args, root)
             else:
                 summaries = run_recovery(args, root)
         for summary in summaries:

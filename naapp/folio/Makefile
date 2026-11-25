@@ -5,6 +5,8 @@ API_PORT ?= 8765
 # The e2e stack's compose project; a gate passes its own with the NAAPP_E2E_* ports.
 export NAAPP_E2E_PROJECT ?= folio-e2e
 PROD_CONFIG ?= ops/render-production.json
+# The tool reads its config path from the environment, never from the recipe text.
+export PROD_CONFIG
 # A local .env configures the dev server only when it exists; Folio itself reads
 # no .env file.
 LOCAL_ENV_FILE := $(if $(wildcard .env),--env-file .env)
@@ -56,16 +58,16 @@ api-stop:
 # PROD_COMMIT, PROD_DEPLOY_ID, ROLLBACK_DEPLOY_ID, ROLLBACK_COMMIT,
 # CURRENT_DEPLOY_ID, CURRENT_COMMIT, RENDER_ENV_FILE.
 prod-status:
-	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) status
+	uv run python -m aweb_naapp.ops status
 
 prod-deploy:
-	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) deploy --repo-root ../..
+	uv run python -m aweb_naapp.ops deploy --repo-root ../..
 
 prod-wait:
-	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) wait
+	uv run python -m aweb_naapp.ops wait
 
 prod-verify:
-	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) verify
+	uv run python -m aweb_naapp.ops verify
 
 prod-rollback:
-	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) rollback
+	uv run python -m aweb_naapp.ops rollback

@@ -20,7 +20,7 @@ SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_serv
 	test_secrets_shards test_shipping
 
 .PHONY: affected sync lint lint-scripts test test-scripts production-awid-sync browsers renderer-deps test-renderer image-smoke-folio image-smoke-library check-library-dev aw \
-	check-library-aatk check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets release-checks \
+	check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets release-checks \
 	release-candidate release-publish
 
 # The packages the change from BASE to HEAD affects, as a JSON list.
@@ -116,9 +116,6 @@ check-library-dev:
 aw:
 	scripts/install-aw.sh $(AW_DIR)
 
-check-library-aatk:
-	$(MAKE) -C naapp/library aatk-spec-check
-
 # The real-stack journeys. They start Docker containers.
 e2e-folio:
 	PATH="$(AW_DIR):$$PATH" bash scripts/check-naapp-e2e-aw.sh
@@ -143,7 +140,6 @@ release-checks:
 	$(MAKE) lint PACKAGES="$(ALL_PACKAGES)"
 	$(MAKE) lint-scripts
 	$(MAKE) test-scripts
-	$(MAKE) check-library-aatk
 	$(MAKE) check-secrets-shards
 	$(MAKE) test PACKAGES="$(ALL_PACKAGES)"
 	$(MAKE) aw

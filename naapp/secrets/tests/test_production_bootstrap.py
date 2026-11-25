@@ -62,7 +62,7 @@ async def envelopes(db, team_id):
 
 
 @pytest.fixture
-async def root(test_db_factory, registry, tmp_path, request, monkeypatch):
+async def root(production_database, authority_database, registry, tmp_path, request, monkeypatch):
     member = Member(team_id="root:example.com", member_key=member_key("alice"))
     options = getattr(request, "param", {})
 
@@ -76,9 +76,9 @@ async def root(test_db_factory, registry, tmp_path, request, monkeypatch):
 
     private = options.get("private_team", False)
     async with authority(
-        test_db_factory, registry, member, visibility="private" if private else "public"
+        authority_database, registry, member, visibility="private" if private else "public"
     ) as (aweb_db, transport):
-        database = await test_db_factory.create_db(suffix="production_bootstrap")
+        database = production_database
         with SmtpServer(tmp_path / "smtp") as smtp:
             configured = settings(database, tmp_path, smtp).model_copy(
                 update={
@@ -323,7 +323,9 @@ async def test_a_canonical_component_holder_logs_into_the_production_console(roo
             while any(dns.queries[query] == 0 for query in expected_queries):
                 await asyncio.sleep(0.01)
     except TimeoutError:
-        pytest.fail(f"Expected DNS queries {expected_queries!r} within 5s. Observed {dict(dns.queries)!r}")
+        pytest.fail(
+            f"Expected DNS queries {expected_queries!r} within 5s. Observed {dict(dns.queries)!r}"
+        )
 
 
 async def test_the_production_console_serves_the_access_view_only_to_its_current_owner(root):

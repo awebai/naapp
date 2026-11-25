@@ -94,8 +94,14 @@ async def member(registry) -> Member:
 
 
 @pytest.fixture
-async def database_url(test_db_factory) -> str:
-    database = await test_db_factory.create_db(suffix="secrets_app")
+async def database_url(clone_database, app_template) -> str:
+    database = await clone_database(app_template, suffix="secrets_app")
+    return database.config.get_dsn()
+
+
+@pytest.fixture
+async def fresh_database_url(test_db_factory) -> str:
+    database = await test_db_factory.create_db(suffix="secrets_app_fresh")
     return database.config.get_dsn()
 
 
@@ -154,8 +160,8 @@ async def running(
                 yield Running(service, api, console)
 
 
-async def test_the_database_holds_every_table_admission_reads(registry, database_url) -> None:
-    async with running(registry, database_url, grants=InstalledTeams({})) as running_app:
+async def test_the_database_holds_every_table_admission_reads(registry, fresh_database_url) -> None:
+    async with running(registry, fresh_database_url, grants=InstalledTeams({})) as running_app:
         db = running_app.service.runtime.db()
         for table in (
             "secrets",
@@ -196,13 +202,13 @@ async def _rate_bucket_shape(db: AsyncDatabaseManager) -> tuple[list[dict], list
 
 
 async def test_startup_has_exactly_the_shared_rate_bucket_shape(
-    registry, database_url, test_db_factory
+    registry, fresh_database_url, test_db_factory
 ) -> None:
     reference = await test_db_factory.create_db(suffix="shared_rate_bucket_shape")
     await apply_ratelimit_migrations(reference)
     expected = await _rate_bucket_shape(reference)
     assert expected[0]
-    async with running(registry, database_url, grants=InstalledTeams({})) as app:
+    async with running(registry, fresh_database_url, grants=InstalledTeams({})) as app:
         assert await _rate_bucket_shape(app.service.runtime.db()) == expected
 
 

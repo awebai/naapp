@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import os
 import socket
-from collections.abc import AsyncIterator
 
 import boto3
 import pytest
@@ -19,21 +18,12 @@ from aweb_secrets.custody import (
     CustodyUnavailable,
     LocalKeyFileProvider,
     SealContext,
-    apply_custody_migrations,
     seal_canary,
 )
-from tests.custody.conftest import initial_record, record_tables, value_bytes, write_key_file
+from tests.custody.conftest import initial_record, value_bytes, write_key_file
 
 INSTALLATION = "installation-1"
 TEAM = "team-1"
-
-
-@pytest.fixture
-async def db(test_db_factory) -> AsyncIterator[AsyncDatabaseManager]:
-    database = await test_db_factory.create_db(suffix="secrets_custody_lifecycle")
-    await record_tables(database)
-    await apply_custody_migrations(database)
-    yield database
 
 
 @pytest.fixture

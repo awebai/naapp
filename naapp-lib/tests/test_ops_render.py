@@ -537,6 +537,47 @@ def test_rollback_redeploys_the_earlier_artifact_and_never_rebuilds_a_commit(fak
     assert result["rollback_deploy"]["status"] == "live"
 
 
+@pytest.mark.parametrize(
+    "artifact",
+    [
+        # The Library recovery target 0c490a3627: built under the service's earlier
+        # settings (rootDir naapp/library), and it reports its build.
+        "built under earlier service settings",
+        # Library's aweb-built ca76b9c8 after the service moved to naapp: its commit
+        # is in no repository the config names.
+        "built from the previous repository",
+    ],
+)
+def test_rollback_to_an_older_artifact_reads_no_git(fake, tmp_path, monkeypatch, artifact) -> None:
+    state, config, client = _ready(fake)
+    config = replace(config, repo="https://github.com/awebai/naapp")
+    state.service["repo"] = config.repo
+    # Rollback redeploys a built artifact: no git, no checkout, no legacy path.
+    monkeypatch.setenv("PATH", str(tmp_path / "no-git-here"))
+    monkeypatch.chdir(tmp_path)
+
+    result = render.rollback(
+        client, config, rollback_deploy_id=EARLIER_DEPLOY, rollback_commit=EARLIER_COMMIT,
+        current_deploy_id=LIVE_DEPLOY, current_commit=LIVE_COMMIT,
+        timeout_seconds=10, interval_seconds=0, **FAST,
+    )
+
+    assert state.posts() == [(f"/v1/services/{SERVICE_ID}/rollback", {"deployId": EARLIER_DEPLOY})]
+    assert result["health"][config.origin_url + "/health"]["git_sha"] == EARLIER_COMMIT
+
+
+def test_rollback_to_an_artifact_that_reports_no_build_is_refused(fake) -> None:
+    # The one case the retired legacy bridge accepted: a pre-build-identity artifact.
+    state, config, client = _ready(fake)
+    state.health_not_yet = [(200, {"status": "ok", "service": "folio"})] * 1000
+    with pytest.raises(OpsError, match="no build identity"):
+        render.rollback(
+            client, config, rollback_deploy_id=EARLIER_DEPLOY, rollback_commit=EARLIER_COMMIT,
+            current_deploy_id=LIVE_DEPLOY, current_commit=LIVE_COMMIT,
+            timeout_seconds=10, interval_seconds=0, **FAST,
+        )
+
+
 def test_rollback_cannot_be_asked_to_deploy_a_commit(fake) -> None:
     state, config, client = _ready(fake)
     with pytest.raises(OpsError, match="deploy ID"):

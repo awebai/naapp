@@ -96,7 +96,7 @@ in the image as it does in a checkout.
 
 | Setting | Value |
 | --- | --- |
-| Repository | `https://github.com/awebai/aweb`, branch `main` |
+| Repository | `https://github.com/awebai/naapp`, branch `main` |
 | Root directory | the repository root (empty) |
 | Dockerfile path | `./naapp/library/Dockerfile` |
 | Docker build context | `.` (the repository root) |
@@ -148,8 +148,8 @@ substitute a different SHA. A first deploy after the service moved repositories 
 repository it moved from with `FROM_REPOSITORY` and repeats it in
 `CONFIRM_FROM_REPOSITORY`; the live commit must then be on that repository's `main` and
 not on the configured one.
-Use a clean clone from `https://github.com/awebai/aweb`; a local SSH host alias such as
-`github-aweb` is not the pinned repository identity. `prod-verify` checks its clean
+Use a clean clone from `https://github.com/awebai/naapp`; a local SSH host alias is not
+the pinned repository identity. `prod-verify` checks its clean
 executing source and exact deployed artifact; it does not fetch or demand a later main tip.
 
 Never deploy a tag, short SHA, local `HEAD`, or an unmerged commit. Never infer the

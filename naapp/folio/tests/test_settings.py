@@ -58,3 +58,37 @@ def test_present_operator_limit_can_narrow_but_not_exceed_thirty_days(monkeypatc
     monkeypatch.setenv("FOLIO_MAX_PRESENT_TTL_SECONDS", "2592001")
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_an_unrelated_env_file_in_the_working_directory_is_not_configuration(tmp_path) -> None:
+    # Folio builds its app when folio.api is imported. A .env in whatever
+    # directory the process starts in (a developer's, another app's) must not
+    # become its configuration; only the environment configures it.
+    import os
+    import subprocess
+    import sys
+
+    (tmp_path / ".env").write_text(
+        "FOLIO_PUBLIC_ORIGIN=https://planted.example\nFOLIO_DEFAULT_PRESENT_TTL_SECONDS=7\n"
+    )
+    environment = {
+        name: value
+        for name, value in os.environ.items()
+        if name not in ("FOLIO_PUBLIC_ORIGIN", "FOLIO_DEFAULT_PRESENT_TTL_SECONDS")
+    }
+    started = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import folio.api; s = folio.api.app.state.folio_runtime.settings; "
+            "print(s.public_origin, s.default_present_ttl_seconds)",
+        ],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+
+    assert started.returncode == 0, started.stderr
+    assert started.stdout.split() == ["http://127.0.0.1:8765", "86400"]

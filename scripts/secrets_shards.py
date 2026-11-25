@@ -1,4 +1,4 @@
-"""Run the measured Secrets partition against two gate-owned service pairs."""
+"""Run the measured Secrets partition, each shard against its own gate-owned service pair."""
 from concurrent.futures import ThreadPoolExecutor
 import json
 import os
@@ -12,8 +12,8 @@ from pathlib import Path
 def load_shards(package: Path, manifest: Path) -> list[list[str]]:
     data = json.loads(manifest.read_text())
     shards = data.get('shards')
-    if data.get('version') != 1 or not isinstance(shards, list) or len(shards) != 2:
-        raise ValueError('expected version 1 and exactly two shards')
+    if data.get('version') != 1 or not isinstance(shards, list) or len(shards) < 2:
+        raise ValueError('expected version 1 and at least two shards')
     seen = set()
     for shard in shards:
         if not isinstance(shard, list) or not shard:
@@ -44,7 +44,7 @@ def validate_modules(collected: set[str], shards: list[list[str]]) -> None:
 
 
 def validate_collections(full: list[str], shards: list[list[str]]) -> list[int]:
-    if not full or len(full) != len(set(full)) or len(shards) != 2:
+    if not full or len(full) != len(set(full)) or len(shards) < 2:
         raise ValueError('empty or duplicate unsharded collection, or invalid partition')
     seen = set()
     for shard in shards:
@@ -142,13 +142,13 @@ def scratch_args(root: Path) -> list[str]:
     return [f'--basetemp={root / "pytest"}', '-o', f'cache_dir={root / "cache"}']
 
 
-def service_environments(plan: str) -> list[dict[str, str]]:
+def service_environments(plan: str, count: int) -> list[dict[str, str]]:
     rows = json.loads(plan)
     keys = {'postgres_port', 'redis_port'}
-    if not isinstance(rows, list) or len(rows) != 2 or any(
+    if not isinstance(rows, list) or len(rows) != count or any(
         not isinstance(row, dict) or set(row) != keys for row in rows
     ):
-        raise ValueError('Secrets shards require two owned Postgres and Redis pairs')
+        raise ValueError('Secrets shards require one Postgres and Redis pair per shard')
     ports = [port for row in rows for port in row.values()]
     if any(type(port) is not int or not 1 <= port <= 65535 for port in ports) or len(set(ports)) != len(ports):
         raise ValueError('Secrets shard service ports must be distinct')
@@ -180,7 +180,7 @@ def run_shards(package, shards, environments, evidence, command):
                 status = 126
         return status, log
 
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    with ThreadPoolExecutor(max_workers=len(shards)) as pool:
         jobs = [pool.submit(run, index, modules, env)
                 for index, (modules, env) in enumerate(zip(shards, environments, strict=True), 1)]
     exit_code = 0
@@ -202,10 +202,15 @@ def main() -> int:
     package = Path.cwd()
     manifest = Path(__file__).resolve().parents[1] / 'candidate-gate/secrets-shards.json'
     command = arguments[1:]
-    environments = (
-        [dict(os.environ)] * 2 if check_only
-        else service_environments(os.environ['AWEB_SECRETS_SHARD_SERVICES'])
-    )
+    try:
+        count = len(load_shards(package, manifest))
+        environments = (
+            [dict(os.environ)] * count if check_only
+            else service_environments(os.environ['AWEB_SECRETS_SHARD_SERVICES'], count)
+        )
+    except (OSError, ValueError) as error:
+        print(f'Secrets collection refused: {error}', file=sys.stderr, flush=True)
+        return 1
     with tempfile.TemporaryDirectory(prefix='aweb-secrets-shards-') as directory:
         evidence = Path(directory)
         try:

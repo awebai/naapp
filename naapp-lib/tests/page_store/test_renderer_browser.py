@@ -1,17 +1,15 @@
-"""Opt-in real PostgreSQL/HTTP/packaged-renderer preservation proof.
+"""Real PostgreSQL/HTTP/packaged-renderer preservation proof.
 
 The browser dependencies live in renderer/, alongside R1's other browser tests.
 See docs/page-renderer.md for the focused command.
 """
 
 import asyncio
-import os
 import shutil
 import socket
 from importlib.resources import files
 from pathlib import Path
 
-import pytest
 import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, Response
@@ -20,10 +18,6 @@ from aweb_naapp.pages import validate_page
 from aweb_naapp.pages.render import page_shell
 from tests.page_store.test_store import OWNER, SCOPE, create, page, record_change
 
-pytestmark = pytest.mark.skipif(
-    os.environ.get("AWEB_PAGE_STORE_BROWSER") != "1",
-    reason="Opt-in browser proof: set AWEB_PAGE_STORE_BROWSER=1 (docs/page-renderer.md)",
-)
 RENDERER = Path(__file__).resolve().parents[2] / "renderer"
 
 

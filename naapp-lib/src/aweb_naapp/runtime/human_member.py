@@ -59,6 +59,33 @@ def _refused(status: int, code: str) -> HTTPException:
     return HTTPException(status_code=status, detail=code)
 
 
+async def _check_team_certificate(
+    team_cache: AWIDTeamCache,
+    team_id: str,
+    certificate_id: str,
+    certificate: Mapping[str, Any],
+) -> MembershipProof:
+    try:
+        facts = await require_active_certificate(
+            team_cache, team_id=team_id, certificate_id=certificate_id
+        )
+    except HTTPException as exc:
+        # The public verifier uses 401 for definitive unknown/revoked evidence;
+        # an unreadable private listing is unavailable, including its 403.
+        raise _refused(
+            403 if exc.status_code == 401 else 503,
+            "principal_not_member" if exc.status_code == 401 else "principal_status_unavailable",
+        ) from None
+    try:
+        verify_team_certificate_signature(certificate, facts.team_did_key)
+    except TeamCertificateError:
+        raise _refused(403, "principal_not_member") from None
+    proof = facts.membership_proof(team_id, certificate_id)
+    if not proof.is_fresh_at(monotonic_ns()):
+        raise _refused(503, "principal_status_unavailable")
+    return proof
+
+
 async def check_human_member(
     team_cache: AWIDTeamCache,
     registry: RegistryClient,
@@ -90,30 +117,7 @@ async def check_human_member(
             raise ValueError()
     except (TypeError, ValueError, RecursionError):
         raise _refused(403, "principal_not_member") from None
-    try:
-        facts = await require_active_certificate(
-            team_cache, team_id=team_id, certificate_id=certificate_id
-        )
-    except HTTPException as exc:
-        # The public verifier uses 401 for definitive unknown/revoked evidence;
-        # an unreadable private listing is unavailable, including its 403.
-        raise _refused(
-            403 if exc.status_code == 401 else 503,
-            "principal_not_member" if exc.status_code == 401 else "principal_status_unavailable",
-        ) from None
-    try:
-        verify_team_certificate_signature(cert, facts.team_did_key)
-    except TeamCertificateError:
-        raise _refused(403, "principal_not_member") from None
-    try:
-        membership = await team_cache.check_current_member(
-            team_id, certificate_id=certificate_id, team_did_key=facts.team_did_key
-        )
-    except HTTPException as exc:
-        raise _refused(
-            403 if exc.status_code == 403 else 503,
-            "principal_not_member" if exc.status_code == 403 else "principal_status_unavailable",
-        ) from None
+    membership = await _check_team_certificate(team_cache, team_id, certificate_id, cert)
     binding_started = monotonic_ns()
     try:
         binding = await observe_identity_binding(registry, did_key=did_key, did_aw=principal)
@@ -137,16 +141,22 @@ async def check_human_member(
         # A legacy hand-constructed classification does not retain evidence age.
         # It keeps its old classification, but cannot mint current effect proof.
         raise _refused(503, "principal_status_unavailable")
+    identity_fresh_until = min(
+        binding_started + 60_000_000_000,
+        kind_started + math.floor((60 - age) * 1_000_000_000),
+    )
+    now = monotonic_ns()
+    if binding_started <= now <= identity_fresh_until and not membership.is_fresh_at(now):
+        # One new team observation can replace expired membership evidence.
+        # Recheck the same signed certificate against the current team key and
+        # active list. The independent binding and kind keep their own deadline.
+        membership = await _check_team_certificate(team_cache, team_id, certificate_id, cert)
     proof = HumanMemberProof(
         principal,
         did_key,
         membership,
         binding_started,
-        min(
-            binding_started + 60_000_000_000,
-            kind_started + math.floor((60 - age) * 1_000_000_000),
-            membership.fresh_until,
-        ),
+        min(identity_fresh_until, membership.fresh_until),
     )
     proof.require_fresh()
     return proof

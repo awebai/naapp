@@ -72,6 +72,7 @@ CEREMONIES = CeremonyCopy(
 BRAND = ConsoleBrand(
     product="Example",
     app_id="example-app",
+    member_role="example.reader",
     csrf_key=CSRF_KEY,
     stylesheet=STYLESHEET,
     sign_in=SIGN_IN,

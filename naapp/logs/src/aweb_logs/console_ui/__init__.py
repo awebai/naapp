@@ -21,6 +21,7 @@ from fastapi import APIRouter
 
 from aweb_logs.console_ui.viewer import viewer_router
 from aweb_logs.read_routes import ReaderReads
+from aweb_logs.readers import READER_ROLE
 
 
 def logs_shell(app_id: str) -> ConsoleShell:
@@ -29,6 +30,7 @@ def logs_shell(app_id: str) -> ConsoleShell:
         ConsoleBrand(
             product="Logs",
             app_id=app_id,
+            member_role=READER_ROLE,
             csrf_key="aweb.logs.console.csrf",
             stylesheet=(Path(__file__).parent / "style.css").read_text(),
             sign_in=SignInCopy(

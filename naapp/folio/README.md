@@ -29,7 +29,7 @@ The API defaults to `http://127.0.0.1:8765`.
 
 ## Configuration
 
-All runtime env vars use the `FOLIO_` prefix; they are the shared naapp settings (`aweb_naapp.runtime.settings`) plus Folio's own:
+Folio reads its configuration from the environment only, never from a `.env` file; `make run` and `make api-serve` pass a local `.env` to the dev server when one exists. All runtime env vars use the `FOLIO_` prefix; they are the shared naapp settings (`aweb_naapp.runtime.settings`) plus Folio's own:
 
 - `FOLIO_DATABASE_URL` — PostgreSQL connection string.
 - `FOLIO_AWID_REGISTRY_URL` — AWID registry URL, default `https://api.awid.ai`.

@@ -501,8 +501,8 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-      # The Secrets partition runs both shards against separate service pairs.
-      postgres_shard:
+      # Each Secrets shard runs against its own service pair; shard 1 uses the pair above.
+      postgres_shard_2:
         image: postgres:16
         env:
           POSTGRES_USER: postgres
@@ -515,7 +515,29 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-      redis_shard:
+      redis_shard_2:
+        image: redis:7
+        ports:
+          - 6379/tcp
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      postgres_shard_3:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432/tcp
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis_shard_3:
         image: redis:7
         ports:
           - 6379/tcp
@@ -567,12 +589,14 @@ jobs:
       - name: Check that every test module is in exactly one shard
         run: make check-secrets-shards
 
-      - name: Run unit and contract tests in both shards
+      - name: Run unit and contract tests in every shard
         env:
           AWEB_SECRETS_SHARD_SERVICES: >-
             [{"postgres_port": 5432, "redis_port": 6379},
-             {"postgres_port": ${{ job.services.postgres_shard.ports[5432] }},
-              "redis_port": ${{ job.services.redis_shard.ports[6379] }}}]
+             {"postgres_port": ${{ job.services.postgres_shard_2.ports[5432] }},
+              "redis_port": ${{ job.services.redis_shard_2.ports[6379] }}},
+             {"postgres_port": ${{ job.services.postgres_shard_3.ports[5432] }},
+              "redis_port": ${{ job.services.redis_shard_3.ports[6379] }}}]
           PYTEST_ADDOPTS: -rs
         run: make test
 

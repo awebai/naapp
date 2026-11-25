@@ -42,7 +42,7 @@ class DeclarativeTemplateRequest(BaseModel):
 
 class CreateDocumentRequest(BaseModel):
     slug: str = Field(..., min_length=1, max_length=160, pattern=r"^[a-zA-Z0-9][a-zA-Z0-9_.-]*$")
-    title: str = Field(..., min_length=1, max_length=240)
+    title: str = Field(..., min_length=1, max_length=241)
     body: str | None = None
     template: DeclarativeTemplateRequest | None = None
 

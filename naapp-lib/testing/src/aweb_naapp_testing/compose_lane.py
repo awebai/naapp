@@ -271,8 +271,10 @@ class ComposeLane:
         self.env["NAAPP_E2E_DNS_IP"] = address
         self.up("postgres", "redis", "awid", "aweb", "front")
 
-    def machine(self, name: str, *, aw_binary: Path | None = None) -> str:
-        """Start one person's CLI container and optionally mount a released Linux aw."""
+    def machine(
+        self, name: str, *, aw_binary: Path | None = None, isolated: bool = False
+    ) -> str:
+        """Start a CLI container, with just its own writable home and CA when isolated."""
         container = f"{self.project}-{name}"
         (self.runtime / name).mkdir(mode=0o700)
         uid, gid = os.getuid(), os.getgid()
@@ -287,6 +289,14 @@ class ComposeLane:
         binary = (
             ["-v", f"{aw_binary.resolve(strict=True)}:/usr/local/bin/aw:ro"] if aw_binary else []
         )
+        mounts = (
+            [
+                "-v", f"{self.runtime / name}:{machine_dir(name)}",
+                "-v", f"{self.runtime / 'tls' / 'ca.pem'}:{CA_PATH}:ro",
+            ]
+            if isolated
+            else ["-v", f"{self.runtime}:/runtime"]
+        )
         self.checked(
             self.compose(
                 "run",
@@ -300,6 +310,7 @@ class ComposeLane:
                 "-v",
                 f"{accounts / 'group'}:/etc/group:ro",
                 *binary,
+                *mounts,
                 "-e",
                 f"HOME={machine_dir(name)}",
                 "-w",

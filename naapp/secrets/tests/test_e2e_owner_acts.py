@@ -8,6 +8,11 @@ and routes. The only stand-in is the person: a software authenticator drives
 the page's JSON routes from the holder's own network namespace, so aw's
 loopback receives the code.
 
+That same owner uses Chromium to enter a native value and approve a request.
+An isolated released aw submits the request and retries it over team auth.
+The upstream verifies the injected credential, Logs reads the linked audit
+events, and the databases and key files are backed up at the end.
+
 The owner signs the designation locally, so aw keeps no request to replay:
 its proof is the app's own records (team_journey_support.assert_designated),
 and a refused duplicate leaves them unchanged.
@@ -45,6 +50,13 @@ from aweb_naapp_testing.compose_lane import (
 )
 from aweb_naapp_testing.compose_lane import (
     docker as _docker,
+)
+from customer_acceptance import (
+    UPSTREAM,
+    confirm_native_bearer,
+    create_agent,
+    exercise_customer_use,
+    start_upstream,
 )
 from nacl.signing import SigningKey
 from team_journey_support import (
@@ -109,6 +121,7 @@ UPSTREAMS = {
     "console.secrets.svc.test": "secrets:8770",
     "api.logs.svc.test": "logs:8765",
     "console.logs.svc.test": "logs:8765",
+    UPSTREAM.removeprefix("https://"): "customer-upstream:8080",
 }
 
 
@@ -152,6 +165,8 @@ def secrets_env() -> dict[str, str]:
         "SECRETS_EMAIL_PASSWORD_FILE": "/run/secrets-keys/smtp",
         "SECRETS_EMAIL_FROM": "secrets@svc.test",
         "SECRETS_EGRESS_DENIED_NETWORKS": "[]",
+        "SECRETS_INTERNAL_DESTINATIONS": "allowed",
+        "SECRETS_EGRESS_CA_FILE": "/run/secrets-keys/hook-ca.pem",
         "SECRETS_HOOK_INTERNAL_ORIGINS": json.dumps([LOGS_API]),
         "SECRETS_HOOK_INTERNAL_DESTINATIONS": "allowed",
         "SECRETS_HOOK_INTERNAL_CIDR": LANE_SUBNET,
@@ -248,7 +263,7 @@ def lane(tmp_path_factory: pytest.TempPathFactory, request: pytest.FixtureReques
             "NAAPP_E2E_POSTGRES_PASSWORD": "disposable",
             "SECRETS_E2E_SOURCE_COMMIT": commit,
         },
-        profiles=("logs", "browser"),
+        profiles=("logs", "browser", "chromium", "customer"),
         subnet=LANE_SUBNET,
     )
     tls = lane.prepare(
@@ -265,7 +280,7 @@ def lane(tmp_path_factory: pytest.TempPathFactory, request: pytest.FixtureReques
     try:
         lane.start_core()
         lane.up("smtp")
-        lane.checked(lane.compose("build", "cli", "browser"), "build lane clients")
+        lane.checked(lane.compose("build", "cli", "browser", "chromium"), "build lane clients")
         yield lane
     finally:
         request.node.add_report_section("teardown", "lane Compose", lane.close())
@@ -378,8 +393,14 @@ def install_apps(lane: ComposeLane, controller: str, owner_did_key: str) -> None
 
 def test_the_owner_designates_a_human_holder_registered_on_another_machine(lane: ComposeLane) -> None:
     released_aw = os.environ.get("NAAPP_AW_BINARY")
-    aw_binary = Path(released_aw) if released_aw else None
+    assert released_aw, "set NAAPP_AW_BINARY to the pinned Linux aw release"
+    aw_binary = Path(released_aw)
     controller = lane.machine("controller", aw_binary=aw_binary)
+    installed_version = subprocess.check_output(
+        [str(REPO / "scripts/install-aw.sh"), "--version"], text=True,
+    ).strip()
+    version = lane.checked(_docker("exec", controller, "aw", "version"), "inspect released aw")
+    assert version.splitlines()[0] == f"aw {installed_version}", version
     holder = Holder(lane, lane.machine("holder", aw_binary=aw_binary))
 
     # Setup authority: the namespace, its root human (the holder) and the team.
@@ -480,12 +501,29 @@ def test_the_owner_designates_a_human_holder_registered_on_another_machine(lane:
     listed = holder.answer_passphrases(child)
     assert "confirm" in listed and "draft-change" in listed, listed
 
-    signs_in_again_after_a_reissue(lane, controller, holder, human, hooks)
+    scopes = signs_in_again_after_a_reissue(lane, controller, holder, human, hooks)
+    value = start_upstream(lane)
+    secret_id = confirm_native_bearer(
+        lane, controller, holder.container, CONSOLE, scopes[APP_ID],
+        installed["installation_id"], CONTACT, value,
+    )
+    agent, requester = create_agent(
+        lane, controller, holder.container,
+        binary=aw_binary, team=TEAM, domain=DOMAIN, registry=REGISTRY, aweb=AWEB,
+    )
+    exercise_customer_use(
+        lane,
+        controller=controller, holder=holder.container,
+        agent=agent, agent_principal=requester, owner_principal=principal,
+        owner_scope=scopes[APP_ID], reader_scope=scopes[LOGS_APP_ID],
+        contact=CONTACT, api=API, console=CONSOLE, logs=LOGS_CONSOLE,
+        installation_id=installed["installation_id"], secret_id=secret_id, value=value,
+    )
 
 
 def signs_in_again_after_a_reissue(
     lane: ComposeLane, controller: str, holder: Holder, human: dict, hooks: dict
-) -> None:
+) -> dict[str, str]:
     """A renewed certificate and credential registration restore passkey login
     for the original Logs reader and Secrets owner holdings."""
     principal = human["id"]
@@ -538,3 +576,4 @@ def signs_in_again_after_a_reissue(
             f" FROM {schema}.role_holdings WHERE b3_scope = {scope} AND ended_in IS NULL",
         ) == "t"
         assert answer["status"] == 200 and renewed, (app_id, answer, renewed)
+    return scopes

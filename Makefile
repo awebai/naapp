@@ -115,7 +115,7 @@ e2e-library:
 	PATH="$(AW_DIR):$$PATH" $(MAKE) -C naapp/library e2e
 
 e2e-secrets:
-	$(MAKE) -C naapp/secrets e2e
+	NAAPP_AW_BINARY="$${NAAPP_AW_BINARY:-$(AW_DIR)/aw}" $(MAKE) -C naapp/secrets e2e
 
 # Each Secrets test module is in exactly one shard of candidate-gate/secrets-shards.json.
 check-secrets-shards:

@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from customer_console import customer_console
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import sync_playwright
 
@@ -108,6 +109,9 @@ def main() -> None:
     c = commands.add_parser("credential")
     for name in ("--url", "--device", "--ca"):
         c.add_argument(name, required=True)
+    customer = commands.add_parser("customer-console")
+    for name in ("--device", "--ca"):
+        customer.add_argument(name, required=True)
     args = parser.parse_args()
     trust(args.ca)
     # Playwright's own requests (route.fetch) run in its Node driver, which
@@ -116,7 +120,10 @@ def main() -> None:
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch()
         try:
-            credential(args, browser)
+            if args.command == "credential":
+                credential(args, browser)
+            else:
+                customer_console(args, browser, authenticator)
         finally:
             browser.close()
 

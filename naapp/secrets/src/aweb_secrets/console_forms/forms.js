@@ -124,25 +124,77 @@
     }
   });
 
-  const referenceForm = document.querySelector("#onepassword-reference");
-  if (referenceForm) {
-    const control = name => referenceForm.elements.namedItem(name);
+  function secretControls(form) {
+    const control = name => form.elements.namedItem(name);
     const read = name => control(name).value;
-    const kindControls = referenceForm.querySelectorAll("fieldset[data-kind]");
+    const kindControls = form.querySelectorAll("fieldset[data-kind]");
     function selectKind() {
       for (const fields of kindControls) {
-        fields.hidden = fields.dataset.kind !== read("kind");
+        fields.hidden = Boolean(control("kind")) && fields.dataset.kind !== read("kind");
+        if (fields.hidden) for (const input of fields.querySelectorAll("[data-value]")) input.value = "";
         fields.disabled = fields.hidden;
       }
     }
-    control("kind").addEventListener("change", selectKind);
+    control("kind")?.addEventListener("change", selectKind);
     selectKind();
-    control("approve_only").addEventListener("change", () => {
+    control("approve_only")?.addEventListener("change", () => {
       if (control("approve_only").checked) control("sensitivity").value = "sensitive";
     });
-    control("sensitivity").addEventListener("change", () => {
+    control("sensitivity")?.addEventListener("change", () => {
       if (read("sensitivity") === "standard") control("approve_only").checked = false;
     });
+    const selected = () => [...kindControls].find(fields => !fields.disabled);
+    const record = backend => ({
+      v: 1, secret_id: read("secret_id"), ref: read("ref"), description: read("description"),
+      kind: read("kind"), kind_params: Object.fromEntries(
+        [...selected().querySelectorAll("[data-param]")].map(input => [input.dataset.param, input.value])
+      ),
+      sensitivity: read("sensitivity"), approve_only: control("approve_only").checked, backend,
+    });
+    return {control, read, selected, record};
+  }
+
+  const nativeForm = document.querySelector("#native-secret");
+  if (nativeForm) {
+    const {control, read, selected, record} = secretControls(nativeForm);
+    const button = nativeForm.querySelector("button");
+    const feedback = document.querySelector("#native-status");
+    nativeForm.addEventListener("submit", async event => {
+      event.preventDefault();
+      if (button.disabled) return;
+      button.disabled = true;
+      let value = Object.fromEntries(
+        [...selected().querySelectorAll("[data-value]")]
+          .filter(input => input.value || input.dataset.value === "username")
+          .map(input => [input.dataset.value, input.value])
+      );
+      for (const input of nativeForm.querySelectorAll("[data-value]")) input.value = "";
+      feedback.textContent = "Saving your draft…";
+      try {
+        const pending = api.post(nativeForm.action, {
+          ...(control("secret_id") ? {secret: record("native")} : {}),
+          value, reason: read("reason") || "Save a native secret value",
+        });
+        value = null;
+        const receipt = await pending;
+        const timestamp = new Date(receipt.created_at).toLocaleString();
+        feedback.textContent = "Version " + receipt.version + " sealed at " + timestamp
+          + ". Open the approval link sent to your registered contact to confirm it.";
+      } catch (error) {
+        feedback.textContent = error.status === 400
+          ? "Check the fields for this authentication kind and enter the value again."
+          : "The draft could not be saved. Check your sign-in and approval email before trying again.";
+        button.disabled = false;
+      } finally {
+        value = null;
+        for (const input of nativeForm.querySelectorAll("[data-value]")) input.value = "";
+      }
+    });
+  }
+
+  const referenceForm = document.querySelector("#onepassword-reference");
+  if (referenceForm) {
+    const {read, selected, record} = secretControls(referenceForm);
     let submitted = false;
     referenceForm.addEventListener("submit", async event => {
       event.preventDefault();
@@ -150,19 +202,11 @@
       submitted = true;
       referenceForm.querySelector("button").disabled = true;
       status.textContent = "Checking the item reference…";
-      const selected = [...kindControls].find(fields => !fields.disabled);
-      const kindParams = Object.fromEntries(
-        [...selected.querySelectorAll("[data-param]")].map(input => [input.dataset.param, input.value])
-      );
       const fields = Object.fromEntries(
-        [...selected.querySelectorAll("[data-field]")].filter(input => input.value)
+        [...selected().querySelectorAll("[data-field]")].filter(input => input.value)
           .map(input => [input.dataset.field, input.value])
       );
-      const secret = {
-        v: 1, secret_id: read("secret_id"), ref: read("ref"), description: read("description"),
-        kind: read("kind"), kind_params: kindParams, sensitivity: read("sensitivity"),
-        approve_only: control("approve_only").checked, backend: "onepassword",
-      };
+      const secret = record("onepassword");
       try {
         const staged = await api.post(referenceForm.action, {
           secret, reference: {vault_id: read("vault_id"), item_id: read("item_id"), fields},

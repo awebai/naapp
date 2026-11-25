@@ -40,6 +40,7 @@ from tests.harness import running_upstream
 from tests.test_admission import (
     ALICE,
     BOB,
+    GENERATION,
     NOW,
     POLICY_BODY,
     SECRET,
@@ -60,7 +61,7 @@ REQUEST = DeclaredTool(
 )
 
 
-def submission(upstream, **changes):
+def submission(upstream, *, installation=INSTALLATION, generation=GENERATION, **changes):
     body = {
         "request_id": "first-use",
         "method": "POST",
@@ -69,7 +70,7 @@ def submission(upstream, **changes):
         **changes,
     }
     return MemberSubmission(
-        Authorization(ALICE, REQUEST, _grant_source_grant(installation_id=INSTALLATION)),
+        Authorization(ALICE, REQUEST, _grant_source_grant(installation, generation)),
         RequestBytes(
             "POST",
             b"/v1/secrets/staging-api/requests",
@@ -133,6 +134,18 @@ async def setup(
         await records.set_active_version(tx, INSTALLATION, TEAM, SECRET["secret_id"], version)
         await records.create_destination(tx, INSTALLATION, TEAM, destination)
 
+    return broker_for(
+        db, fence, custody, upstream, max_dispatch=max_dispatch,
+        registration_view=registration_view, clock=clock, sweep_margin=sweep_margin,
+        response_budget_bytes=response_budget_bytes,
+    )
+
+
+def broker_for(
+    db, fence, custody, upstream, *, max_dispatch=timedelta(seconds=30),
+    registration_view=None, clock=None, sweep_margin=timedelta(seconds=5),
+    response_budget_bytes=None,
+):
     def producer(*, installation_id, generation):
         original = source(installation_id, generation)
         return original if clock is None else HookProducer(original.producer, clock=clock)

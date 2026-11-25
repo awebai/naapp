@@ -84,7 +84,11 @@ from aweb_secrets.console_use_approvals import (
     console_run_approvals_router,
     console_use_approvals_router,
 )
-from aweb_secrets.console_values import ConsoleValues, console_values_router
+from aweb_secrets.console_values import (
+    ConsoleValues,
+    console_native_values_router,
+    console_values_router,
+)
 from aweb_secrets.containment import Containment
 from aweb_secrets.containment_routes import containment_api_router, containment_console_router
 from aweb_secrets.credential_governance import (
@@ -676,6 +680,7 @@ def create_service(
             ),
             human(lambda s: console_bootstrap_router(s.console.shell)),
             human(lambda s: console_values_router(s.values)),
+            human(lambda s: console_native_values_router(s.values, changes=s.changes)),
             human(lambda s: console_changes_router(s.changes)),
             human(lambda s: console_forms_router(changes=s.changes)),
             human(lambda s: console_jobs_router(changes=s.changes)),

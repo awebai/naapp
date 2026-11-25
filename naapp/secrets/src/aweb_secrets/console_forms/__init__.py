@@ -3,15 +3,18 @@
 import json
 from html import escape
 from pathlib import Path
+from urllib.parse import quote
 
 from aweb_naapp.console import ConsoleRoute
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 
+from aweb_secrets import records
+from aweb_secrets.change import MAX_REASON_CHARS
 from aweb_secrets.console_changes import ConsoleChanges, _errors
 from aweb_secrets.console_forms.grants import grant_forms_router
 from aweb_secrets.operation import CAPTURE_FIELDS
-from aweb_secrets.secret import KINDS, mint_secret_id
+from aweb_secrets.secret import KINDS, SecretRecord, mint_secret_id
 
 _ASSETS = Path(__file__).parent
 _SCRIPT = (
@@ -40,7 +43,7 @@ _KIND_NAMES = {
 }
 
 
-def _reference_kinds() -> str:
+def _kind_fields(prefix: str, *, fixed_kind: str | None = None) -> str:
     fields = []
     params = {
         "header": (("name", "Header name", True), ("prefix", "Header prefix", False)),
@@ -51,76 +54,105 @@ def _reference_kinds() -> str:
         ),
         "aws-sigv4": (("region", "AWS region", True), ("service", "AWS service", True)),
     }
-    for kind in KINDS:
-        inactive = " hidden disabled" if kind != "bearer" else ""
+    reference = prefix == "reference"
+    for kind in (fixed_kind,) if fixed_kind else KINDS:
+        inactive = " hidden disabled" if fixed_kind is None and kind != "bearer" else ""
         fields.append(
             f'<fieldset data-kind="{kind}"{inactive}><legend>{_KIND_NAMES[kind]}</legend>'
         )
-        for name, label, needed in params.get(kind, ()):
-            identity = f"reference-{kind}-{name}"
+        for name, label, needed in params.get(kind, ()) if fixed_kind is None else ():
+            identity = f"{prefix}-{kind}-{name}"
             fields.append(
                 f'<label for="{identity}">{label}</label><input id="{identity}" '
                 f'data-param="{name}" autocomplete="off" spellcheck="false"'
                 + (" required" if needed else "")
                 + ">"
             )
-        if kind == "oauth2-client-credentials":
+        if kind == "oauth2-client-credentials" and fixed_kind is None:
             fields.append(
-                '<label for="reference-client-auth">Client authentication</label>'
-                '<select id="reference-client-auth" data-param="client_auth">'
+                f'<label for="{prefix}-client-auth">Client authentication</label>'
+                f'<select id="{prefix}-client-auth" data-param="client_auth">'
                 '<option value="client_secret_basic">HTTP Basic authentication</option>'
                 '<option value="client_secret_post">Form body</option></select>'
             )
         required, optional = CAPTURE_FIELDS[kind]
         for name in sorted(required | optional):
-            identity = f"reference-{kind}-{name}-field"
-            label = name.replace("_", " ").capitalize() + " field ID"
+            identity = f"{prefix}-{kind}-{name}-field"
+            label = name.replace("_", " ").capitalize()
+            if reference:
+                label += " field ID"
             if name in optional:
                 label += " (optional)"
+            attributes = (
+                'data-field="' + name + '" pattern="[A-Za-z0-9_-]{1,128}" maxlength="128"'
+                if reference else 'data-value="' + name + '" type="password"'
+            )
             fields.append(
                 f'<label for="{identity}">{label}</label><input id="{identity}" '
-                f'data-field="{name}" autocomplete="off" spellcheck="false" '
-                'pattern="[A-Za-z0-9_-]{1,128}" maxlength="128"'
-                + (" required" if name in required else "")
+                f'{attributes} autocomplete="off" spellcheck="false"'
+                + (" required" if name in required and (reference or name != "username") else "")
                 + ">"
             )
         fields.append("</fieldset>")
     return "".join(fields)
 
 
-def _reference_form(installation_id: str, credential_version: int) -> str:
-    action = "/installations/" + installation_id + "/onepassword/references"
+def _secret_fields(prefix: str) -> str:
     options = "".join(
         f'<option value="{kind}" data-auth-kind>{_KIND_NAMES[kind]}</option>' for kind in KINDS
     )
+    return (
+        f'<input type="hidden" name="secret_id" value="{mint_secret_id()}">'
+        f'<label for="{prefix}-name">Secret name</label>'
+        f'<input id="{prefix}-name" name="ref" pattern="[a-z0-9][a-z0-9_-]{{0,63}}" '
+        'maxlength="64" autocomplete="off" required>'
+        f'<label for="{prefix}-description">Description (optional)</label>'
+        f'<textarea id="{prefix}-description" name="description" maxlength="512" rows="2"></textarea>'
+        f'<label for="{prefix}-kind">Authentication kind</label>'
+        f'<select id="{prefix}-kind" name="kind">{options}</select>'
+        f'<label for="{prefix}-sensitivity">Sensitivity</label>'
+        f'<select id="{prefix}-sensitivity" name="sensitivity">'
+        '<option value="standard">Standard</option><option value="sensitive">Sensitive</option></select>'
+        '<label class="check"><input type="checkbox" name="approve_only">Require approval for every use</label>'
+    )
+
+
+def _reference_form(installation_id: str, credential_version: int) -> str:
+    action = "/installations/" + installation_id + "/onepassword/references"
     return (
         "<p>Select the item and field IDs from your connected vault. Enter references here; "
         "the field values stay in 1Password. Review and confirm the draft before agents can use it.</p>"
         f'<form id="onepassword-reference" method="post" action="{escape(action, quote=True)}" '
         f'data-installation="{escape(installation_id, quote=True)}">'
-        f'<input type="hidden" name="secret_id" value="{mint_secret_id()}">'
         f'<input type="hidden" name="credential_version" value="{credential_version}">'
-        '<label for="reference-name">Secret name</label>'
-        '<input id="reference-name" name="ref" pattern="[a-z0-9][a-z0-9_-]{0,63}" '
-        'maxlength="64" autocomplete="off" required>'
-        '<label for="reference-description">Description (optional)</label>'
-        '<textarea id="reference-description" name="description" maxlength="512" rows="2"></textarea>'
-        '<label for="reference-kind">Authentication kind</label>'
-        f'<select id="reference-kind" name="kind">{options}</select>'
-        '<label for="reference-sensitivity">Sensitivity</label>'
-        '<select id="reference-sensitivity" name="sensitivity">'
-        '<option value="standard">Standard</option><option value="sensitive">Sensitive</option></select>'
-        '<label class="check"><input type="checkbox" name="approve_only">Require approval for every use</label>'
-        '<label for="reference-vault">Vault ID</label>'
+        + _secret_fields("reference")
+        + '<label for="reference-vault">Vault ID</label>'
         '<input id="reference-vault" name="vault_id" autocomplete="off" spellcheck="false" '
         'pattern="[a-z0-9]{26}" minlength="26" maxlength="26" required>'
         '<label for="reference-item">Item ID</label>'
         '<input id="reference-item" name="item_id" autocomplete="off" spellcheck="false" '
         'pattern="[a-z0-9]{26}" minlength="26" maxlength="26" required>'
-        + _reference_kinds()
+        + _kind_fields("reference")
         + '<label for="reference-reason">Reason for this change (optional)</label>'
         '<input id="reference-reason" name="reason" autocomplete="off">'
         '<button type="submit">Save a reference draft</button></form>'
+    )
+
+
+def _native_form(installation_id: str, record: SecretRecord | None = None) -> str:
+    action = "/installations/" + installation_id + "/native-values"
+    if record is not None:
+        action += "/" + quote(record.ref, safe="")
+    return (
+        '<p>Your value is sealed when you save the draft. Confirm it with your passkey '
+        'before agents can use it.</p>'
+        f'<form id="native-secret" method="post" action="{escape(action, quote=True)}">'
+        + (_secret_fields("native") if record is None else "")
+        + _kind_fields("native", fixed_kind=record.kind if record else None)
+        + '<label for="native-reason">Reason for this change (optional)</label>'
+        f'<input id="native-reason" name="reason" autocomplete="off" maxlength="{MAX_REASON_CHARS}">'
+        '<button type="submit">Save a native value draft</button></form>'
+        '<p id="native-status" role="status" aria-live="polite"></p>'
     )
 
 
@@ -137,7 +169,9 @@ def console_forms_router(*, changes: ConsoleChanges) -> APIRouter:
     async def session(request: Request):
         return await changes.console.sessions.current(request)
 
-    async def reference_page(request: Request, installation_id: str | None = None) -> Response:
+    async def reference_page(
+        request: Request, installation_id: str | None = None, *, include_native: bool = False
+    ) -> Response:
         try:
             current = await session(request)
         except HTTPException as refused:
@@ -162,13 +196,24 @@ def console_forms_router(*, changes: ConsoleChanges) -> APIRouter:
             else "<p>Connect and confirm your team’s 1Password service account first.</p>"
             '<p><a href="/backend-credentials/onepassword/new">Connect 1Password</a></p>'
         )
+        if include_native:
+            body = (
+                '<h1>Create a secret</h1><h2>Store a native value</h2>'
+                + _native_form(installation_id)
+                + '<p><a href="/secrets/replace">Replace a native value</a></p>'
+                '<h2>Link a 1Password secret</h2>' + body
+            )
+        else:
+            body = "<h1>Link a 1Password secret</h1>" + body
         return shell.console_page(
-            title="Link a 1Password secret",
-            session=current,
-            body_html="<h1>Link a 1Password secret</h1>" + body + _STATUS + _SCRIPT,
+            title="Create a secret" if include_native else "Link a 1Password secret",
+            session=current, body_html=body + _STATUS + _SCRIPT,
         )
 
     @router.get("/secrets/new", response_class=HTMLResponse)
+    async def create_secret_entry(request: Request) -> Response:
+        return await reference_page(request, include_native=True)
+
     @router.get("/onepassword/references/new", response_class=HTMLResponse)
     async def reference_entry(request: Request) -> Response:
         return await reference_page(request)
@@ -178,6 +223,39 @@ def console_forms_router(*, changes: ConsoleChanges) -> APIRouter:
     )
     async def scoped_reference_entry(installation_id: str, request: Request) -> Response:
         return await reference_page(request, installation_id)
+
+    @router.get("/secrets/replace", response_class=HTMLResponse)
+    async def replacement_entry(request: Request) -> Response:
+        try:
+            current = await session(request)
+            async with _errors(changes.console, current):
+                installation_id = await changes.installation_for_session(current)
+                ref = request.query_params.get("ref")
+                if ref is None:
+                    body = (
+                        '<form method="get" action="/secrets/replace">'
+                        '<label for="replace-name">Secret name</label>'
+                        '<input id="replace-name" name="ref" required>'
+                        '<button type="submit">Continue</button></form>'
+                    )
+                else:
+                    admitted = await changes._installation(current, installation_id)
+                    async with changes.console.db.transaction() as tx:
+                        await changes._owner(tx, current, admitted)
+                        stored = await records.secret_by_ref(
+                            tx, installation_id, admitted.team_id, ref, lock=False
+                        )
+                    if stored is None or stored.record.backend != "native":
+                        raise HTTPException(404, "secret_unknown")
+                    body = f'<p>{escape(stored.record.ref)}</p>' + _native_form(
+                        installation_id, stored.record
+                    )
+        except HTTPException as refused:
+            return shell.refused_page(refused)
+        return shell.console_page(
+            title="Replace a native value",
+            session=current, body_html="<h1>Replace a native value</h1>" + body + _SCRIPT,
+        )
 
     @router.get("/backend-credentials/onepassword/new", response_class=HTMLResponse)
     async def token_page(request: Request) -> Response:

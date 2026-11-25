@@ -933,6 +933,8 @@ async def authenticate_request(
     now: Callable[[], datetime] = lambda: datetime.now(UTC),
 ) -> Principal:
     auth_header = request.headers.get("Authorization") or request.headers.get("authorization") or ""
+    if not auth_header:
+        raise refusal(401, "authorization_missing", "The Authorization header is required")
     did_key, signature = _parse_didkey_auth(auth_header)
 
     timestamp = (
@@ -954,6 +956,10 @@ async def authenticate_request(
         raise refusal(401, "certificate_missing", "X-AWID-Team-Certificate is required")
     team_id, certificate_id = _certificate_locator(cert_header)
 
+    if not (request.headers.get("X-AWEB-Signed-Payload") or "").strip():
+        # Checked here, like the other required headers, so the verifier's
+        # untyped error never has to be read for it.
+        raise refusal(401, "signed_payload_missing", "X-AWEB-Signed-Payload is required")
     body = await request.body()
     request.state.cached_body = body
     request.state.body_sha256 = hashlib.sha256(body).hexdigest()

@@ -39,6 +39,10 @@ TERMINAL_STATUSES = {"live", "deactivated", *FAILURE_STATUSES}
 KNOWN_STATUSES = {*IN_PROGRESS_STATUSES, *TERMINAL_STATUSES}
 ROLLBACK_ARTIFACT_STATUSES = {"live", "deactivated"}
 HEALTH_TIMEOUT_SECONDS = 20.0
+# The deploy check names itself: Cloudflare on a public zone refuses Python's default
+# User-Agent with its browser-signature 403, which would hide a healthy service and
+# make a real outage look the same.
+HEALTH_USER_AGENT = "aweb-naapp-deploy-check/1.0"
 # Git variables that would point git at a repository other than the one named.
 GIT_REPOSITORY_ENV = frozenset(
     {"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_OBJECT_DIRECTORY", "GIT_COMMON_DIR"}
@@ -411,7 +415,12 @@ def check_health(config: ProductionConfig) -> dict[str, int]:
     for base in dict.fromkeys((config.origin_url, config.public_url)):
         url = f"{base.rstrip('/')}{config.health_path}"
         try:
-            with urlopen(Request(url, method="GET"), timeout=HEALTH_TIMEOUT_SECONDS) as response:
+            request = Request(
+                url,
+                method="GET",
+                headers={"Accept": "application/json", "User-Agent": HEALTH_USER_AGENT},
+            )
+            with urlopen(request, timeout=HEALTH_TIMEOUT_SECONDS) as response:
                 status = response.status
         except HTTPError as exc:
             status = exc.code

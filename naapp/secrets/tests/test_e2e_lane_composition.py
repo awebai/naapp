@@ -82,7 +82,8 @@ def test_secrets_approval_mail_uses_the_authenticated_tls_mailbox():
     env = secrets_env()
     mail = LANE["services"]["smtp-tls"]
     assert env["SECRETS_EMAIL_SMTP_HOST"] in mail["networks"]["default"]["aliases"]
-    assert env["SECRETS_EMAIL_CA_FILE"] == env["SSL_CERT_FILE"]
+    # The mailbox presents the lane's certificate: the lane's CA, as hooks trust.
+    assert env["SECRETS_EMAIL_CA_FILE"] == env["SECRETS_HOOK_CA_FILE"]
     assert "smtp-tls" in LANE["services"]["secrets"]["depends_on"]
     assert mail["environment"]["MP_SMTP_REQUIRE_STARTTLS"] == "true"
     assert mail["environment"]["MP_SMTP_AUTH_ACCEPT_ANY"] == "true"

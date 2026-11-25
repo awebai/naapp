@@ -53,6 +53,8 @@ SECRETS_AW_TOOLS := $(if $(filter naapp/secrets,$(PACKAGES)),secrets-aw-tools)
 secrets-aw-tools: aw
 	scripts/build-lab-human-fixture.sh $(AW_DIR)
 
+# JUNIT_DIR, when set, receives one JUnit report per package (per shard for
+# Secrets), so two runs can be compared test by test.
 # The suites run offline behind the egress guard. AWS_EC2_METADATA_DISABLED
 # keeps the AWS SDK from probing a cloud host's metadata service for credentials.
 test: production-awid-sync $(SECRETS_AW_TOOLS)
@@ -63,6 +65,7 @@ test: production-awid-sync $(SECRETS_AW_TOOLS)
 			NAAPP_REQUIRE_TEST_DATABASE=1 LIBRARY_REQUIRE_TEST_DATABASE=1 \
 			AWS_EC2_METADATA_DISABLED=true \
 			NAAPP_AW_BINARY=$(AW_DIR)/aw NAAPP_LAB_HUMAN_FIXTURE=$(AW_DIR)/lab-human-fixture \
+			PYTEST_ADDOPTS="$$PYTEST_ADDOPTS $(if $(JUNIT_DIR),--junitxml=$(JUNIT_DIR)/$$(echo $$package | tr / _).xml)" \
 			$(TEST_EGRESS_RUNNER) $(MAKE) -C $$package test; \
 		git diff --exit-code -- $$package/uv.lock; \
 	done

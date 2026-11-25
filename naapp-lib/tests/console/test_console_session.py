@@ -167,23 +167,28 @@ async def test_the_token_is_stored_only_as_a_hash(
     async with await _client(console.sessions()) as client:
         cookie, csrf = await _login(client, owners)
     token = cookie.split("=", 1)[1]
-    rows = await console.db.fetch_all("SELECT * FROM {{tables.console_sessions}}")
+    [row] = await console.db.fetch_all("SELECT * FROM {{tables.console_sessions}}")
     stored = b"".join(
-        value if isinstance(value, bytes) else str(value).encode()
-        for row in rows
-        for value in row.values()
+        value if isinstance(value, bytes) else str(value).encode() for value in row.values()
     )
     assert token.encode() not in stored
     assert csrf.encode() not in stored
-    assert hashlib.sha256(token.encode()).digest() in stored
+    assert row["token_sha256"] == hashlib.sha256(token.encode()).digest()
+    assert row["csrf_sha256"] == hashlib.sha256(csrf.encode()).digest()
 
 
 async def test_an_expired_session_is_refused(console: Console, owners: dict[str, Owner]) -> None:
     async with await _client(console.sessions(ttl=timedelta(seconds=1))) as client:
         cookie, _ = await _login(client, owners)
         assert (await client.get("/whoami", headers={"Cookie": cookie})).status_code == 200
-        await asyncio.sleep(1.2)
-        assert (await client.get("/whoami", headers={"Cookie": cookie})).status_code == 401
+        session = await _session(console, cookie)
+        await _wait_for_database_expiry(console, session.expires_at)
+        refused = await client.get("/whoami", headers={"Cookie": cookie})
+    assert (refused.status_code, refused.json()) == (401, {"detail": "console_session_required"})
+    assert "set-cookie" in refused.headers
+    cleared = SimpleCookie(refused.headers["set-cookie"])[cookie.split("=", 1)[0]]
+    assert cleared.value == ""
+    assert cleared["max-age"] == "0"
 
 
 async def test_a_session_lasts_at_most_fifteen_minutes(
@@ -246,15 +251,30 @@ async def test_console_responses_carry_the_console_headers(
 async def test_ended_sessions_are_dropped_as_new_ones_open(
     console: Console, owners: dict[str, Owner]
 ) -> None:
-    async with await _client(console.sessions(ttl=timedelta(seconds=1))) as client:
-        expired, _ = await _login(client, owners)
-        closing, csrf = await _login(client, owners)
-        await client.post("/logout", headers={"Cookie": closing, "X-CSRF-Token": csrf})
-        await asyncio.sleep(1.2)
+    async with await _client(console.sessions()) as client:
+        closing_cookie, csrf = await _login(client, owners)
+        closing = await _session(console, closing_cookie)
+        async with await _client(console.sessions(ttl=timedelta(seconds=1))) as short:
+            expiring_cookie, _ = await _login(short, owners)
+            expiring = await _session(console, expiring_cookie)
+
+        logout = await client.post("/logout", headers={"Cookie": closing_cookie, "X-CSRF-Token": csrf})
+        assert logout.status_code == 200
+        await _wait_for_database_expiry(console, expiring.expires_at)
+        ended = await console.db.fetch_all(
+            "SELECT token_sha256, closed_at IS NOT NULL AS closed, expires_at <= NOW() AS expired "
+            "FROM {{tables.console_sessions}}"
+        )
+        assert {(row["token_sha256"], row["closed"], row["expired"]) for row in ended} == {
+            (closing.token_sha256, True, False),
+            (expiring.token_sha256, False, True),
+        }
+
         current, _ = await _login(client, owners)
+        session = await _session(console, current)
         assert (await client.get("/whoami", headers={"Cookie": current})).status_code == 200
-    rows = await console.db.fetch_value("SELECT count(*) FROM {{tables.console_sessions}}")
-    assert rows == 1
+    rows = await console.db.fetch_all("SELECT token_sha256 FROM {{tables.console_sessions}}")
+    assert [row["token_sha256"] for row in rows] == [session.token_sha256]
 
 
 async def test_opening_a_session_does_not_wait_on_a_locked_ended_one(
@@ -294,13 +314,19 @@ async def test_a_failing_prune_does_not_fail_opening_a_session(
     )
     async with await _client(console.sessions()) as client:
         cookie, csrf = await _login(client, owners)
-        await client.post("/logout", headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        ended = await _session(console, cookie)
+        logout = await client.post("/logout", headers={"Cookie": cookie, "X-CSRF-Token": csrf})
+        assert logout.status_code == 200
         with caplog.at_level("WARNING", logger="aweb_naapp.console"):
             current, _ = await _login(client, owners)
         assert (await client.get("/whoami", headers={"Cookie": current})).status_code == 200
     [record] = [r for r in caplog.records if r.name == "aweb_naapp.console"]
-    assert "console_sessions" in record.getMessage()
-    assert cookie.split("=", 1)[1] not in record.getMessage()
+    assert record.getMessage() == "console prune of console_sessions failed: QueryError"
+    assert record.exc_info is None
+    assert await console.db.fetch_value(
+        "SELECT closed_at FROM {{tables.console_sessions}} WHERE token_sha256=$1",
+        ended.token_sha256,
+    ) is not None
 
 
 async def _session(console: Console, cookie: str) -> ConsoleSession:
@@ -318,6 +344,13 @@ async def _session(console: Console, cookie: str) -> ConsoleSession:
         token_sha256=bytes(row["token_sha256"]),
         member=await console.member(row["scope"]),
     )
+
+
+async def _wait_for_database_expiry(console: Console, expires_at: datetime) -> None:
+    """Wait on the PostgreSQL clock used by cookie reads and pruning."""
+    async with asyncio.timeout(5):
+        while not await console.db.fetch_value("SELECT NOW() >= $1::timestamptz", expires_at):
+            await asyncio.sleep(0.01)
 
 
 async def _current(console: Console, session: ConsoleSession, *, hold: bool = False) -> bool:

@@ -85,15 +85,17 @@ async def test_production_hook_delivery_uses_explicit_dns_ca_and_internal_networ
     target.respond = receive
     await dns.start()
     try:
-        if deployment:
-            dns.records[("_awid.example.com", "TXT")] = [
-                '"' + awid_txt_value(member.team_did_key, REGISTRY_URL) + '"'
-            ]
-            system_dns = dns_api.Resolver(configure=False)
-            system_dns.nameservers = ["127.0.0.1"]
-            system_dns.port = dns.port
-            monkeypatch.setattr(dns_api, "default_resolver", system_dns)
+        system_dns = dns_api.Resolver(configure=False)
+        system_dns.nameservers = ["127.0.0.1"]
+        system_dns.port = dns.port
+        monkeypatch.setattr(dns_api, "default_resolver", system_dns)
         async with authority(test_db_factory, registry, member) as (aweb_db, transport):
+            # Secrets reads AWID's namespace evidence from DNS: publish the test
+            # registry's own namespace controller on the private server.
+            namespace = await registry.namespace_authority("example.com")
+            dns.records[("_awid.example.com", "TXT")] = [
+                '"' + awid_txt_value(namespace.controller_did, REGISTRY_URL) + '"'
+            ]
             async with AsyncExitStack() as stack:
                 if deployment:
                     origin, logs_manifest, logs_db = await stack.enter_async_context(

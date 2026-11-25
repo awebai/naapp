@@ -430,6 +430,40 @@ jobs:
           path: junit/
           if-no-files-found: warn
 
+  library-image:
+    name: Library image starts and serves
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.packages), 'naapp/library')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PACKAGES: naapp/library
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Built from the repository root as the release builds it, started with a
+      # minimal configuration; /live must name Library and this build's commit.
+      - name: Build the Library image and check it serves
+        env:
+          IMAGE_SMOKE_SHA: ${{ github.sha }}
+          IMAGE_SMOKE_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: make image-smoke-library
+
   logs:
     name: Logs lint and tests
     needs: plan
@@ -771,6 +805,7 @@ jobs:
       - folio-image
       - library
       - library-e2e
+      - library-image
       - logs
       - secrets
       - secrets-e2e

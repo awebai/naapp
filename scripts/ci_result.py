@@ -24,6 +24,7 @@ JOBS = {
     'folio-image': 'naapp/folio',
     'library': 'naapp/library',
     'library-e2e': 'naapp/library',
+    'library-image': 'naapp/library',
     'logs': 'naapp/logs',
     'secrets': 'naapp/secrets',
     'secrets-e2e': 'naapp/secrets',

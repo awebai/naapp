@@ -9,9 +9,6 @@ from aweb_secrets.custody import Custody, CustodyUnavailable, SealedValue, unsea
 from aweb_secrets.custody.values import ValueInvalid
 from tests.custody.conftest import value_bytes
 from tests.custody.test_store import INSTALLATION, TEAM
-from tests.custody.test_store import db as _db
-
-db = _db
 
 
 async def stage(db, custody, value, *, installation=INSTALLATION, team=TEAM):

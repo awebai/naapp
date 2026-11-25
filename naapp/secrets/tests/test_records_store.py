@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
-
 import asyncpg
 import pytest
 from aweb_naapp.egress import InternalDestinations
@@ -74,14 +72,16 @@ def _grant(grant_id: str, subject: dict, **changes) -> GrantRecord:
     return GrantRecord.from_after(after)
 
 
-@pytest.fixture
-async def db(test_db_factory) -> AsyncIterator[AsyncDatabaseManager]:
-    database = await test_db_factory.create_db(suffix="secrets_records")
+async def migrate_records_database(database: AsyncDatabaseManager) -> None:
     await AsyncMigrationManager(
         database, migrations_path=str(MIGRATIONS_PATH), module_name=MODULE_NAME
     ).apply_pending_migrations()
     await apply_revision_migrations(database)
-    yield database
+
+
+@pytest.fixture
+async def db(clone_database, records_template) -> AsyncDatabaseManager:
+    return await clone_database(records_template, suffix="secrets_records")
 
 
 async def _setup(db: AsyncDatabaseManager) -> None:

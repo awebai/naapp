@@ -22,9 +22,6 @@ from tests.custody.conftest import initial_record, value_bytes
 from tests.custody.test_backend_tokens import stage as stage_token
 from tests.custody.test_onepassword_staging import candidate, stage_ref
 from tests.custody.test_store import INSTALLATION, TEAM
-from tests.custody.test_store import db as _db
-
-db = _db
 
 
 async def active_fixture(db, provider, canary):

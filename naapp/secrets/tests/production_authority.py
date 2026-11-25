@@ -32,8 +32,7 @@ async def no_dns_override(domain):
 
 
 @asynccontextmanager
-async def authority(test_db_factory, registry, member, *, visibility="public"):
-    database = await test_db_factory.create_db(suffix="root_external_aweb")
+async def authority_infra(database, *, run_migrations: bool):
     pool = await AsyncDatabaseManager.create_shared_pool(
         build_database_config(
             connection_string=database.config.get_dsn(), min_connections=2, max_connections=5
@@ -41,7 +40,21 @@ async def authority(test_db_factory, registry, member, *, visibility="public"):
     )
     infra = DatabaseInfra()
     try:
-        await infra.initialize(shared_pool=pool)
+        await infra.initialize(shared_pool=pool, run_migrations=run_migrations)
+        yield infra
+    finally:
+        await infra.close()
+        await pool.close()
+
+
+async def migrate_authority(database):
+    async with authority_infra(database, run_migrations=True):
+        pass
+
+
+@asynccontextmanager
+async def authority(database, registry, member, *, visibility="public"):
+    async with authority_infra(database, run_migrations=False) as infra:
         db = infra.get_manager()
         assert await db.fetch_value("SELECT current_database()") == await database.fetch_value(
             "SELECT current_database()"
@@ -86,9 +99,6 @@ async def authority(test_db_factory, registry, member, *, visibility="public"):
             return await call_next(request)
 
         yield db, ServiceTransport(app)
-    finally:
-        await infra.close()
-        await pool.close()
 
 
 async def install(db, member, data, scopes):

@@ -3,12 +3,14 @@
 from types import SimpleNamespace
 
 import pytest
+import pytest_asyncio
 from aweb_naapp.runtime.authorization import GrantUnavailable
 from aweb_naapp.runtime.installation import (
     InstallationFence,
     InstallationRefused,
     apply_installation_migrations,
 )
+from aweb_naapp_testing.database_fixtures import database_template
 from aweb_naapp_testing.owner_acts import INSTALLATION_ID
 
 from aweb_secrets.installation_lookup import InstallationLookup
@@ -38,10 +40,17 @@ class Authority(Installations):
         return SimpleNamespace(**fields)
 
 
+@pytest_asyncio.fixture(scope="session")
+async def schema_template():
+    async with database_template(
+        apply_installation_migrations, suffix="root_lookup_template"
+    ) as template:
+        yield template
+
+
 @pytest.fixture
-async def lookup(test_db_factory):
-    db = await test_db_factory.create_db(suffix="root_lookup")
-    await apply_installation_migrations(db)
+async def lookup(clone_database, schema_template):
+    db = await clone_database(schema_template, suffix="root_lookup")
     source = Authority()
     fence = InstallationFence(db, app_id=APP_ID, grants=source)
     return InstallationLookup(fence), db, source

@@ -148,6 +148,18 @@ jobs:
       - name: Install the test browser
         run: make browsers
 
+      # The page renderer runs in the rest shard only, which holds the
+      # store/renderer browser test (tests/page_store).
+      - name: Set up Node
+        if: matrix.shard == 'rest'
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Install the page renderer's locked packages and browser
+        if: matrix.shard == 'rest'
+        run: make renderer-deps
+
       - name: Lint and type-check
         run: make lint
 
@@ -161,6 +173,10 @@ jobs:
       # host to loopback for Chromium and Playwright's driver.
       - name: Run tests offline against real PostgreSQL and Redis
         run: make test
+
+      - name: Run the page renderer's tests
+        if: matrix.shard == 'rest'
+        run: make test-renderer
 
       - name: Keep the per-test results
         if: always()

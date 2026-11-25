@@ -16,7 +16,11 @@ from fastapi import FastAPI, HTTPException, Request
 from aweb_secrets.approval_kind import approval_kind
 from aweb_secrets.console import OwnerConsole, owner_console_router
 from aweb_secrets.console_changes import ConsoleChanges, console_changes_router
-from aweb_secrets.console_values import ConsoleValues, console_values_router
+from aweb_secrets.console_values import (
+    ConsoleValues,
+    console_native_values_router,
+    console_values_router,
+)
 from aweb_secrets.use_context import apply_use_context_migrations
 from tests.human_owner import fixture_member_admission
 from tests.test_change_set_onepassword import view
@@ -73,9 +77,8 @@ async def application(
     human_app.include_router(
         console_ui_router(shell=console.shell, sessions=console.sessions, banner=no_banner)
     )
-    human_app.include_router(
-        console_values_router(ConsoleValues(console=console, custody=w.custody))
-    )
+    values = ConsoleValues(console=console, custody=w.custody)
+    human_app.include_router(console_values_router(values))
     changes = ConsoleChanges(
         console=console,
         changes=w.change_sets,
@@ -85,6 +88,7 @@ async def application(
         after_commit=cleanup or w.containment.evict,
     )
     human_app.include_router(console_changes_router(changes))
+    human_app.include_router(console_native_values_router(values, changes=changes))
     if forms:
         from aweb_secrets.console_forms import console_forms_router
 

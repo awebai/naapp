@@ -2,21 +2,35 @@
 
 import asyncio
 import copy
+import json
+import logging
 import os
 import re
+from datetime import datetime
 from urllib.parse import quote, urlencode
 
 import pytest
 import uvicorn
 from aweb_naapp.console import CONSOLE_HEADERS
+from aweb_naapp.egress import InternalDestinations
+from aweb_naapp.idempotency import apply_idempotency_migrations
+from aweb_naapp.ratelimit import apply_ratelimit_migrations
 from aweb_naapp.runtime.approvals import ApprovalState
 from aweb_naapp.runtime.passkeys import RelyingParty
 from aweb_naapp_testing.owner_acts import INSTALLATION_ID
 from playwright.async_api import TimeoutError as BrowserTimeout
 from playwright.async_api import expect
 
+from aweb_secrets import records
+from aweb_secrets.custody import CustodyUnavailable, SealContext, encode_value
+from aweb_secrets.custody.opening import UseSecretOpener
+from aweb_secrets.destination import DestinationRecord
 from aweb_secrets.owners import owner_scope
 from tests.console_network import passkey_origin as passkey_origin
+from tests.harness import running_upstream
+from tests.test_admission import _install
+from tests.test_broker_audit import envelopes
+from tests.test_broker_service import broker_for, submission
 from tests.test_change_records import ITEMS
 from tests.test_change_sets import ALICE, TEAM, enrol_owner
 from tests.test_change_sets import world as _world
@@ -82,16 +96,38 @@ async def test_frozen_reason_cannot_escape_review_markup(world):
 
 
 @pytest.fixture
-async def service(world, console_tls, console_listener):
+def native_http_responses():
+    return []
+
+
+@pytest.fixture
+async def service(world, console_tls, console_listener, request):
     sock = console_listener.socket
     port, origin = console_listener.port, console_listener.origin
     world.passkeys.rp = RelyingParty(origin=origin, name="Secrets")
     app = await application(
         world, forms=True, human_origin=origin, agent_origin=f"https://127.0.0.1:{port}"
     )
+    served = app
+    if "native_http_responses" in request.fixturenames:
+        messages = request.getfixturevalue("native_http_responses")
+
+        async def capture(scope, receive, send):
+            async def forward(message):
+                if message["type"] == "http.response.start":
+                    messages.extend(value for _, value in message["headers"])
+                elif message["type"] == "http.response.body":
+                    messages.append(message.get("body", b""))
+                await send(message)
+
+            if scope["type"] == "http":
+                messages.extend((scope["raw_path"], scope["query_string"]))
+            await app(scope, receive, forward)
+
+        served = capture
     server = uvicorn.Server(
         uvicorn.Config(
-            app,
+            served,
             log_level="warning",
             lifespan="off",
             ssl_certfile=str(console_tls.cert_file),
@@ -147,6 +183,165 @@ async def wait_for_review(page, review):
     except BrowserTimeout:
         # Browser navigation diagnostics may include a transient fragment token.
         raise AssertionError("approval sign-in did not load its frozen review") from None
+
+
+@pytest.mark.parametrize("kind", ["bearer", "basic"])
+async def test_native_browser_draft_dispatch_and_replacement(
+    world, browser, service, tmp_path, caplog, native_http_responses, kind
+):
+    caplog.set_level(logging.INFO)
+    await apply_idempotency_migrations(world.db)
+    await apply_ratelimit_migrations(world.db)
+    root = f"/installations/{INSTALLATION_ID}/native-values"
+    ref = "staging-api"
+    malformed = os.urandom(24).hex()
+    browser_logs = []
+    opener = UseSecretOpener(
+        world.db, native=world.custody.opener,
+        credential_opener=world.custody.backend_credential_opener,
+    )
+
+    async def approve_latest(page):
+        _, locator = world.inbox.links["alice@acme.com"][-1]
+        await page.goto(service + "/approvals#token=" + quote(locator, safe=""))
+        button = page.get_by_role("button", name="Confirm with your passkey")
+        await expect(button).to_be_enabled()
+        await button.click()
+        await expect(page.locator("#form-status")).to_have_attribute("data-state", "applied")
+
+    async def save(page, path, value, version):
+        fields = [page.locator(f'#native-secret [data-kind="{kind}"] [data-value="{key}"]')
+                  for key in value]
+        for field, text in zip(fields, value.values(), strict=True):
+            assert await field.get_attribute("type") == "password"
+            await field.fill(text)
+        async with page.expect_response(service + path) as receipt:
+            await page.get_by_role("button", name="Save a native value draft").click()
+        response = await receipt.value
+        assert response.status == 201
+        body = await response.json()
+        assert set(body) == {"version", "created_at"} and body["version"] == version
+        assert datetime.fromisoformat(body["created_at"]) == await world.db.fetch_value(
+            "SELECT created_at FROM {{tables.sealed_versions}} WHERE version=$1", version
+        )
+        for field in fields:
+            await expect(field).to_have_value("")
+        await expect(page.locator("#native-status")).to_contain_text(f"Version {version}")
+        state = await page.evaluate("() => JSON.stringify({...sessionStorage, ...localStorage})")
+        page_evidence = (await page.content(), state)
+        if any(text in item for text in value.values() for item in page_evidence):
+            pytest.fail("browser retained the submitted value after sealing")
+
+    async with running_upstream(tmp_path) as upstream, await browser.new_context() as context:
+        entered = (
+            {"value": upstream.creds.bearer} if kind == "bearer" else
+            {"username": upstream.creds.basic_username, "password": upstream.creds.basic_password}
+        )
+        replacement = {key: os.urandom(24).hex() for key in entered}
+        upstream_path = f"/{kind}/echo"
+        broker = broker_for(world.db, world.fence, world.custody, upstream)
+        request = submission(
+            upstream, installation=INSTALLATION_ID, generation=world.admitted.generation,
+            url=upstream.url(upstream_path),
+        )
+        page, _, _ = await enrolled_page(world, context, service)
+        page.on("console", lambda message: browser_logs.append(message.text))
+        page.on("pageerror", lambda error: browser_logs.append(str(error)))
+        await page.get_by_role("link", name="Create a secret").click()
+        form = page.locator("#native-secret")
+        await expect(form).to_be_visible()
+        await form.get_by_label("Secret name").fill(ref)
+        invalid = await page.evaluate(
+            """async ({path, marker}) => {
+              const form = document.querySelector("#native-secret");
+              const secret = {
+                v: 1, secret_id: form.elements.secret_id.value, ref: form.elements.ref.value,
+                description: "", kind: "bearer", kind_params: {}, sensitivity: "standard",
+                approve_only: false, backend: "native",
+              };
+              try {
+                await window.awebConsole.post(path, {secret, value: [marker], reason: "Check shape"});
+              } catch (error) {
+                return {status: error.status, detail: error.detail};
+              }
+            }""",
+            {"path": root, "marker": malformed},
+        )
+        assert invalid == {"status": 400, "detail": "request_invalid"}
+        assert await world.db.fetch_value("SELECT count(*) FROM {{tables.sealed_versions}}") == 0
+        assert await world.db.fetch_value("SELECT count(*) FROM {{tables.change_sets}}") == 0
+
+        await form.get_by_label("Authentication kind").select_option(kind)
+        await save(page, root, entered, 1)
+        [staged] = await world.db.fetch_all(
+            "SELECT secret_id, version FROM {{tables.change_set_sealed}}"
+        )
+        first = SealContext(INSTALLATION_ID, TEAM, staged["secret_id"], staged["version"])
+        with pytest.raises(CustodyUnavailable):
+            await opener.open(first)
+        refused = await broker.submit(secret=ref, submission=request)
+        assert (refused.status, refused.body["code"]) == (403, "grant_missing")
+        assert upstream.requests == []
+        await approve_latest(page)
+
+        async with world.db.transaction() as tx:
+            stored = await records.secret_by_ref(tx, INSTALLATION_ID, TEAM, ref)
+            assert stored is not None and stored.active_version == 1
+            await records.create_destination(
+                tx, INSTALLATION_ID, TEAM,
+                DestinationRecord.from_after(
+                    {
+                        "v": 1, "destination_id": "dst_native000", "secret_id": first.secret_id,
+                        "scheme": "https", "host": "upstream.secrets.test", "port": upstream.port,
+                        "path": f"/{kind}/**", "methods": ["POST"], "query_rules": {},
+                        "header_allow": [], "network": "internal", "cidr": f"{upstream.host}/32",
+                    },
+                    internal_destinations=InternalDestinations.ALLOWED,
+                ),
+            )
+        # Attach a test destination and grant to the record created by the browser.
+        await _install(
+            world.db, installation_id=INSTALLATION_ID,
+            secret=dict(stored.record.after), active_version=None,
+        )
+        result = await broker.submit(secret=ref, submission=request)
+        assert (result.status, result.body["state"]) == (200, "completed")
+        assert result.body["result"]["status"] == 200
+        assert upstream.paths == [upstream_path]
+
+        await page.goto(service + "/secrets/replace?ref=" + ref)
+        await save(page, root + "/" + ref, replacement, 2)
+        second = SealContext(INSTALLATION_ID, TEAM, first.secret_id, 2)
+        with pytest.raises(CustodyUnavailable):
+            await opener.open(second)
+        assert await world.db.fetch_value("SELECT active_version FROM {{tables.secrets}}") == 1
+        await approve_latest(page)
+        assert await world.db.fetch_value("SELECT active_version FROM {{tables.secrets}}") == 2
+        assert await world.db.fetch_value(
+            "SELECT array_agg(version ORDER BY version) FROM {{tables.sealed_versions}}"
+        ) == [2]
+        if (await opener.open(second)).reveal() != encode_value(kind, replacement):
+            pytest.fail("replacement did not open to the submitted value")
+        with pytest.raises(CustodyUnavailable):
+            await opener.open(first)
+
+        events = await envelopes(world.db)
+        acts = [
+            event["payload"]["act"] for event in events
+            if event["hook"] == "post-governance-hook"
+            and event["payload"].get("resource_type") == "secret"
+            and event["payload"].get("resource_ref") == first.secret_id
+        ]
+        assert sorted(acts) == ["resource.created", "resource.version_added", "resource.version_added"]
+        retained = await page.evaluate("() => JSON.stringify({...sessionStorage, ...localStorage})")
+        evidence = "\n".join(
+            browser_logs + [page.url, await page.content(), retained, caplog.text,
+                            json.dumps(events), json.dumps(result.body)]
+        ).encode()
+        wire = b"\n".join(native_http_responses)
+        markers = (*entered.values(), *replacement.values(), malformed)
+        if any(value.encode() in evidence or value.encode() in wire for value in markers):
+            pytest.fail("native input leaked into a response, browser state, audit or log")
 
 
 @pytest.mark.parametrize(

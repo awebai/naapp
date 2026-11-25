@@ -23,6 +23,9 @@ def parser() -> argparse.ArgumentParser:
     p.add_argument("--env-file", default=os.environ.get("RENDER_ENV_FILE", "~/.aweb-render/env"))
     sub = p.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
+    sub.add_parser(
+        "public-identity", help="the running deploy as its public health reports it; no Render key"
+    )
     deploy = sub.add_parser("deploy")
     deploy.add_argument("--commit", default=os.environ.get("PROD_COMMIT", ""))
     deploy.add_argument("--rollback-deploy-id", default=os.environ.get("ROLLBACK_DEPLOY_ID", ""))
@@ -61,6 +64,8 @@ def run(args: argparse.Namespace) -> dict:
         render.confirm_apply(config, apply=args.apply, confirm_service_id=args.confirm_service_id)
     if args.command == "deploy":
         render.confirm_repository_change(args.from_repository, args.confirm_from_repository)
+    if args.command == "public-identity":
+        return render.public_identity(config)
     if getattr(args, "timeout", 1) <= 0:
         raise render.OpsError("timeout must be positive")
     client = render.RenderClient(render.load_api_key(Path(args.env_file).expanduser()))
@@ -79,7 +84,11 @@ def run(args: argparse.Namespace) -> dict:
         )
     if args.command == "wait":
         return render.wait(
-            client, config, deploy_id=args.deploy_id, commit=args.commit, timeout_seconds=args.timeout
+            client,
+            config,
+            deploy_id=args.deploy_id,
+            commit=args.commit,
+            timeout_seconds=args.timeout,
         )
     if args.command == "verify":
         return render.verify(client, config, deploy_id=args.deploy_id, commit=args.commit)

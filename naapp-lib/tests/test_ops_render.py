@@ -8,6 +8,7 @@ from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -679,6 +680,57 @@ def _deployment(*, commit: str) -> dict[str, str]:
     }
 
 
+def _identified(state: FakeRender, config: ProductionConfig, **changes: str) -> ProductionConfig:
+    """The fake serves Render's deployment block for its live build; the config pins it."""
+    host = urlsplit(config.origin_url).hostname or ""
+    block = {**_deployment(commit=LIVE_COMMIT), "service_name": "folio-tmd1", "hostname": host,
+             "origin_url": config.origin_url, "repo": "awebai/naapp", **changes}
+    state.health_extra = {"deployment": block}
+    return replace(config, repo="https://github.com/awebai/naapp", service_slug="folio-tmd1")
+
+
+def test_public_identity_reads_the_running_deploy_without_a_key(fake) -> None:
+    state, config, _client = _ready(fake)
+    config = _identified(state, config)
+
+    result = render.public_identity(config)
+
+    assert result["deployment"]["commit"] == LIVE_COMMIT
+    assert result["deployment"]["repo"] == "awebai/naapp"
+    assert [path for _method, path, _body in state.requests] == ["/health"]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("service_id", "srv-other00000"),
+        ("service_name", "folio-other"),
+        ("hostname", "elsewhere.example"),
+        ("repo", "awebai/aweb"),
+        ("branch", "release"),
+        ("commit", EARLIER_COMMIT),
+    ],
+)
+def test_public_identity_refuses_a_deploy_that_is_not_the_pinned_one(fake, field, value) -> None:
+    state, config, _client = _ready(fake)
+    config = _identified(state, config, **{field: value})
+    with pytest.raises(OpsError, match=field if field != "commit" else "build"):
+        render.public_identity(config)
+
+
+def test_public_identity_needs_render_s_deployment_block(fake) -> None:
+    state, config, _client = _ready(fake)
+    with pytest.raises(OpsError, match="deployment"):
+        render.public_identity(config)
+
+
+def test_the_config_may_pin_the_render_slug(tmp_path: Path) -> None:
+    assert ProductionConfig.load(_write_config(tmp_path, service_slug="folio-tmd1")).service_slug == "folio-tmd1"
+    assert ProductionConfig.load(_write_config(tmp_path)).service_slug is None
+    with pytest.raises(OpsError):
+        ProductionConfig.load(_write_config(tmp_path, unknown="x"))
+
+
 def test_wait_stops_on_a_failed_build(fake) -> None:
     state, config, client = _ready(fake)
     state.deploys.insert(0, {"id": "dep-failed01", "status": "build_failed", "commit": {"id": "c" * 40}})
@@ -736,6 +788,14 @@ def test_cli_refuses_an_unconfirmed_repository_move_before_reading_any_key(tmp_p
     assert result.returncode == 2
     assert "repository move refused" in result.stderr
     assert result.stdout == ""
+
+
+def test_cli_public_identity_reads_no_render_key(tmp_path: Path) -> None:
+    config = _write_config(tmp_path, public_url="https://127.0.0.1:1")
+    result = _cli("--config", str(config), "--env-file", str(tmp_path / "absent"), "public-identity")
+    assert result.returncode == 2
+    assert "public identity" in result.stderr or "health request" in result.stderr
+    assert "Render env file" not in result.stderr
 
 
 def test_cli_reports_a_missing_key_file_as_one_error(tmp_path: Path) -> None:

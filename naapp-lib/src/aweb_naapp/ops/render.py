@@ -17,10 +17,11 @@ import re
 import subprocess
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, fields
+from dataclasses import MISSING, dataclass, fields
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 API_BASE = "https://api.render.com/v1"
@@ -82,6 +83,8 @@ class ProductionConfig:
     # What the app's health reports as its ``service`` (naapp-lib's runtime health
     # answers the app id).
     app_id: str
+    # Render's service slug, as the running deploy reports it (RENDER_SERVICE_NAME).
+    service_slug: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> ProductionConfig:
@@ -89,9 +92,13 @@ class ProductionConfig:
             raw = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise OpsError(f"invalid production config: {path}") from exc
-        expected = {item.name for item in fields(cls)}
-        if not isinstance(raw, dict) or set(raw) != expected:
-            raise OpsError(f"production config must have exactly the fields {sorted(expected)}")
+        required = {item.name for item in fields(cls) if item.default is MISSING}
+        optional = {item.name for item in fields(cls)} - required
+        if not isinstance(raw, dict) or not required <= set(raw) <= required | optional:
+            raise OpsError(
+                f"production config must have the fields {sorted(required)}"
+                f" and may have {sorted(optional)}"
+            )
         if not all(isinstance(value, str) for value in raw.values()):
             raise OpsError("production config values must be strings")
         config = cls(**raw)
@@ -473,6 +480,56 @@ def _health_identity(config: ProductionConfig, url: str, commit: str) -> dict[st
     ):
         raise OpsError(f"health at {url} names a deployment of another build")
     return {"service": payload["service"], "git_sha": sha}
+
+
+DEPLOYMENT_IDENTITY_FIELDS = (
+    "service_id",
+    "service_name",
+    "hostname",
+    "origin_url",
+    "repo",
+    "branch",
+    "commit",
+)
+
+
+def public_identity(config: ProductionConfig) -> dict[str, Any]:
+    """The running deploy as its public health URL reports it, with no Render key:
+    Render's deployment block must name the pinned service, slug, host, repository
+    and branch, and the build the health reports."""
+    url = f"{config.public_url.rstrip('/')}{config.health_path}"
+    status, body = _health_answer(url)
+    if status != 200:
+        raise OpsError(f"public identity at {url} answered HTTP {status}")
+    if len(body) > HEALTH_BODY_LIMIT:
+        raise OpsError(f"public identity at {url} answered more than {HEALTH_BODY_LIMIT} bytes")
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise OpsError(f"public identity at {url} did not answer JSON") from exc
+    deployment = payload.get("deployment") if isinstance(payload, dict) else None
+    if not isinstance(deployment, dict) or set(deployment) != set(DEPLOYMENT_IDENTITY_FIELDS):
+        raise OpsError(f"public identity at {url} has no Render deployment block")
+    if not all(isinstance(value, str) and value for value in deployment.values()):
+        raise OpsError("public identity deployment fields must be nonempty strings")
+    build = payload.get("build")
+    if not isinstance(build, dict) or deployment["commit"] != build.get("git_sha"):
+        raise OpsError("public identity deployment commit is not the build its health reports")
+    expected = {
+        "service_id": config.service_id,
+        "hostname": urlsplit(config.origin_url).hostname or "",
+        "origin_url": config.origin_url.rstrip("/"),
+        "repo": canonical_git_repo(config.repo).removeprefix("github.com/"),
+        "branch": config.branch,
+    }
+    if config.service_slug is not None:
+        expected["service_name"] = config.service_slug
+    for name, value in expected.items():
+        if deployment[name] != value:
+            raise OpsError(
+                f"public identity {name} mismatch: observed {deployment[name]}, expected {value}"
+            )
+    return {"url": url, "deployment": deployment}
 
 
 def verify_health_surfaces(

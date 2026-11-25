@@ -30,6 +30,7 @@ from tests.test_e2e_owner_acts import (
     REGISTRY,
     UPSTREAMS,
     secrets_env,
+    write_service_member,
 )
 
 LANE = yaml.safe_load((APP_DIR / "docker-compose.e2e.yml").read_text())
@@ -71,6 +72,16 @@ def test_the_lanes_logs_uses_the_lanes_registry_and_mail_and_an_id_of_its_own():
     assert json.loads(env["LOGS_EGRESS_DENIED_NETWORKS"]) == []
 
 
+def test_secrets_approval_mail_uses_the_authenticated_tls_mailbox():
+    env = secrets_env()
+    mail = LANE["services"]["smtp-tls"]
+    assert env["SECRETS_EMAIL_SMTP_HOST"] in mail["networks"]["default"]["aliases"]
+    assert env["SECRETS_EMAIL_CA_FILE"] == env["SSL_CERT_FILE"]
+    assert "smtp-tls" in LANE["services"]["secrets"]["depends_on"]
+    assert mail["environment"]["MP_SMTP_REQUIRE_STARTTLS"] == "true"
+    assert mail["environment"]["MP_SMTP_AUTH_ACCEPT_ANY"] == "true"
+
+
 @pytest.fixture
 def prepared_lane(tmp_path):
     lane = ComposeLane(
@@ -85,6 +96,20 @@ def prepared_lane(tmp_path):
         controller_did="did:key:placeholder",
     )
     return lane
+
+
+def test_secrets_key_mount_contains_only_the_deployed_files(prepared_lane, monkeypatch):
+    def issue_member(lane, controller, name, home):
+        home.mkdir()
+        certificate = home / "certificate"
+        certificate.write_text("test certificate")
+        return "test key", certificate
+
+    monkeypatch.setattr("tests.test_e2e_owner_acts.admit_app_member", issue_member)
+    write_service_member(prepared_lane, "controller")
+    keys = prepared_lane.runtime / "keys"
+    assert (keys / "member-cert.json").read_text() == "test certificate"
+    assert all(path.is_file() for path in keys.iterdir())
 
 
 def test_the_front_serves_logs_and_aweb_installs_it_from_its_internal_origin(prepared_lane):

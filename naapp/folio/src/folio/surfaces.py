@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from html import escape
+from importlib.metadata import metadata
 from pathlib import Path
 
 import aweb_naapp as naapp
@@ -97,6 +98,15 @@ _REFERENCE_COPY = naapp.ReferenceCopy(
 )
 
 
+
+def _source_url() -> str:
+    """Folio's source, as its package metadata names it (pyproject's Homepage)."""
+    urls = dict(entry.split(", ", 1) for entry in metadata("folio").get_all("Project-URL") or ())
+    return urls["Homepage"]
+
+
+_SOURCE_URL = _source_url()
+
 def _site(*, public_origin: str, title: str, description: str) -> SiteConfig:
     return SiteConfig(
         origin=public_origin.rstrip("/"),
@@ -108,7 +118,7 @@ def _site(*, public_origin: str, title: str, description: str) -> SiteConfig:
         footer_columns=_FOOTER_COLUMNS,
         footer_bottom=_FOOTER_BOTTOM,
         header_actions=(),
-        source_url="https://github.com/awebai/aweb/tree/main/naapp/folio",
+        source_url=_SOURCE_URL,
         og_image="/brand/field-v1/folio-card.png",
     )
 
@@ -337,7 +347,7 @@ def render_landing_page(*, public_origin: str) -> str:
           <a class="btn primary btn--lg" href="#use">Get started</a>
           <a class="btn secondary btn--lg" href="/llms.txt">Read llms.txt</a>
         </div>
-        <p style="margin-top:var(--s3);font-size:var(--step-0);color:var(--muted)">Open source, MIT-licensed — <a href="https://github.com/awebai/aweb/tree/main/naapp/folio" style="color:var(--accent);font-weight:550">github.com/awebai/aweb (naapp/folio)</a></p>
+        <p style="margin-top:var(--s3);font-size:var(--step-0);color:var(--muted)">Open source, MIT-licensed — <a href="{escape(_SOURCE_URL, quote=True)}" style="color:var(--accent);font-weight:550">{escape(_SOURCE_URL.removeprefix("https://"))}</a></p>
       </div>
     </section>
 

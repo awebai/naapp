@@ -2517,7 +2517,7 @@ Q8 decided that neither `--unsafe-inject` nor `result_handling: return` exists.
 | T11 | Team controller (owner act) | designating the first owner and re-designating after a lockout (§10.2) | It is the root of trust for the installation's policy. Install or admin authority alone cannot bootstrap or recover secrets. The controller key signs an owner act only after a live, exact-act passkey approval by the current team owner, consumed once (§10.2). |
 | T12 | Hook targets (logs) | storing redacted events | They receive metadata, hashes and identifiers, never values. |
 | T13 | Network path and DNS | nothing | TLS verification, address checks and connection pinning (§7.3) |
-| T14 | PostgreSQL operator, any holder of the database owner role, and any principal able to write Secrets’ authorization tables | integrity of authorization state | Secrets trusts the integrity of database writes to its authorization tables today. A writer can widen what the service authorizes even without the custody key. Custody encryption separately protects stored native values. |
+| T14 | PostgreSQL operator, any holder of the database owner role, and any principal able to write Secrets' authorization tables | integrity of authorization state | Secrets trusts the integrity of these writes today. Custody encryption protects sealed native values from database-only reads. A database writer can widen authorization and cause Secrets to open a value and send it to an upstream destination, even without the custody key. |
 
 ### 14.2 The defensible claim
 
@@ -2531,8 +2531,9 @@ is:
 - recorded as durable intent and outcome in secrets' own store, with a signed
   hook event durably enqueued before any dispatch;
 
-all under T1–T14. This includes database write integrity in both hosted and
-dedicated deployments.
+all under T1–T14. In hosted and dedicated deployments alike, the claim assumes
+the integrity of writes to Secrets' authorization tables (T14). §14.3 proposes
+verifying that authority using evidence held outside PostgreSQL.
 
 **This design does not claim:**
 
@@ -2546,6 +2547,8 @@ dedicated deployments.
 - that an upstream side effect is exactly-once;
 - that runner jobs are confidential from the runner host;
 - replay protection beyond `request_id` deduplication.
+- that authorization state is protected from a writer to Secrets' PostgreSQL
+  authorization tables (T14).
 
 It also does not claim audit completeness for credentials the agent can reach by
 other means. The guarantee holds only where secrets is the sole path to the

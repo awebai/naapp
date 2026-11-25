@@ -266,11 +266,57 @@ def _run_git(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[Any]
     return subprocess.run(["git", *args], env=env, **kwargs)
 
 
-def verify_git_target(repo_root: Path, commit: str, *, expected_repo: str, branch: str) -> None:
-    """Require commit to be the branch tip on the configured remote, read from the remote
-    itself now rather than from a remote-tracking ref only as fresh as the last fetch."""
-    require_commit(commit)
+def _git_ok(repo_root: Path, *args: str) -> bool:
+    return (
+        _run_git(
+            ["-C", str(repo_root), *args], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+        ).returncode
+        == 0
+    )
+
+
+def _fetched_tip(repo_root: Path, url: str, branch: str, *, which: str) -> str:
+    """``branch`` of ``url`` as the remote has it now, with its history fetched."""
     remote_ref = f"refs/heads/{branch}"
+    try:
+        _run_git(
+            ["-C", str(repo_root), "fetch", "--quiet", "--no-tags", url, remote_ref],
+            check=True,
+            capture_output=True,
+        )
+        return _run_git(
+            ["-C", str(repo_root), "rev-parse", "--verify", "FETCH_HEAD^{commit}"],
+            check=True,
+            text=True,
+            capture_output=True,
+        ).stdout.strip()
+    except subprocess.CalledProcessError as exc:
+        raise OpsError(f"failed to read {remote_ref} from the {which} remote") from exc
+
+
+def _on_branch(repo_root: Path, commit: str, tip: str) -> bool:
+    return _git_ok(repo_root, "merge-base", "--is-ancestor", commit, tip)
+
+
+def verify_git_target(
+    repo_root: Path,
+    commit: str,
+    *,
+    expected_repo: str,
+    branch: str,
+    live_commit: str,
+    from_repository: str | None = None,
+) -> None:
+    """Require ``commit`` to be on the configured branch, read from the remote
+    itself now, and strictly ahead of the live commit: a deploy never moves
+    production backwards, which is rollback's job, with a built artifact.
+
+    A first deploy after the service moved repositories names the repository it
+    moved from: the live commit must then be absent from the configured branch
+    and on the previous repository's branch, the only case where the forward
+    check does not apply."""
+    require_commit(commit)
+    require_commit(live_commit, "live commit")
     try:
         origin_url = _run_git(
             ["-C", str(repo_root), "remote", "get-url", "origin"],
@@ -282,19 +328,28 @@ def verify_git_target(repo_root: Path, commit: str, *, expected_repo: str, branc
         raise OpsError("failed to read the local origin remote") from exc
     if canonical_git_repo(origin_url) != canonical_git_repo(expected_repo):
         raise OpsError("local origin remote is not the configured production repository")
-    try:
-        listed = _run_git(
-            ["-C", str(repo_root), "ls-remote", "--exit-code", origin_url, remote_ref],
-            check=True,
-            text=True,
-            capture_output=True,
-        ).stdout.split()
-    except subprocess.CalledProcessError as exc:
-        raise OpsError(f"failed to read {remote_ref} from the configured remote") from exc
-    if len(listed) != 2 or listed[1] != remote_ref:
-        raise OpsError(f"unexpected ls-remote answer for {remote_ref}")
-    if listed[0] != commit:
-        raise OpsError(f"remote {branch} is {listed[0]}, not the approved target {commit}")
+    tip = _fetched_tip(repo_root, origin_url, branch, which="configured")
+    if not _on_branch(repo_root, commit, tip):
+        raise OpsError(f"approved target {commit} is not on {branch} of the configured repository")
+    live_here = _on_branch(repo_root, live_commit, tip)
+    if from_repository is not None:
+        if live_here:
+            raise OpsError(
+                f"live commit {live_commit} is in the configured repository: nothing moved"
+            )
+        previous_tip = _fetched_tip(repo_root, from_repository, branch, which="previous")
+        if not _on_branch(repo_root, live_commit, previous_tip):
+            raise OpsError(
+                f"live commit {live_commit} is not on {branch} of the previous repository"
+            )
+        return
+    if not live_here:
+        raise OpsError(
+            f"live commit {live_commit} is not on {branch} of the configured repository; a first "
+            "deploy after the service moved repositories names it with --from-repository"
+        )
+    if commit == live_commit or not _on_branch(repo_root, live_commit, commit):
+        raise OpsError(f"approved target {commit} is not ahead of the live commit {live_commit}")
 
 
 def current_live(deploys: list[dict[str, Any]]) -> dict[str, Any]:
@@ -368,6 +423,16 @@ def check_health(config: ProductionConfig) -> dict[str, int]:
     return results
 
 
+def confirm_repository_change(from_repository: str | None, confirm_from_repository: str) -> None:
+    """A deploy across a repository move repeats the previous repository to confirm it."""
+    named = canonical_git_repo(from_repository) if from_repository else ""
+    confirmed = canonical_git_repo(confirm_from_repository) if confirm_from_repository else ""
+    if named != confirmed:
+        raise OpsError(
+            "repository move refused: the previous repository confirmation does not match"
+        )
+
+
 def confirm_apply(config: ProductionConfig, *, apply: bool, confirm_service_id: str) -> None:
     if not apply:
         raise OpsError("mutation refused: pass --apply (the Makefile requires APPLY=1)")
@@ -398,16 +463,26 @@ def deploy(
     rollback_deploy_id: str,
     rollback_commit: str,
     repo_root: Path,
+    from_repository: str | None = None,
     timeout_seconds: float = 900,
     interval_seconds: float = 10.0,
 ) -> dict[str, Any]:
+    """Deploy ``commit``; ``rollback_commit`` is the live commit it moves forward from."""
     require_commit(commit)
     require_commit(rollback_commit, "rollback commit")
     require_deploy_id(rollback_deploy_id, "rollback deploy ID")
-    verify_git_target(repo_root, commit, expected_repo=config.repo, branch=config.branch)
     validate_service(client.service(config.service_id), config)
     live = current_live(client.deploys(config.service_id))
     require_rollback_artifact(live, deploy_id=rollback_deploy_id, commit=rollback_commit)
+    # The rollback artifact is the live deploy, so its commit is the one to move forward from.
+    verify_git_target(
+        repo_root,
+        commit,
+        expected_repo=config.repo,
+        branch=config.branch,
+        live_commit=rollback_commit,
+        from_repository=from_repository,
+    )
     created = client.deploy_commit(config.service_id, commit)
     deploy_id = require_deploy_id(str(created.get("id") or ""), "created deploy ID")
     if deploy_commit(created) != commit:

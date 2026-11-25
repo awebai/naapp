@@ -96,7 +96,7 @@ settings.
 | Target | Effect | Inputs |
 | --- | --- | --- |
 | `make prod-status` | read only: the pinned service and its live deploy | `RENDER_ENV_FILE` |
-| `make prod-deploy` | deploys one commit, which must be the tip of `main` on the remote, while the named deploy is live | `PROD_COMMIT`, `ROLLBACK_DEPLOY_ID`, `ROLLBACK_COMMIT`, `APPLY=1`, `CONFIRM_SERVICE_ID` |
+| `make prod-deploy` | deploys one approved commit, which must be on `main` as the remote has it now (the tip or behind it) and strictly ahead of the live commit, while the named deploy is live; a first deploy after the service moved repositories names the repository it moved from | `PROD_COMMIT`, `ROLLBACK_DEPLOY_ID`, `ROLLBACK_COMMIT`, `APPLY=1`, `CONFIRM_SERVICE_ID`; for a repository move also `FROM_REPOSITORY` and `CONFIRM_FROM_REPOSITORY` |
 | `make prod-wait` | waits for a deploy to go live | `PROD_DEPLOY_ID`, `PROD_COMMIT` |
 | `make prod-verify` | read only: the deploy is live with that commit and health answers on both URLs | `PROD_DEPLOY_ID`, `PROD_COMMIT` |
 | `make prod-rollback` | redeploys an earlier deploy's built artifact | `ROLLBACK_DEPLOY_ID`, `ROLLBACK_COMMIT`, `CURRENT_DEPLOY_ID`, `CURRENT_COMMIT`, `APPLY=1`, `CONFIRM_SERVICE_ID` |

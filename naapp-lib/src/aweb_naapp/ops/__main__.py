@@ -28,6 +28,12 @@ def parser() -> argparse.ArgumentParser:
     deploy.add_argument("--rollback-deploy-id", default=os.environ.get("ROLLBACK_DEPLOY_ID", ""))
     deploy.add_argument("--rollback-commit", default=os.environ.get("ROLLBACK_COMMIT", ""))
     deploy.add_argument("--repo-root", default=".")
+    # Only for the first deploy after the service moved repositories: the repository
+    # it moved from, repeated in its own confirmation.
+    deploy.add_argument("--from-repository", default=os.environ.get("FROM_REPOSITORY") or None)
+    deploy.add_argument(
+        "--confirm-from-repository", default=os.environ.get("CONFIRM_FROM_REPOSITORY", "")
+    )
     deploy.add_argument("--confirm-service-id", default=os.environ.get("CONFIRM_SERVICE_ID", ""))
     deploy.add_argument("--timeout", type=int, default=900)
     deploy.add_argument("--apply", action="store_true", default=os.environ.get("APPLY") == "1")
@@ -53,6 +59,8 @@ def run(args: argparse.Namespace) -> dict:
     config = render.ProductionConfig.load(Path(args.config))
     if args.command in {"deploy", "rollback"}:
         render.confirm_apply(config, apply=args.apply, confirm_service_id=args.confirm_service_id)
+    if args.command == "deploy":
+        render.confirm_repository_change(args.from_repository, args.confirm_from_repository)
     if getattr(args, "timeout", 1) <= 0:
         raise render.OpsError("timeout must be positive")
     client = render.RenderClient(render.load_api_key(Path(args.env_file).expanduser()))
@@ -66,6 +74,7 @@ def run(args: argparse.Namespace) -> dict:
             rollback_deploy_id=args.rollback_deploy_id,
             rollback_commit=args.rollback_commit,
             repo_root=Path(args.repo_root),
+            from_repository=args.from_repository,
             timeout_seconds=args.timeout,
         )
     if args.command == "wait":

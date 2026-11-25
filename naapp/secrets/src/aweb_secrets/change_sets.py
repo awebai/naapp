@@ -1180,7 +1180,7 @@ class ChangeSets:
         item: Mapping[str, Any],
         evidence: OwnerApproval,
         confirmed_by: str,
-        authority: AuthorityRecords | None,
+        authority: AuthorityRecords | None = None,
     ) -> list[Designation] | ContactChange | RunnerRegistration | tuple[str, ...]:
         installation_id, team_id = change["installation_id"], change["team_id"]
         after = item["after"]

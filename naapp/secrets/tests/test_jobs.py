@@ -3,16 +3,13 @@
 from __future__ import annotations
 
 import copy
-from collections.abc import AsyncIterator
 
 import pytest
-from pgdbm import AsyncDatabaseManager
 
 from aweb_secrets.jobs import (
     JobDefinition,
     JobInvalid,
     JobRefused,
-    apply_job_migrations,
     create_job,
     current_job,
     job_by_digest,
@@ -229,10 +226,8 @@ def test_oci_change_draft_never_inherits_an_image_executable():
 
 
 @pytest.fixture
-async def db(test_db_factory) -> AsyncIterator[AsyncDatabaseManager]:
-    database = await test_db_factory.create_db(suffix="jobs")
-    await apply_job_migrations(database)
-    yield database
+async def db(jobs_database):
+    return jobs_database
 
 
 async def test_current_pin_is_installation_scoped_and_old_definition_is_immutable(db):

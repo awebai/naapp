@@ -4,15 +4,13 @@ import pytest
 
 from aweb_secrets.change import ChangeRefused
 from aweb_secrets.job_changes import apply_job_change, job_prelock_ids
-from aweb_secrets.jobs import JobDefinition, apply_job_migrations, current_job, job_by_digest
+from aweb_secrets.jobs import JobDefinition, current_job, job_by_digest
 from tests.test_jobs import after
 
 
 @pytest.fixture
-async def db(test_db_factory):
-    db = await test_db_factory.create_db(suffix="job_changes")
-    await apply_job_migrations(db)
-    yield db
+async def db(jobs_database):
+    return jobs_database
 
 
 def item(*, op="create", job=None):

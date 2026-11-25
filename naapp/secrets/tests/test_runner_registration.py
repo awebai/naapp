@@ -14,17 +14,14 @@ from nacl.signing import SigningKey
 from aweb_secrets.runner_routes import runner_registration_router
 from aweb_secrets.runners import (
     RunnerRecord,
-    apply_runner_migrations,
     create_runner,
     mint_runner_id,
 )
 
 
 @pytest.fixture
-async def db(test_db_factory):
-    database = await test_db_factory.create_db(suffix="runner_registration")
-    await apply_runner_migrations(database)
-    return database
+async def db(runners_database):
+    return runners_database
 
 
 async def test_registration_returns_only_public_pins_and_never_replays_code(db):

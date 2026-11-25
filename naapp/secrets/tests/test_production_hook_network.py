@@ -42,6 +42,8 @@ from tests.test_production_bootstrap import enrolled_owner
 )
 async def test_production_hook_delivery_uses_explicit_dns_ca_and_internal_network(
     test_db_factory,
+    production_database,
+    authority_database,
     registry,
     tmp_path,
     monkeypatch,
@@ -89,7 +91,7 @@ async def test_production_hook_delivery_uses_explicit_dns_ca_and_internal_networ
         system_dns.nameservers = ["127.0.0.1"]
         system_dns.port = dns.port
         monkeypatch.setattr(dns_api, "default_resolver", system_dns)
-        async with authority(test_db_factory, registry, member) as (aweb_db, transport):
+        async with authority(authority_database, registry, member) as (aweb_db, transport):
             # Secrets reads AWID's namespace evidence from DNS: publish the test
             # registry's own namespace controller on the private server.
             namespace = await registry.namespace_authority("example.com")
@@ -106,7 +108,7 @@ async def test_production_hook_delivery_uses_explicit_dns_ca_and_internal_networ
                 else:
                     await target.start()
                     origin = f"https://{name}:{target.port}"
-                database = await test_db_factory.create_db(suffix="production_hook_network")
+                database = production_database
                 with SmtpServer(tmp_path / "smtp") as smtp:
                     configured = settings(database, tmp_path, smtp).model_copy(
                         update={

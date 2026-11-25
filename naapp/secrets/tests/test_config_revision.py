@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+import pytest_asyncio
+from aweb_naapp_testing.database_fixtures import database_template
 from pgdbm import AsyncDatabaseManager
 
 from aweb_secrets.change import ChangeRefused, check_confirmable
@@ -23,11 +24,17 @@ OTHER = "inst_2"
 TEAM = "backend:acme.com"
 
 
+@pytest_asyncio.fixture(scope="session")
+async def schema_template():
+    async with database_template(
+        apply_revision_migrations, suffix="secrets_revisions_template"
+    ) as template:
+        yield template
+
+
 @pytest.fixture
-async def db(test_db_factory) -> AsyncIterator[AsyncDatabaseManager]:
-    database = await test_db_factory.create_db(suffix="secrets_revisions")
-    await apply_revision_migrations(database)
-    yield database
+async def db(clone_database, schema_template):
+    return await clone_database(schema_template, suffix="secrets_revisions")
 
 
 async def _bump(db: AsyncDatabaseManager, installation_id: str) -> int:

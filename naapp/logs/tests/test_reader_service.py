@@ -14,6 +14,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -327,6 +328,50 @@ async def log_in(deployment: Deployment, scope: str) -> httpx.Response:
     return await deployment.console.post(
         "/login", json={"scope": scope, "assertion": deployment.devices[scope].get(options.json())}
     )
+
+
+async def test_customer_gate_reports_the_setup_reader_and_its_live_session(
+    deployment: Deployment,
+    tmp_path: Path,
+):
+    reader = await human(deployment, "setup")
+    designated = await designate(deployment, reader)
+    assert designated.status_code == 200, designated.text
+    team_id = deployment.member.team_id
+    scope = holding_scope(deployment.installation_id, team_id, READER_ROLE, reader.principal)
+    assert (await log_in(deployment, scope)).status_code == 200
+
+    dsn = deployment.db.config.get_dsn()
+    credentials = tmp_path / "logs-database-url"
+    credentials.write_text(dsn, encoding="utf-8")
+    credentials.chmod(0o400)
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "aweb_logs.gate_observe",
+        "--database-url-file",
+        str(credentials),
+        "--schema",
+        deployment.db.schema or "public",
+        "--team-id",
+        team_id,
+        "--setup-principal",
+        reader.principal,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=20)
+    assert process.returncode == 0
+    assert not stderr, stderr.decode()
+    assert dsn.encode() not in stdout
+    report = json.loads(stdout)
+    assert not report["passed"] and report["readable"]
+    assert {(item["code"], item["subject"]) for item in report["findings"]} == {
+        ("role_assignment", reader.principal),
+        ("active_session", reader.principal),
+        ("setup_role_retained", reader.principal),
+        ("setup_session_retained", reader.principal),
+    }
 
 
 async def test_an_owner_designated_reader_logs_in_with_its_bound_passkey_and_reads(

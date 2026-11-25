@@ -19,7 +19,7 @@ AW_DIR ?= $(abspath .tools/bin)
 SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_served_manifest_digests \
 	test_secrets_shards test_shipping
 
-.PHONY: affected sync lint test test-scripts production-awid-sync browsers renderer-deps test-renderer image-smoke-folio image-smoke-library check-library-dev aw \
+.PHONY: affected sync lint lint-scripts test test-scripts production-awid-sync browsers renderer-deps test-renderer image-smoke-folio image-smoke-library check-library-dev aw \
 	check-library-aatk check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets release-checks \
 	release-candidate release-publish
 
@@ -73,6 +73,10 @@ test: production-awid-sync $(SECRETS_AW_TOOLS)
 # The repository's own scripts: package selection, manifest digests, shards
 # and the test infrastructure, in the runtime's locked environment, which has
 # the pytest the shard check runs.
+# Pyflakes and syntax errors in the repository's scripts, which no package lints.
+lint-scripts:
+	uv run --frozen --project naapp-lib ruff check --select F,E9 scripts
+
 test-scripts:
 	cd scripts && uv run --frozen --project ../naapp-lib python -m unittest -q $(SCRIPT_TESTS)
 	cd scripts/test-egress && python3 -m unittest -q test_native test_pgdg_key
@@ -137,6 +141,7 @@ check-secrets-shards:
 release-checks:
 	$(MAKE) sync PACKAGES="$(ALL_PACKAGES)"
 	$(MAKE) lint PACKAGES="$(ALL_PACKAGES)"
+	$(MAKE) lint-scripts
 	$(MAKE) test-scripts
 	$(MAKE) check-library-aatk
 	$(MAKE) check-secrets-shards

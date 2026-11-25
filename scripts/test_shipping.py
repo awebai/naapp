@@ -16,7 +16,6 @@ import unittest
 import zipfile
 from contextlib import redirect_stderr, redirect_stdout
 from unittest.mock import patch
-from email.message import Message
 from pathlib import Path
 
 from fixture_repo import fixture_env, init_fixture_repo

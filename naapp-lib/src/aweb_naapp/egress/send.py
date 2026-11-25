@@ -96,16 +96,23 @@ class Resolver(Protocol):
 
 
 class DnsResolver:
-    """The guard's own resolver: A and AAAA queries, no search domains.
+    """The guard's resolver: A and AAAA queries, no search domains.
 
-    Without ``nameservers`` it uses the system's resolver configuration.
+    Without ``nameservers`` it asks dnspython's process default resolver at each
+    query, which is built from the system's resolver configuration: the app's
+    one DNS boundary, shared with its AWID lookups. ``port`` belongs to the
+    explicit ``nameservers`` and never changes the shared resolver.
     """
 
     def __init__(self, nameservers: Sequence[str] | None = None, port: int = 53) -> None:
-        self._resolver = dns.asyncresolver.Resolver(configure=nameservers is None)
-        if nameservers is not None:
-            self._resolver.nameservers = list(nameservers)
-        self._resolver.port = port
+        self._own: dns.asyncresolver.Resolver | None = None
+        if nameservers is None:
+            if port != 53:
+                raise ValueError("a DNS port needs explicit nameservers")
+            return
+        self._own = dns.asyncresolver.Resolver(configure=False)
+        self._own.nameservers = list(nameservers)
+        self._own.port = port
 
     async def resolve(self, host: str) -> list[IPAddress]:
         name = dns.name.from_text(host)
@@ -125,7 +132,8 @@ class DnsResolver:
 
     async def _query(self, name: dns.name.Name, kind: str) -> list[IPAddress]:
         try:
-            answer = await self._resolver.resolve(name, kind, search=False)
+            resolver = self._own or dns.asyncresolver.get_default_resolver()
+            answer = await resolver.resolve(name, kind, search=False)
         except dns.resolver.NoAnswer:
             return []
         return [ip_address(record.address) for record in answer]

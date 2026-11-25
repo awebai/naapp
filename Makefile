@@ -132,9 +132,8 @@ check-secrets-shards:
 	uv sync --frozen --project naapp/secrets
 	$(MAKE) -C naapp/secrets check-shards
 
-# Everything CI runs, for every package: scripts/release_candidate.py tags a
-# commit only after this passes. It needs PostgreSQL and Redis for the suites
-# and Docker for the journeys, as the CI jobs have them.
+# Everything CI runs, for every package, on one host. It needs PostgreSQL and
+# Redis for the suites and Docker for the journeys, as the CI jobs have them.
 release-checks:
 	$(MAKE) sync PACKAGES="$(ALL_PACKAGES)"
 	$(MAKE) lint PACKAGES="$(ALL_PACKAGES)"
@@ -147,10 +146,11 @@ release-checks:
 	$(MAKE) e2e-library
 	$(MAKE) e2e-secrets
 
-# Runs release-checks on a clean commit of origin/main, then tags it (docs/release.md).
+# Tags SOURCE (default HEAD), a commit of origin/main that a fully green CI run
+# tested (docs/release.md).
 release-candidate:
 	@test -n "$(TAGS)" || { echo "TAGS is required" >&2; exit 2; }
-	python3 scripts/release_candidate.py $(TAGS)
+	python3 scripts/release_candidate.py $(if $(SOURCE),--source $(SOURCE)) $(TAGS)
 
 release-publish:
 	@test -n "$(TAG)" || { echo "TAG is required" >&2; exit 2; }

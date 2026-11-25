@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from ipaddress import ip_address
 from pathlib import Path
 
+import dns.asyncresolver
 import pytest
 from aweb_naapp_testing.network import (
     Certificates,
@@ -560,3 +561,23 @@ async def test_a_caller_cannot_send_a_declared_injected_name(
     assert refused.value.code == "header_not_allowed"
     assert network.tls.seen == []
     assert sum(network.dns.queries.values()) == 0
+
+
+async def test_without_nameservers_the_guard_resolves_through_the_process_default_resolver(
+    network: Network, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The app's one DNS boundary: whatever dnspython's default resolver is,
+    # as the AWID TXT lookups use it. In production it is the system's.
+    default = dns.asyncresolver.Resolver(configure=False)
+    default.nameservers = ["127.0.0.1"]
+    default.port = network.dns.port
+    monkeypatch.setattr(dns.asyncresolver, "default_resolver", default)
+
+    assert await DnsResolver().resolve(NAME) == [ip_address(network.host)]
+    assert network.dns.queries[(NAME, "A")] == 1
+    assert (default.nameservers, default.port) == (["127.0.0.1"], network.dns.port)
+
+
+def test_a_port_is_only_for_explicit_nameservers() -> None:
+    with pytest.raises(ValueError):
+        DnsResolver(port=5353)

@@ -258,6 +258,18 @@ class OciLaneContractTest(unittest.TestCase):
             workflow,
         )
 
+    def test_an_image_tag_dispatches_to_its_image_publisher_only(self):
+        root = repository(self)
+        command(root, "git", "tag", "-a", "logs-v0.1.0", "-m", "tagged")
+        published: list[tuple[str, str]] = []
+        with patch.object(PUBLISH, "publish_oci", lambda _root, prefix, version, *_a, **_kw:
+                          published.append((prefix, version))), \
+                patch.object(PUBLISH, "publish_pypi", lambda *_a, **_kw: self.fail("no PyPI lane")):
+            PUBLISH.publish(root, "logs-v0.1.0", only="oci")
+        self.assertEqual(published, [("logs-v", "0.1.0")])
+        with self.assertRaisesRegex(PUBLISH.PublishRefusal, "does not publish to pypi"):
+            PUBLISH.publish(root, "logs-v0.1.0", only="pypi")
+
     def test_each_image_builds_its_app_dockerfile_from_the_repository_root(self):
         for prefix, app in (("secrets-v", "secrets"), ("logs-v", "logs"),
                             ("folio-v", "folio"), ("library-v", "library")):
@@ -276,11 +288,90 @@ class OciLaneContractTest(unittest.TestCase):
                 self.assertEqual(argv[-1], ".")
 
 
-class CandidateContractTest(unittest.TestCase):
-    """Tags are created only after this repository's release checks pass."""
+def ci_run(sha: str, *, run_id: int = 7, event: str = "push", branch: str = "main",
+           status: str = "completed", conclusion: str = "success", jobs=None) -> dict:
+    """A CI run as release_candidate.ci_runs reports it."""
+    if jobs is None:
+        jobs = [("Select the affected packages", "success"), ("Secrets lint and tests", "success"),
+                ("naapp CI", "success")]
+    return {"id": run_id, "head_sha": sha, "event": event, "head_branch": branch, "status": status,
+            "conclusion": conclusion, "html_url": f"https://github.com/awebai/naapp/actions/runs/{run_id}",
+            "jobs": [{"name": name, "conclusion": result} for name, result in jobs]}
 
-    def candidate(self, checks: str) -> Path:
-        root = repository(self, {"Makefile": f"release-checks:\n\t@{checks}\n"})
+
+class QualifyingRunTest(unittest.TestCase):
+    """A commit qualifies by one CI run of exactly that commit in which every job succeeded."""
+
+    SHA = "a" * 40
+
+    def test_a_green_push_run_on_main_qualifies(self):
+        green = ci_run(self.SHA)
+        self.assertEqual(CANDIDATE.qualifying_run([green], self.SHA), green)
+
+    def test_a_green_manual_run_of_the_commit_qualifies(self):
+        manual = ci_run(self.SHA, event="workflow_dispatch", branch="qualify")
+        self.assertEqual(CANDIDATE.qualifying_run([manual], self.SHA), manual)
+
+    def test_a_qualifying_run_is_found_among_others(self):
+        green = ci_run(self.SHA, run_id=9)
+        runs = [ci_run(self.SHA, run_id=8, status="completed", conclusion="cancelled"),
+                ci_run("b" * 40, run_id=10), green]
+        self.assertEqual(CANDIDATE.qualifying_run(runs, self.SHA), green)
+
+    def test_runs_that_do_not_qualify_are_refused_with_their_reasons(self):
+        cases = {
+            "no CI run": [],
+            "another commit": [ci_run("b" * 40)],
+            "pull_request run on feature": [ci_run(self.SHA, event="pull_request", branch="feature")],
+            "push run on feature": [ci_run(self.SHA, branch="feature")],
+            "in_progress": [ci_run(self.SHA, status="in_progress", conclusion="")],
+            "failure": [ci_run(self.SHA, conclusion="failure")],
+            "Logs lint and tests skipped": [ci_run(self.SHA, jobs=[("Logs lint and tests", "skipped"),
+                                                                     ("naapp CI", "success")])],
+            "no naapp CI job": [ci_run(self.SHA, jobs=[("Logs lint and tests", "success")])],
+        }
+        for reason, runs in cases.items():
+            with self.subTest(reason=reason):
+                with self.assertRaises(CANDIDATE.CandidateRefusal) as refused:
+                    CANDIDATE.qualifying_run(runs, self.SHA)
+                message = str(refused.exception)
+                self.assertIn(f"no CI run qualifies {self.SHA}", message)
+                if runs and runs[0]["head_sha"] == self.SHA:
+                    self.assertIn(reason, message)
+
+    def test_runs_are_read_from_the_ci_workflow_with_their_jobs(self):
+        stub = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, stub)
+        listed = {"workflow_runs": [{key: value for key, value in ci_run(self.SHA).items() if key != "jobs"}]}
+        jobs = {"jobs": [{"name": "naapp CI", "conclusion": "success", "steps": []}]}
+        (stub / "gh").write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "argv = sys.argv[1:]\n"
+            "open(sys.argv[0] + '.calls', 'a').write(json.dumps(argv) + '\\n')\n"
+            "if argv[:2] == ['repo', 'view']:\n"
+            "    print('awebai/naapp')\n"
+            "elif argv[1].endswith('/jobs?per_page=100'):\n"
+            f"    print({json.dumps(json.dumps(jobs))})\n"
+            "else:\n"
+            f"    print({json.dumps(json.dumps(listed))})\n"
+        )
+        (stub / "gh").chmod(0o755)
+        with patch.dict(os.environ, {"PATH": f"{stub}{os.pathsep}{os.environ['PATH']}"}):
+            runs = CANDIDATE.ci_runs(ROOT, self.SHA)
+        self.assertEqual(runs, [ci_run(self.SHA, jobs=[("naapp CI", "success")])])
+        calls = [json.loads(line) for line in (stub / "gh.calls").read_text().splitlines()]
+        self.assertEqual(calls[1:], [
+            ["api", f"repos/awebai/naapp/actions/workflows/ci.yml/runs?head_sha={self.SHA}&per_page=100"],
+            ["api", "repos/awebai/naapp/actions/runs/7/jobs?per_page=100"],
+        ])
+
+
+class CandidateContractTest(unittest.TestCase):
+    """Tags are created only on a commit of main that a fully green CI run tested."""
+
+    def candidate(self) -> Path:
+        root = repository(self)
         origin = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, origin)
         command(origin, "git", "init", "-q", "--bare")
@@ -289,36 +380,54 @@ class CandidateContractTest(unittest.TestCase):
         command(root, "git", "fetch", "-q", "origin")
         return root
 
-    def test_passing_checks_tag_the_tested_commit(self):
-        root = self.candidate("true")
+    def test_a_qualified_commit_is_tagged_with_its_run(self):
+        root = self.candidate()
+        source = command(root, "git", "rev-parse", "HEAD")
+        set_version(root, "naapp/logs", "0.2.0")
+        command(root, "git", "commit", "-qam", "later")
+        command(root, "git", "push", "-q", "origin", "main")
         printed = io.StringIO()
         with redirect_stdout(printed):
-            source = CANDIDATE.create_candidate(root, ["logs-v0.1.0"])
+            tagged = CANDIDATE.create_candidate(root, ["logs-v0.1.0"], source,
+                                                runs=lambda _root, sha: [ci_run(sha)])
+        self.assertEqual(tagged, source)
         self.assertIn(f"candidate PASSED: {source}", printed.getvalue())
         self.assertEqual(command(root, "git", "rev-parse", "logs-v0.1.0^{commit}"), source)
-        self.assertIn(f"Release checks passed for {source}.",
+        self.assertIn(f"CI run https://github.com/awebai/naapp/actions/runs/7 passed every job for {source}.",
                       command(root, "git", "tag", "-l", "-n9", "logs-v0.1.0"))
 
-    def test_failing_checks_create_no_tag(self):
-        root = self.candidate("exit 3")
+    def test_an_unqualified_commit_gets_no_tag(self):
+        root = self.candidate()
+        with self.assertRaisesRegex(CANDIDATE.CandidateRefusal, "no CI run qualifies"):
+            CANDIDATE.create_candidate(root, ["logs-v0.1.0"],
+                                       runs=lambda _root, sha: [ci_run(sha, conclusion="failure")])
+        self.assertEqual(command(root, "git", "tag", "--list"), "")
+
+    def test_a_commit_not_on_main_gets_no_tag(self):
+        root = self.candidate()
+        command(root, "git", "commit", "-q", "--allow-empty", "-m", "unpushed")
+        with self.assertRaisesRegex(CANDIDATE.CandidateRefusal, "is not on origin/main"):
+            CANDIDATE.create_candidate(root, ["logs-v0.1.0"], runs=lambda _root, sha: [ci_run(sha)])
+        self.assertEqual(command(root, "git", "tag", "--list"), "")
+
+    def test_the_manifests_are_read_at_the_source_commit_not_the_checkout(self):
+        root = self.candidate()
+        set_version(root, "naapp/logs", "0.3.0")
+        source, versions = CANDIDATE.validate_tags(root, ["logs-v0.1.0"])
+        self.assertEqual(versions, {"logs-v": "0.1.0"})
+        self.assertEqual(source, command(root, "git", "rev-parse", "HEAD"))
+
+    def test_the_command_takes_a_source_commit(self):
+        root = self.candidate()
         refused = subprocess.run(
-            [sys.executable, str(ROOT / "scripts/release_candidate.py"), "logs-v0.1.0"],
+            [sys.executable, str(ROOT / "scripts/release_candidate.py"), "--source", "no-such-commit",
+             "logs-v0.1.0"],
             cwd=root, env=fixture_env(), capture_output=True, text=True,
         )
         self.assertEqual(refused.returncode, 1, refused.stdout + refused.stderr)
-        # GNU make names the Makefile and line in the failed target; BSD make does not.
-        self.assertRegex(refused.stderr, r"\[(?:Makefile:\d+: )?release-checks\] Error 3")
-        self.assertIn("candidate refused: make release-checks failed", refused.stderr)
+        self.assertIn("candidate refused:", refused.stderr)
+        self.assertIn("no-such-commit", refused.stderr)
         self.assertEqual(command(root, "git", "tag", "--list"), "")
-
-    def test_the_checks_are_this_repositorys_release_checks(self):
-        makefile = (ROOT / "Makefile").read_text()
-        recipe = makefile.split("\nrelease-checks:", 1)[1].split("\n\n", 1)[0]
-        for target in ("lint", "test-scripts", "check-library-aatk", "check-secrets-shards", "test",
-                       "aw", "e2e-folio", "e2e-library", "e2e-secrets"):
-            with self.subTest(target=target):
-                self.assertIn(f"$(MAKE) {target}", recipe)
-        self.assertIn("PACKAGES=", recipe)
 
 
 class CustomerReleaseContractTest(unittest.TestCase):

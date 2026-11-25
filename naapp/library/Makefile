@@ -82,23 +82,23 @@ prod-ops-test:
 # Render operations run naapp-lib's shared tool (aweb_naapp.ops), with Library's
 # config; its own checks are the library_prod_gate.py steps after verify.
 prod-public-identity:
-	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) public-identity
+	uv run python -m aweb_naapp.ops public-identity
 
 prod-status:
-	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) status
+	uv run python -m aweb_naapp.ops status
 
 prod-deploy:
-	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) deploy --repo-root ../..
+	uv run python -m aweb_naapp.ops deploy --repo-root ../..
 
 prod-wait:
-	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) wait
+	uv run python -m aweb_naapp.ops wait
 
 prod-verify:
-	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) verify
+	uv run python -m aweb_naapp.ops verify
 	uv run python scripts/library_prod_gate.py candidate
 
 prod-rollback:
-	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) rollback
+	uv run python -m aweb_naapp.ops rollback
 
 # This recovery fingerprint is specific to the 0c490a362 rollback artifact. Future
 # releases must add and review their own exact recovery gate rather than reusing it.

@@ -47,5 +47,20 @@ def test_each_production_operation_is_a_make_target_running_the_shared_tool(comm
     recipe = re.search(rf"^prod-{command}:\n((?:\t.*\n)+)", _MAKEFILE, re.MULTILINE)
     assert recipe, f"Makefile has no prod-{command} target"
     assert re.search(
-        rf"uv run python -m aweb_naapp\.ops --config \$\(PROD_CONFIG\) {command}\b", recipe.group(1)
+        rf"uv run python -m aweb_naapp\.ops {command}\b", recipe.group(1)
     ), recipe.group(1)
+
+
+@pytest.mark.parametrize("command", ["status", "deploy", "wait", "verify", "rollback"])
+@pytest.mark.parametrize("variable", ["PROD_CONFIG", "PROD_COMMIT"])
+def test_a_production_target_never_puts_an_operator_value_into_the_shell(command: str, variable: str) -> None:
+    import subprocess
+
+    completed = subprocess.run(
+        ["make", "-n", f"prod-{command}", f"{variable}='; echo INJECTED; #'"],
+        cwd=_FOLIO_ROOT,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+    assert "INJECTED" not in completed.stdout

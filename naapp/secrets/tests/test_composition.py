@@ -244,7 +244,8 @@ async def test_default_hook_guard_adds_deployment_denials_without_broker_network
         assert guard.addresses.internal_destinations is InternalDestinations.DISABLED
         assert isinstance(guard.resolver, DnsResolver)
         assert guard.ca_file is None
-        assert guard.user_agent == "aweb-naapp/hooks"
+        # One guard for hook deliveries and team-server reads, one agent.
+        assert guard.user_agent == "aweb-naapp"
         guard.addresses.check([ip_address("8.8.4.4")])
         for address in ("8.8.8.8", "127.0.0.1", "169.254.169.254", "::ffff:169.254.169.254"):
             with pytest.raises(EgressRefused) as refused:

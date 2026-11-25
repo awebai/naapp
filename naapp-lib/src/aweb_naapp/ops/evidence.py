@@ -57,9 +57,7 @@ def _open_directory_nofollow(path: Path) -> list[tuple[int, str, tuple[int, int]
         for component in path.parts[1:]:
             descriptor = os.open(component, flags, dir_fd=chain[-1][0])
             component_stat = os.fstat(descriptor)
-            chain.append(
-                (descriptor, component, (component_stat.st_dev, component_stat.st_ino))
-            )
+            chain.append((descriptor, component, (component_stat.st_dev, component_stat.st_ino)))
         return chain
     except OSError:
         for opened, _, _ in reversed(chain):
@@ -103,10 +101,7 @@ class HealthEvidenceRun:
         try:
             self._validate_parent_chain()
             parent_stat = os.fstat(self._parent_fd)
-            if (
-                stat.S_IMODE(parent_stat.st_mode) != 0o700
-                or parent_stat.st_uid != os.geteuid()
-            ):
+            if stat.S_IMODE(parent_stat.st_mode) != 0o700 or parent_stat.st_uid != os.geteuid():
                 raise EvidenceError(
                     "health evidence parent must be operator-owned with exact mode 0700"
                 )
@@ -248,9 +243,7 @@ class HealthEvidenceRun:
 
 
 def _control_safe(value: str) -> str:
-    return "".join(
-        char if ord(char) >= 32 and ord(char) != 127 else "�" for char in value
-    )
+    return "".join(char if ord(char) >= 32 and ord(char) != 127 else "�" for char in value)
 
 
 def _header_evidence_size(
@@ -326,8 +319,7 @@ def _health_headers(
                     omitted_names = candidate_names
                     omitted_seen.add(name)
     while (
-        _header_evidence_size(captured, omitted_names, omitted_count)
-        > HEALTH_HEADER_CAPTURE_LIMIT
+        _header_evidence_size(captured, omitted_names, omitted_count) > HEALTH_HEADER_CAPTURE_LIMIT
         and omitted_names
     ):
         omitted_names.pop()

@@ -323,6 +323,26 @@ def test_deploy_refuses_a_commit_the_remote_has_moved_past_without_a_local_fetch
     assert state.posts() == []
 
 
+def test_deploy_refuses_a_checkout_whose_origin_is_another_repository(fake, checkout, tmp_path) -> None:
+    # The configured repository and the checkout's origin both hold the approved
+    # commit as their main tip, so only the origin's identity differs: a deploy
+    # from a clone of another repository (aweb, after Folio moved) ships nothing.
+    state, config, client = _ready(fake)
+    work, commit = checkout
+    configured = tmp_path / "naapp.git"
+    _git(tmp_path, "clone", "--bare", str(work.parent / "aweb.git"), str(configured))
+    config = replace(config, repo=str(configured))
+    state.service["repo"] = config.repo
+    assert _git(work, "ls-remote", str(configured), "refs/heads/main").split()[0] == commit
+    assert _git(work, "remote", "get-url", "origin") != config.repo
+    with pytest.raises(OpsError):
+        render.deploy(
+            client, config, commit=commit, rollback_deploy_id=LIVE_DEPLOY, rollback_commit=LIVE_COMMIT,
+            repo_root=work, timeout_seconds=10, interval_seconds=0,
+        )
+    assert state.posts() == []
+
+
 def test_deploy_fails_closed_when_the_remote_cannot_be_read(fake, checkout) -> None:
     import shutil
 

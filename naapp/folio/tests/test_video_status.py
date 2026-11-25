@@ -1,40 +1,35 @@
 """A video's Cloudflare Stream state reaches assets.stream_status only as a StreamStatus.
 
-The parser, the upload owner and the database are real; only Cloudflare's replies
-are supplied, since the tests do not reach Cloudflare. test_cloudflare_stream covers every
-documented state; here one of them, and an unrecognized one, go through the
-stored column and its CHECK.
+The parser, the upload owner, Folio's Cloudflare client and the database are
+real; Cloudflare is a loopback server answering its documented JSON
+(cloudflare_wire), since the tests do not reach Cloudflare. test_cloudflare_stream
+covers every documented state; here one of them, and an unrecognized one, go
+through the stored column and its CHECK.
 """
 
 from __future__ import annotations
 
 import pytest
+from cloudflare_wire import STREAM_UID, cloudflare_stream_api
 from fastapi import HTTPException
 from test_present_privacy import OWNER, present_world
 
-from folio import cloudflare_stream
-from folio.cloudflare_stream import StreamDirectUpload, video_status_from_cloudflare
 from folio.models import StreamStatus, VideoDirectUploadRequest
 from folio.repository import create_video_direct_upload, get_asset_metadata
 
 __all__ = ["present_world"]
 
 
-def _cloudflare_result(state: str) -> dict:
-    return {"uid": "stream-uid", "readyToStream": False, "status": {"state": state}}
+@pytest.fixture
+async def cloudflare_world(present_world):
+    """present_world whose Folio talks to the loopback Cloudflare Stream API."""
+    _, db, settings = present_world
+    async with cloudflare_stream_api() as api:
+        yield db, settings.model_copy(update=api.settings()), api
 
 
-async def _video(db, settings, monkeypatch) -> object:
+async def _video(db, settings) -> object:
     """A video asset created through Folio's direct upload, pending its upload."""
-
-    async def create_direct_upload(self, *, max_duration_seconds: int, expires_at):
-        return StreamDirectUpload(
-            uid="stream-uid", upload_url="https://upload.example/stream-uid", expires_at=expires_at
-        )
-
-    monkeypatch.setattr(
-        cloudflare_stream.CloudflareStreamClient, "create_direct_upload", create_direct_upload
-    )
     upload = await create_video_direct_upload(
         db,
         principal=OWNER,
@@ -44,15 +39,6 @@ async def _video(db, settings, monkeypatch) -> object:
     return upload["asset_id"]
 
 
-def _cloudflare_reports(monkeypatch, state: str) -> None:
-    async def get_video_status(self, *, stream_uid: str):
-        return video_status_from_cloudflare(_cloudflare_result(state))
-
-    monkeypatch.setattr(
-        cloudflare_stream.CloudflareStreamClient, "get_video_status", get_video_status
-    )
-
-
 async def _stored_status(db, asset_id) -> str:
     row = await db.fetch_one(
         "SELECT stream_status FROM {{tables.assets}} WHERE asset_id=$1", asset_id
@@ -60,27 +46,31 @@ async def _stored_status(db, asset_id) -> str:
     return row["stream_status"]
 
 
-async def test_a_documented_cloudflare_state_is_stored(present_world, monkeypatch):
-    _, db, settings = present_world
-    asset_id = await _video(db, settings, monkeypatch)
+async def test_a_documented_cloudflare_state_is_stored(cloudflare_world):
+    db, settings, api = cloudflare_world
+    asset_id = await _video(db, settings)
     assert await _stored_status(db, asset_id) == StreamStatus.PENDING_UPLOAD
-    _cloudflare_reports(monkeypatch, "downloading")
+    api.state = "downloading"
 
     metadata = await get_asset_metadata(db, principal=OWNER, settings=settings, asset_id=asset_id)
 
     assert await _stored_status(db, asset_id) == StreamStatus.QUEUED
     assert metadata["stream_status"] == StreamStatus.QUEUED
+    assert [(sent.method, sent.path.rsplit("/", 1)[-1]) for sent in api.received] == [
+        ("POST", "direct_upload"),
+        ("GET", STREAM_UID),
+    ]
 
 
 async def test_an_unrecognized_cloudflare_state_is_refused_before_it_is_written(
-    present_world, monkeypatch
+    cloudflare_world,
 ):
-    _, db, settings = present_world
-    asset_id = await _video(db, settings, monkeypatch)
-    _cloudflare_reports(monkeypatch, "inprogress")
+    db, settings, api = cloudflare_world
+    asset_id = await _video(db, settings)
+    api.state = "inprogress"
     await get_asset_metadata(db, principal=OWNER, settings=settings, asset_id=asset_id)
     assert await _stored_status(db, asset_id) == StreamStatus.PROCESSING
-    _cloudflare_reports(monkeypatch, "melting")
+    api.state = "melting"
 
     with pytest.raises(HTTPException) as refused:
         await get_asset_metadata(db, principal=OWNER, settings=settings, asset_id=asset_id)

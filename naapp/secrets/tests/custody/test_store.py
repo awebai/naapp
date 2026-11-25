@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator
 
 import pytest
 from pgdbm import AsyncDatabaseManager
@@ -14,23 +13,14 @@ from aweb_secrets.custody import (
     SealContext,
     SecretOpener,
     SecretSealer,
-    apply_custody_migrations,
     decode_value,
     encode_value,
 )
 from aweb_secrets.secret import SecretRecord
-from tests.custody.conftest import initial_record, record_tables, value_bytes
+from tests.custody.conftest import initial_record, value_bytes
 
 INSTALLATION = "installation-1"
 TEAM = "team-1"
-
-
-@pytest.fixture
-async def db(test_db_factory) -> AsyncIterator[AsyncDatabaseManager]:
-    database = await test_db_factory.create_db(suffix="secrets_custody")
-    await record_tables(database)
-    await apply_custody_migrations(database)
-    yield database
 
 
 async def _ingest(db: AsyncDatabaseManager, sealer: SecretSealer, secret_id: str, value: bytes):

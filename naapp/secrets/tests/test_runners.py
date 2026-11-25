@@ -16,7 +16,6 @@ from aweb_secrets.runner_protocol import RunnerRefused
 from aweb_secrets.runners import (
     RunnerRecord,
     active_runner,
-    apply_runner_migrations,
     create_runner,
     deregister_runner,
     mint_runner_id,
@@ -27,10 +26,8 @@ NOW = datetime(2026, 10, 21, tzinfo=UTC)
 
 
 @pytest.fixture
-async def db(test_db_factory):
-    database = await test_db_factory.create_db(suffix="runners")
-    await apply_runner_migrations(database)
-    return database
+async def db(runners_database):
+    return runners_database
 
 
 def record():

@@ -53,13 +53,21 @@ def main() -> int:
         print(f"make run for {app} did not answer /live within 90 s", file=sys.stderr)
         return 1
     finally:
-        if server.poll() is None:
-            os.killpg(server.pid, signal.SIGTERM)
-            try:
-                server.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                os.killpg(server.pid, signal.SIGKILL)
-                server.wait()
+        # The whole group, whatever make's state: make may have exited while
+        # uvicorn's reloader child still runs.
+        stop(server, signal.SIGTERM)
+        try:
+            server.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            stop(server, signal.SIGKILL)
+            server.wait()
+
+
+def stop(server: subprocess.Popen, number: signal.Signals) -> None:
+    try:
+        os.killpg(server.pid, number)
+    except ProcessLookupError:
+        pass
 
 
 if __name__ == "__main__":

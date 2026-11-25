@@ -5,7 +5,7 @@ from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 import pytest_asyncio
-from pgdbm import AsyncDatabaseManager, AsyncMigrationManager
+from pgdbm import AsyncDatabaseManager, AsyncMigrationManager, SchemaManager
 from pgdbm.testing import AsyncTestDatabase, DatabaseTestConfig
 
 from aweb_naapp_testing.databases import TEST_SCHEMA
@@ -24,7 +24,7 @@ async def database_template(
     try:
         async with template.get_test_db_manager(schema=schema) as db:
             # PostgreSQL cannot copy a database with any open connections.
-            await db.ensure_schema_exists()
+            await SchemaManager(db).ensure_schema_exists()
             await migrate(db)
         yield config.model_copy(update={"test_db_template": name})
     finally:

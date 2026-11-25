@@ -28,6 +28,13 @@ class FakeRender:
     service: dict[str, Any]
     deploys: list[dict[str, Any]]
     health_status: int = 200
+    # Health answers before the service settles: (status, payload) pairs served
+    # in order, then the live answer. A payload of bytes is sent as it is.
+    health_not_yet: list[tuple[int, Any]] = field(default_factory=list)
+    health_extra: dict[str, Any] = field(default_factory=dict)
+    health_service: str = "folio"
+    health_redirect: str | None = None
+    health_headers: dict[str, str] = field(default_factory=dict)
     # Cloudflare on the public zone answers its browser-signature 403 (error 1010)
     # to Python's default User-Agent (naapp/library/docs/production-operations.md).
     edge_refuses_default_python_agent: bool = False
@@ -43,7 +50,12 @@ class FakeRender:
             self.health_agents.append(user_agent)
             if self.edge_refuses_default_python_agent and user_agent.startswith("Python-urllib/"):
                 return 403, {"error": 1010}
-            return self.health_status, {"status": "ok"}
+            if self.health_redirect is not None:
+                self.health_headers = {"Location": self.health_redirect}
+                return 302, {}
+            if self.health_not_yet:
+                return self.health_not_yet.pop(0)
+            return self.health_status, self.health_payload()
         if method == "GET" and path == base:
             return 200, self.service
         if method == "GET" and path.startswith(f"{base}/deploys?"):
@@ -69,6 +81,12 @@ class FakeRender:
             return 201, self._create(target["commit"]["id"])
         return 404, {}
 
+    def health_payload(self) -> dict[str, Any]:
+        """What the running service answers: the live deploy's build."""
+        live = next((deploy for deploy in self.deploys if deploy["status"] == "live"), None)
+        sha = live["commit"]["id"] if live else None
+        return {"status": "ok", "service": self.health_service, "build": {"git_sha": sha}, **self.health_extra}
+
     def _find(self, deploy_id: str) -> dict[str, Any] | None:
         return next((deploy for deploy in self.deploys if deploy["id"] == deploy_id), None)
 
@@ -93,10 +111,13 @@ def fake() -> Iterator[tuple[FakeRender, str]]:
             status, payload = state.handle(
                 self.command, self.path, body, self.headers.get("User-Agent", "")
             )
-            data = json.dumps(payload).encode()
+            data = payload if isinstance(payload, bytes) else json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(data)))
+            if self.path == "/health":
+                for name, value in state.health_headers.items():
+                    self.send_header(name, value)
             self.end_headers()
             self.wfile.write(data)
 
@@ -119,6 +140,7 @@ def _config(origin: str) -> ProductionConfig:
     return ProductionConfig(
         service_id=SERVICE_ID,
         service_name="folio",
+        app_id="folio",
         region="oregon",
         repo="https://github.com/awebai/aweb",
         branch="main",
@@ -166,6 +188,7 @@ def _write_config(tmp_path: Path, **overrides: str) -> Path:
     raw = {
         "service_id": SERVICE_ID,
         "service_name": "folio",
+        "app_id": "folio",
         "region": "oregon",
         "repo": "https://github.com/awebai/aweb",
         "branch": "main",
@@ -528,7 +551,7 @@ def test_verify_confirms_the_live_commit_and_health(fake) -> None:
     state, config, client = _ready(fake)
     result = render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT)
     assert result["deploy"]["commit"] == LIVE_COMMIT
-    assert result["health"] == {config.origin_url + "/health": 200}
+    assert result["health"] == {config.origin_url + "/health": {"service": "folio", "git_sha": LIVE_COMMIT}}
     assert state.posts() == []
 
 
@@ -541,8 +564,8 @@ def test_verify_fails_when_a_different_commit_is_live(fake) -> None:
 def test_verify_fails_when_health_is_not_ok(fake) -> None:
     state, config, client = _ready(fake)
     state.health_status = 503
-    with pytest.raises(OpsError, match="health"):
-        render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT)
+    with pytest.raises(OpsError, match="health readiness failed"):
+        render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT, **FAST)
 
 
 def test_verify_reaches_health_through_an_edge_that_refuses_python_s_default_agent(fake) -> None:
@@ -551,7 +574,7 @@ def test_verify_reaches_health_through_an_edge_that_refuses_python_s_default_age
 
     result = render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT)
 
-    assert result["health"] == {config.origin_url + "/health": 200}
+    assert result["health"] == {config.origin_url + "/health": {"service": "folio", "git_sha": LIVE_COMMIT}}
     assert state.health_agents == [render.HEALTH_USER_AGENT]
 
 
@@ -560,6 +583,100 @@ def test_a_403_from_health_is_a_failure(fake) -> None:
     state.health_status = 403
     with pytest.raises(OpsError, match="HTTP 403"):
         render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT)
+
+
+FAST = {"readiness_timeout_seconds": 2.0, "retry_interval_seconds": 0.01}
+
+
+def _both_surfaces(config: ProductionConfig) -> ProductionConfig:
+    """The same fake service under two names, as an origin and a public URL."""
+    return replace(config, public_url=config.origin_url.replace("127.0.0.1", "localhost"))
+
+
+def test_verify_requires_the_deployed_build_on_the_origin_and_public_urls(fake) -> None:
+    state, config, client = _ready(fake)
+    config = _both_surfaces(config)
+
+    result = render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT, **FAST)
+
+    assert result["health"] == {
+        config.origin_url + "/health": {"service": "folio", "git_sha": LIVE_COMMIT},
+        config.public_url + "/health": {"service": "folio", "git_sha": LIVE_COMMIT},
+    }
+
+
+@pytest.mark.parametrize("not_yet", [503, 404, 429, "other build", "not json"])
+def test_health_that_is_not_ready_yet_is_asked_again(fake, not_yet) -> None:
+    state, config, client = _ready(fake)
+    answer = {
+        "other build": (200, {"status": "ok", "service": "folio", "build": {"git_sha": EARLIER_COMMIT}}),
+        "not json": (200, b"<html>starting</html>"),
+    }.get(not_yet, (not_yet, {"status": "starting"}))
+    state.health_not_yet = [answer, answer]
+
+    result = render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT, **FAST)
+
+    assert result["health"][config.origin_url + "/health"]["git_sha"] == LIVE_COMMIT
+    assert len(state.health_agents) == 3
+
+
+def test_health_that_never_becomes_ready_fails_the_verify(fake) -> None:
+    state, config, client = _ready(fake)
+    state.health_not_yet = [(503, {"status": "unhealthy"})] * 1000
+    with pytest.raises(OpsError, match="health readiness failed"):
+        render.verify(
+            client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT,
+            readiness_timeout_seconds=0.2, retry_interval_seconds=0.01,
+        )
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["redirect", "other service", "no build", "oversized", "deployment of another commit"],
+)
+def test_a_health_answer_that_cannot_be_this_deploy_fails_at_once(fake, fault) -> None:
+    state, config, client = _ready(fake)
+    if fault == "redirect":
+        state.health_redirect = "https://elsewhere.example/health"
+    elif fault == "other service":
+        state.health_service = "library"
+    elif fault == "no build":
+        state.health_not_yet = [(200, {"status": "ok", "service": "folio"})] * 1000
+    elif fault == "oversized":
+        state.health_not_yet = [(200, b"{" + b" " * 20_000 + b"}")] * 1000
+    else:
+        state.health_extra = {"deployment": _deployment(commit=EARLIER_COMMIT)}
+    with pytest.raises(OpsError) as refused:
+        render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT, **FAST)
+    assert "health readiness failed" not in str(refused.value)
+    assert len(state.health_agents) == 1
+
+
+def test_runtime_health_with_checks_labels_and_deployment_is_accepted(fake) -> None:
+    state, config, client = _ready(fake)
+    state.health_extra = {
+        "checks": {"database": "ok"},
+        "details": {},
+        "labels": {"tier": "hosted"},
+        "deployment": _deployment(commit=LIVE_COMMIT),
+    }
+
+    result = render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT, **FAST)
+
+    assert result["health"][config.origin_url + "/health"]["git_sha"] == LIVE_COMMIT
+
+
+def _deployment(*, commit: str) -> dict[str, str]:
+    """The Render deployment block naapp-lib's health serves (runtime/build_identity)."""
+    return {
+        "service_id": SERVICE_ID,
+        "service_name": "folio-tmd1",
+        "hostname": "folio-tmd1.onrender.com",
+        "origin_url": "https://folio-tmd1.onrender.com",
+        "repo": "awebai/naapp",
+        "branch": "main",
+        "commit": commit,
+    }
 
 
 def test_wait_stops_on_a_failed_build(fake) -> None:

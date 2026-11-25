@@ -21,7 +21,7 @@ from dataclasses import dataclass, fields
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 API_BASE = "https://api.render.com/v1"
 COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -39,6 +39,12 @@ TERMINAL_STATUSES = {"live", "deactivated", *FAILURE_STATUSES}
 KNOWN_STATUSES = {*IN_PROGRESS_STATUSES, *TERMINAL_STATUSES}
 ROLLBACK_ARTIFACT_STATUSES = {"live", "deactivated"}
 HEALTH_TIMEOUT_SECONDS = 20.0
+# A deploy is ready when both URLs answer its build. Until then a service that is
+# still starting, or still serving the previous build, is asked again.
+HEALTH_READINESS_SECONDS = 90.0
+HEALTH_RETRY_SECONDS = 5.0
+HEALTH_BODY_LIMIT = 16_384
+NOT_YET_HEALTH_STATUSES = {404, 408, 425, 429, 500, 502, 503, 504}
 # The deploy check names itself: Cloudflare on a public zone refuses Python's default
 # User-Agent with its browser-signature 403, which would hide a healthy service and
 # make a real outage look the same.
@@ -73,6 +79,9 @@ class ProductionConfig:
     origin_url: str
     public_url: str
     health_path: str
+    # What the app's health reports as its ``service`` (naapp-lib's runtime health
+    # answers the app id).
+    app_id: str
 
     @classmethod
     def load(cls, path: Path) -> ProductionConfig:
@@ -409,27 +418,95 @@ def wait_for_deploy(
     raise OpsError(f"timed out waiting for Render deploy {deploy_id}")
 
 
-def check_health(config: ProductionConfig) -> dict[str, int]:
-    """GET the health path on the service's origin and public URLs; each must answer 200."""
-    results: dict[str, int] = {}
-    for base in dict.fromkeys((config.origin_url, config.public_url)):
-        url = f"{base.rstrip('/')}{config.health_path}"
+class _HealthNotYet(OpsError):
+    """A health answer that may still become this deploy's: asked again until ready."""
+
+
+class _NoRedirects(HTTPRedirectHandler):
+    """Health is read at the exact URL: a redirect is not that surface answering."""
+
+    def redirect_request(
+        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
+    ) -> None:
+        return None
+
+
+def _health_answer(url: str) -> tuple[int, bytes]:
+    request = Request(
+        url, method="GET", headers={"Accept": "application/json", "User-Agent": HEALTH_USER_AGENT}
+    )
+    try:
+        with build_opener(_NoRedirects()).open(request, timeout=HEALTH_TIMEOUT_SECONDS) as response:
+            return response.status, response.read(HEALTH_BODY_LIMIT + 1)
+    except HTTPError as exc:
+        return exc.code, b""
+    except (URLError, TimeoutError, OSError) as exc:
+        raise _HealthNotYet(f"health request to {url} failed: {type(exc).__name__}") from exc
+
+
+def _health_identity(config: ProductionConfig, url: str, commit: str) -> dict[str, str]:
+    """The service and build ``url`` answers, when they are this deploy's."""
+    status, body = _health_answer(url)
+    if status in NOT_YET_HEALTH_STATUSES:
+        raise _HealthNotYet(f"health at {url} answered HTTP {status}")
+    if status != 200:
+        raise OpsError(f"health at {url} answered HTTP {status}")
+    if len(body) > HEALTH_BODY_LIMIT:
+        raise OpsError(f"health at {url} answered more than {HEALTH_BODY_LIMIT} bytes")
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise _HealthNotYet(f"health at {url} did not answer JSON") from exc
+    if not isinstance(payload, dict) or payload.get("status") != "ok":
+        raise _HealthNotYet(f"health at {url} is not ok")
+    if payload.get("service") != config.app_id:
+        raise OpsError(f"health at {url} is not {config.app_id}'s")
+    build = payload.get("build")
+    sha = build.get("git_sha") if isinstance(build, dict) else None
+    if not isinstance(sha, str) or not COMMIT_RE.fullmatch(sha):
+        raise OpsError(f"health at {url} reports no build identity")
+    if sha != commit:
+        raise _HealthNotYet(f"health at {url} answers build {sha}, not {commit}")
+    deployment = payload.get("deployment")
+    if deployment is not None and (
+        not isinstance(deployment, dict) or deployment.get("commit") != sha
+    ):
+        raise OpsError(f"health at {url} names a deployment of another build")
+    return {"service": payload["service"], "git_sha": sha}
+
+
+def verify_health_surfaces(
+    config: ProductionConfig,
+    commit: str,
+    *,
+    readiness_timeout_seconds: float = HEALTH_READINESS_SECONDS,
+    retry_interval_seconds: float = HEALTH_RETRY_SECONDS,
+    sleep: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+) -> dict[str, dict[str, str]]:
+    """Wait until the origin and public health URLs both answer ``commit``'s build.
+
+    A not-yet answer (a transient status, the previous build still serving, a
+    body that is not JSON yet) is asked again until the readiness window ends;
+    an answer that cannot be this deploy's (another service, no build identity,
+    a redirect, an oversized body) fails at once."""
+    urls = [
+        f"{base.rstrip('/')}{config.health_path}"
+        for base in dict.fromkeys((config.origin_url, config.public_url))
+    ]
+    deadline = monotonic() + readiness_timeout_seconds
+    attempts = 0
+    while True:
+        attempts += 1
         try:
-            request = Request(
-                url,
-                method="GET",
-                headers={"Accept": "application/json", "User-Agent": HEALTH_USER_AGENT},
-            )
-            with urlopen(request, timeout=HEALTH_TIMEOUT_SECONDS) as response:
-                status = response.status
-        except HTTPError as exc:
-            status = exc.code
-        except (URLError, TimeoutError, OSError) as exc:
-            raise OpsError(f"health request to {url} failed: {type(exc).__name__}") from exc
-        if status != 200:
-            raise OpsError(f"health at {url} answered HTTP {status}")
-        results[url] = status
-    return results
+            return {url: _health_identity(config, url, commit) for url in urls}
+        except _HealthNotYet as not_yet:
+            if monotonic() + retry_interval_seconds > deadline:
+                raise OpsError(
+                    f"health readiness failed after {readiness_timeout_seconds:g} seconds "
+                    f"and {attempts} attempts: {not_yet}"
+                ) from not_yet
+            sleep(retry_interval_seconds)
 
 
 def confirm_repository_change(from_repository: str | None, confirm_from_repository: str) -> None:
@@ -475,6 +552,8 @@ def deploy(
     from_repository: str | None = None,
     timeout_seconds: float = 900,
     interval_seconds: float = 10.0,
+    readiness_timeout_seconds: float = HEALTH_READINESS_SECONDS,
+    retry_interval_seconds: float = HEALTH_RETRY_SECONDS,
 ) -> dict[str, Any]:
     """Deploy ``commit``; ``rollback_commit`` is the live commit it moves forward from."""
     require_commit(commit)
@@ -497,11 +576,23 @@ def deploy(
     if deploy_commit(created) != commit:
         raise OpsError("Render created a deploy for the wrong commit")
     finished = wait_for_deploy(
-        client, config, deploy_id, commit,
-        timeout_seconds=timeout_seconds, interval_seconds=interval_seconds,
+        client,
+        config,
+        deploy_id,
+        commit,
+        timeout_seconds=timeout_seconds,
+        interval_seconds=interval_seconds,
     )
-    require_deploy(current_live(client.deploys(config.service_id)), deploy_id=deploy_id, commit=commit)
-    return {"deploy": safe_deploy(finished), "rollback": safe_deploy(live), "health": check_health(config)}
+    require_deploy(
+        current_live(client.deploys(config.service_id)), deploy_id=deploy_id, commit=commit
+    )
+    health = verify_health_surfaces(
+        config,
+        commit,
+        readiness_timeout_seconds=readiness_timeout_seconds,
+        retry_interval_seconds=retry_interval_seconds,
+    )
+    return {"deploy": safe_deploy(finished), "rollback": safe_deploy(live), "health": health}
 
 
 def wait(
@@ -517,20 +608,44 @@ def wait(
     require_commit(commit)
     validate_service(client.service(config.service_id), config)
     finished = wait_for_deploy(
-        client, config, deploy_id, commit,
-        timeout_seconds=timeout_seconds, interval_seconds=interval_seconds,
+        client,
+        config,
+        deploy_id,
+        commit,
+        timeout_seconds=timeout_seconds,
+        interval_seconds=interval_seconds,
     )
     return {"deploy": safe_deploy(finished)}
 
 
-def verify(client: RenderClient, config: ProductionConfig, *, deploy_id: str, commit: str) -> dict[str, Any]:
+def verify(
+    client: RenderClient,
+    config: ProductionConfig,
+    *,
+    deploy_id: str,
+    commit: str,
+    readiness_timeout_seconds: float = HEALTH_READINESS_SECONDS,
+    retry_interval_seconds: float = HEALTH_RETRY_SECONDS,
+) -> dict[str, Any]:
+    """Require the deploy to be the live artifact, and both health URLs to answer its build.
+    The readiness timing is verify_health_surfaces'."""
     require_deploy_id(deploy_id)
     require_commit(commit)
     validate_service(client.service(config.service_id), config)
     artifact = client.deploy_by_id(config.service_id, deploy_id)
     require_deploy(artifact, deploy_id=deploy_id, commit=commit)
-    require_deploy(current_live(client.deploys(config.service_id)), deploy_id=deploy_id, commit=commit)
-    return {"deploy": safe_deploy(artifact), "health": check_health(config)}
+    require_deploy(
+        current_live(client.deploys(config.service_id)), deploy_id=deploy_id, commit=commit
+    )
+    return {
+        "deploy": safe_deploy(artifact),
+        "health": verify_health_surfaces(
+            config,
+            commit,
+            readiness_timeout_seconds=readiness_timeout_seconds,
+            retry_interval_seconds=retry_interval_seconds,
+        ),
+    }
 
 
 def rollback(
@@ -543,6 +658,8 @@ def rollback(
     current_commit: str,
     timeout_seconds: float = 900,
     interval_seconds: float = 10.0,
+    readiness_timeout_seconds: float = HEALTH_READINESS_SECONDS,
+    retry_interval_seconds: float = HEALTH_RETRY_SECONDS,
 ) -> dict[str, Any]:
     """Redeploy an earlier deploy's built artifact. There is deliberately no path that
     deploys a commit here: a commit deploy rebuilds under the current service settings."""
@@ -562,10 +679,22 @@ def rollback(
     if deploy_commit(created) != rollback_commit:
         raise OpsError("Render created a rollback for the wrong commit")
     finished = wait_for_deploy(
-        client, config, created_id, rollback_commit,
-        timeout_seconds=timeout_seconds, interval_seconds=interval_seconds,
+        client,
+        config,
+        created_id,
+        rollback_commit,
+        timeout_seconds=timeout_seconds,
+        interval_seconds=interval_seconds,
     )
     require_deploy(
-        current_live(client.deploys(config.service_id)), deploy_id=created_id, commit=rollback_commit
+        current_live(client.deploys(config.service_id)),
+        deploy_id=created_id,
+        commit=rollback_commit,
     )
-    return {"rollback_deploy": safe_deploy(finished), "health": check_health(config)}
+    health = verify_health_surfaces(
+        config,
+        rollback_commit,
+        readiness_timeout_seconds=readiness_timeout_seconds,
+        retry_interval_seconds=retry_interval_seconds,
+    )
+    return {"rollback_deploy": safe_deploy(finished), "health": health}

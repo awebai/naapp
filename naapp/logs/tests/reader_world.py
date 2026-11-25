@@ -25,11 +25,16 @@ from aweb_naapp.runtime.approvals import DeliveryStatus
 from aweb_naapp.runtime.authorization import Grant
 from aweb_naapp.runtime.clock import seconds_to_ns
 from aweb_naapp.runtime.credential_audit import CredentialAudit
+from aweb_naapp.runtime.db import require_separate_database
 from aweb_naapp.runtime.human_member import HumanMemberProof, check_human_member
 from aweb_naapp.runtime.installation import InstallationFence, apply_installation_migrations
 from aweb_naapp.runtime.passkeys import Passkeys, RelyingParty
 from aweb_naapp.runtime.team_auth import AWIDTeamCache
 from aweb_naapp_testing import REGISTRY_URL, SERVICE_TOKEN, Member
+from aweb_naapp_testing.database_fixtures import (
+    migrate_credential_audit,
+    migrate_passkeys,
+)
 from aweb_naapp_testing.human_members import HumanMember, HumanNamespace, human_namespace
 from aweb_naapp_testing.owner_acts import APP_ID, INSTALLATION_ID, TEAM_ID, TeamOwner, team_owner
 from aweb_naapp_testing.webauthn import SoftAuthenticator
@@ -45,12 +50,11 @@ from aweb_logs.ledger import LogsSigner, open_next_epoch
 from aweb_logs.purge_ledger import PurgeLedger
 from aweb_logs.readers import READER_ROLE, ReaderDirectory, ReaderRemovals
 
-from .fixtures import purge_ledger
-
 LOGS = "https://logs.example.test"
 
 
 CONSOLE = "https://console.logs.example.test"
+CREDENTIAL_AUDIT_MODULE = "aweb_logs_credential_audit"
 
 
 def _principal(key: SigningKey) -> str:
@@ -203,10 +207,7 @@ async def move_logs(world: World, origin: str) -> None:
     world.producer = governance_producer(origin)
 
 
-@pytest.fixture(name="world")
-async def world_fixture(test_db_factory) -> AsyncIterator[World]:
-    db = await test_db_factory.create_db(suffix="logs_reader_designation")
-    registry_db = await test_db_factory.create_db(suffix="logs_reader_designation_awid")
+async def migrate_reader_world(db: AsyncDatabaseManager) -> None:
     for migrate in (
         apply_owner_act_migrations,
         apply_installation_migrations,
@@ -217,6 +218,18 @@ async def world_fixture(test_db_factory) -> AsyncIterator[World]:
     await AsyncMigrationManager(
         db, migrations_path=str(MIGRATIONS_PATH), module_name=MIGRATIONS_MODULE
     ).apply_pending_migrations()
+    await migrate_credential_audit(db, CREDENTIAL_AUDIT_MODULE)
+    await migrate_passkeys(db)
+
+
+@pytest.fixture(name="world")
+async def world_fixture(
+    clone_database, reader_template, reader_purge_template, awid_template
+) -> AsyncIterator[World]:
+    db = await clone_database(reader_template, suffix="logs_reader_designation")
+    registry_db = await clone_database(awid_template, suffix="logs_reader_designation_awid")
+    ledger = await clone_database(reader_purge_template, suffix="logs_purge_ledger")
+    await require_separate_database(db, ledger, ledger_name="purge ledger")
     installations = Installations()
     fence = InstallationFence(db, app_id=APP_ID, grants=installations)
     signer = LogsSigner(logs_origin=LOGS, kid="logs-chain", signing_key=SigningKey.generate())
@@ -260,12 +273,11 @@ async def world_fixture(test_db_factory) -> AsyncIterator[World]:
                 role_of=directory.role_of,
                 registration_view=view,
                 max_backlog_age=timedelta(minutes=5),
-                migration_module="aweb_logs_credential_audit",
+                migration_module=CREDENTIAL_AUDIT_MODULE,
                 after_enqueue=append,
                 ungated_acts=SELF_RECORDED_ACTS,
                 human_roles=frozenset({READER_ROLE}),
             )
-            await state.recorder.migrate()
             state.passkeys = Passkeys(
                 db,
                 rp=RelyingParty(origin=CONSOLE, name="logs"),
@@ -277,8 +289,7 @@ async def world_fixture(test_db_factory) -> AsyncIterator[World]:
                 proof_context=directory.proof_context(app_id=APP_ID),
                 holding_scopes=is_holding_scope,
             )
-            await state.passkeys.migrate()
-            state.purges = await purge_ledger(test_db_factory, db)
+            state.purges = PurgeLedger(ledger)
             state.governance = LogsGovernance(
                 db,
                 purges=state.purges,

@@ -160,7 +160,7 @@ async def coordination_server(
                 public_origin=site.origin,
             ) as server,
         ):
-            site.serve(server.app)
+            site.serve_transport(server.transport)
             yield Coordination(registry=registry, server=server, site=site)
 
 

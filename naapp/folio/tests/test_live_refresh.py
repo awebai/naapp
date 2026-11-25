@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-import socket
 from urllib.parse import urlsplit
 
 import httpx
 import pytest
-import uvicorn
 from fastapi import Request
 from playwright.async_api import async_playwright, expect
+from served_app import served
 from test_present_privacy import OWNER, present_world
 
 from folio.models import LinkKind
@@ -53,27 +52,13 @@ async def link(world, *, editable=False, version=None):
 @pytest.fixture
 async def live_browser(live_world):
     app, _, _ = live_world
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        listener.listen()
-        origin = f"http://127.0.0.1:{listener.getsockname()[1]}"
-        server = uvicorn.Server(uvicorn.Config(app, lifespan="off", log_config=None, ws="none"))
-        serving = asyncio.create_task(server.serve(sockets=[listener]))
-        try:
-            async with asyncio.timeout(10):
-                while not server.started:
-                    if serving.done():
-                        await serving
-                    await asyncio.sleep(0.01)
-            async with async_playwright() as p:
-                browser = await p.chromium.launch()
-                try:
-                    yield origin, browser
-                finally:
-                    await browser.close()
-        finally:
-            server.should_exit = True
-            await serving
+    async with served(app) as origin:
+        async with async_playwright() as p:
+            browser = await p.chromium.launch()
+            try:
+                yield origin, browser
+            finally:
+                await browser.close()
 
 
 async def test_clean_editor_follows_agent_and_other_browser(live_world, live_browser):

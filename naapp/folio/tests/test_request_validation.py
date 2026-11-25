@@ -16,7 +16,7 @@ CASES = [
     (
         "POST",
         "/v1/documents",
-        {"slug": "invalid-title", "title": "MaintenanceReport" * 16 + ".pdf", "body": "Draft"},
+        {"slug": "invalid-title", "title": "T" * 241, "body": "Draft"},
         "title",
     ),
     ("POST", "/v1/documents/draft/versions/template", {"name": ""}, "name"),

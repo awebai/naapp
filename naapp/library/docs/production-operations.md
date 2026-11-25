@@ -161,7 +161,8 @@ read; `/health` also reports the event outbox's oldest undelivered age. `/live`
 checks nothing and always answers 200.
 
 These are separately authorized operator actions; a code landing provisions no key,
-changes no Render setting and re-pins no installation.
+changes no Render setting and re-pins no installation. Re-pinning a production
+installation needs Juan's explicit go for that action.
 
 ## Required release record
 

@@ -13,10 +13,10 @@ from datetime import UTC, datetime, timedelta
 import httpx
 from aweb_naapp_testing import REGISTRY_URL, SERVICE_TOKEN, Member
 from aweb_naapp_testing.human_members import human_namespace
+from aweb_naapp_testing.redis_database import KeyRecordingRedis
 from awid.id_certificates import encode_id_chain_header, id_certificate_signing_bytes
 from awid.registry import CachedRegistryClient
 from fastapi import FastAPI, Request
-from redis.asyncio import Redis
 
 from aweb_naapp.console import ClientIdentity, LoginLimiter
 from aweb_naapp.console.handoff_requester import CHAIN_HEADER, requester_parent
@@ -35,7 +35,7 @@ async def test_direct_child_handoff_distinguishes_unusable_status_from_failed_re
     await registry.add_team(holder.team_id, holder.team_did_key)
     async with (
         human_namespace(registry, DOMAIN) as namespace,
-        Redis.from_url(os.environ["REDIS_URL"]) as redis,
+        KeyRecordingRedis.from_url(os.environ["REDIS_URL"]) as redis,
     ):
         human = await namespace.register(holder)
         agent = Member(

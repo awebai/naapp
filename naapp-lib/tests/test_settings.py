@@ -118,3 +118,26 @@ def test_timestamp_skew_cannot_exceed_the_verifier_limit() -> None:
     )
     with pytest.raises(ValidationError):
         _settings(timestamp_skew_seconds=MAX_TIMESTAMP_SKEW_SECONDS + 1)
+
+
+def test_an_env_file_in_the_working_directory_is_not_an_apps_configuration(
+    tmp_path, monkeypatch
+) -> None:
+    # Apps build on these settings, some when they are imported: a .env in
+    # whatever directory the process starts in must not configure them.
+    from pydantic_settings import SettingsConfigDict
+
+    from aweb_naapp.runtime.settings import NaappSettings
+
+    class ProbeSettings(NaappSettings):
+        model_config = SettingsConfigDict(env_prefix="PROBE_")
+
+    (tmp_path / ".env").write_text("PROBE_AWID_REGISTRY_URL=https://planted.example\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("PROBE_AWID_REGISTRY_URL", raising=False)
+
+    settings = ProbeSettings(
+        database_url="postgresql://localhost/probe", public_origin="https://probe.test", app_id="probe"
+    )
+
+    assert settings.awid_registry_url == "https://api.awid.ai"

@@ -84,11 +84,11 @@ class Audit:
 
 
 @pytest.fixture
-async def world(test_db_factory, tmp_path):
+async def world(change_set_databases, tmp_path):
     # One real app composition, shared with the change-set consumer tests.
     from tests.test_change_sets import build_world
 
-    async with build_world(test_db_factory, tmp_path) as built:
+    async with build_world(*change_set_databases, tmp_path) as built:
         yield built
 
 

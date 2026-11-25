@@ -10,7 +10,11 @@ import pytest_asyncio
 from aweb_naapp_testing.databases import SchemaDatabases
 from awid_service.testing import Registry, running_registry
 
-pytest_plugins = ("pgdbm.fixtures.conftest", "aweb_naapp_testing.server")
+pytest_plugins = (
+    "pgdbm.fixtures.conftest",
+    "aweb_naapp_testing.server",
+    "aweb_naapp_testing.database_fixtures",
+)
 
 
 @pytest.fixture
@@ -19,9 +23,7 @@ async def test_db_factory(test_db_factory: Any) -> SchemaDatabases:
 
 
 @pytest_asyncio.fixture
-async def registry(test_db_factory) -> AsyncIterator[Registry]:
-    # AWID connects to this database by its DSN alone and keeps its tables in
-    # its own explicit schema, so the test schema the factory adds goes unused.
-    registry_db = await test_db_factory.create_db(suffix="naapp_awid")
+async def registry(clone_database, awid_template) -> AsyncIterator[Registry]:
+    registry_db = await clone_database(awid_template, suffix="naapp_awid")
     async with running_registry(registry_db.config.get_dsn()) as running:
         yield running

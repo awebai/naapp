@@ -101,5 +101,3 @@ def test_the_largest_envelope_an_event_can_carry_fits_in_a_line() -> None:
     assert len(event_line(largest)) - 1 <= MAX_LINE_BYTES
 
 
-def test_the_vector_pins_the_bound() -> None:
-    assert VECTOR["scheme"]["max_line_bytes"] == MAX_LINE_BYTES

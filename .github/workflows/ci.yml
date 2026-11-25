@@ -195,6 +195,7 @@ jobs:
     env:
       JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/folio
+      REDIS_URL: redis://localhost:6379/0
       TEST_DB_HOST: localhost
       TEST_DB_PORT: "5432"
       TEST_DB_USER: postgres
@@ -404,6 +405,7 @@ jobs:
     env:
       JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/logs
+      REDIS_URL: redis://localhost:6379/0
     services:
       postgres:
         image: postgres:17
@@ -473,6 +475,7 @@ jobs:
     env:
       JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/secrets
+      REDIS_URL: redis://localhost:6379/0
       UV_MANAGED_PYTHON: "true"
     services:
       postgres:

@@ -10,6 +10,7 @@ from time import monotonic_ns, perf_counter_ns
 import pytest
 from aweb_naapp_testing import Member
 from aweb_naapp_testing.human_members import registered_human
+from aweb_naapp_testing.redis_database import KeyRecordingPipeline, KeyRecordingRedis
 from awid.id_certificates import id_certificate_signing_bytes
 from awid.identity_observation import (
     IdentityKindObservation,
@@ -19,8 +20,6 @@ from awid.identity_observation import (
 from awid.registry import CachedRegistryClient, RegistryClient
 from awid_service.testing import REGISTRY_URL, SERVICE_TOKEN
 from fastapi import FastAPI, HTTPException
-from redis.asyncio import Redis
-from redis.asyncio.client import Pipeline
 
 from aweb_naapp import roles
 from aweb_naapp.runtime import human_member
@@ -178,8 +177,9 @@ async def test_an_unreadable_private_team_is_unavailable_not_a_membership_denial
     )
 
 
-class _RedisClock(Redis):
-    """Only TIME is controlled; all cache reads/writes use the actual Redis."""
+class _RedisClock(KeyRecordingRedis):
+    """Only TIME is controlled; all cache reads/writes use the actual Redis,
+    and the keys written are removed when the test ends."""
 
     seconds = 1_000_000
 
@@ -189,7 +189,7 @@ class _RedisClock(Redis):
     def pipeline(self, transaction=True, shard_hint=None):
         seconds = self.seconds
 
-        class ClockedPipeline(Pipeline):
+        class ClockedPipeline(KeyRecordingPipeline):
             async def execute(self, *args, **kwargs):
                 commands = [command for command, _ in self.command_stack]
                 results = await super().execute(*args, **kwargs)
@@ -199,7 +199,7 @@ class _RedisClock(Redis):
                 ]
 
         return ClockedPipeline(
-            self.connection_pool, self.response_callbacks, transaction, shard_hint
+            self, self.connection_pool, self.response_callbacks, transaction, shard_hint
         )
 
 
@@ -223,6 +223,7 @@ async def aged_human(human, registry):
         yield member, identity, cached, cache
     finally:
         await cached.aclose()
+        await redis.forget_written()
         await redis.aclose()
 
 

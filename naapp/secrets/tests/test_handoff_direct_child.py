@@ -108,22 +108,29 @@ async def test_the_first_direct_child_start_after_designation_is_admitted(journe
     assert requester["key_fingerprint"]
 
 
-@pytest.mark.parametrize("journey", [REQUESTER], indirect=True)
+def requester_with_unavailable_status(registry):
+    async def unavailable(request):
+        if request.url.path == "/v1/id-certificates/status":
+            return httpx.Response(503, json={"detail": "fixture-no-log-value"})
+        return await registry.transport.handle_async_request(request)
+
+    async def check(request, signer):
+        client = replace(
+            registry, transport=httpx.MockTransport(unavailable),
+            domain_verifier=registry._domain_verifier,
+        )
+        async with contextlib.aclosing(client):
+            return await requester_parent(client)(request, signer)
+
+    return check
+
+
+@pytest.mark.parametrize("journey", [{"requester_parent": requester_with_unavailable_status}], indirect=True)
 async def test_unreadable_requester_status_refuses_and_reports_one_value_free_line(journey, caplog):
     import re
 
     laptop, chain = await certify_agent(journey, journey.member, [journey.member.id_certificate], "laptop")
-
-    async def unavailable(request):
-        if request.url.path == "/v1/id-certificates/status":
-            return httpx.Response(503, json={"detail": "fixture-no-log-value"})
-        return await journey.registry.transport.handle_async_request(request)
-
-    client = replace(journey.registry, transport=httpx.MockTransport(unavailable),
-                     domain_verifier=journey.registry._domain_verifier)
-    async with contextlib.aclosing(client):
-        journey.factory.requester_parent = requester_parent(client)
-        response = await start(journey, laptop, chain)
+    response = await start(journey, laptop, chain)
     assert response.status_code == 503 and response.json() == {"detail": "principal_status_unavailable"}
     messages = [
         record.getMessage() for record in caplog.records

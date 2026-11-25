@@ -2,20 +2,24 @@
 
 Composition shares OwnerConsole's sessions, authoritative installation lookup,
 F6 and role directory with the broker. Only the human app mounts this router.
-The entered token uses native custody's inert allocator. Reference validation
+Native values are sealed together with their pending change set. The entered
+token uses native custody's inert allocator. Reference validation
 opens that scoped token and calls the SDK outside authority transactions; only
 metadata enters the final, reauthorized staging transaction. The later console
 draft/approve/confirm flow owns activation of both candidates.
 """
 
 from datetime import UTC, datetime
+from typing import Any
 
 from aweb_naapp.console import ConsoleRoute, ConsoleSession, KeyBoundConsoleSession
 from aweb_naapp.runtime.installation import AdmittedInstallation, InstallationRefused
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pgdbm import TransactionManager
 
+from aweb_secrets import records
 from aweb_secrets.console import OwnerConsole, _body, _require_json, _text
+from aweb_secrets.console_changes import ConsoleChanges, _errors
 from aweb_secrets.custody import (
     Custody,
     CustodyUnavailable,
@@ -76,6 +80,55 @@ class ConsoleValues:
         ):
             raise HTTPException(status_code=401, detail="console_session_required")
         await self._session_open(tx, current)
+
+    async def draft_native_value(
+        self,
+        current: ConsoleSession,
+        *,
+        changes: ConsoleChanges,
+        installation_id: str,
+        initial: SecretRecord | None,
+        ref: str,
+        value: dict[str, str],
+        reason: str,
+    ) -> dict[str, int | datetime]:
+        admitted = await changes._installation(current, installation_id)
+        async with self.console.db.transaction() as tx:
+            await self._authorize(tx, current, admitted)
+            items: list[dict[str, Any]] = []
+            stored = await records.secret_by_ref(tx, installation_id, admitted.team_id, ref)
+            if initial is None:
+                if stored is None or stored.record.backend != "native":
+                    raise HTTPException(404, "secret_unknown")
+                record = stored.record
+            else:
+                if stored is not None:
+                    raise HTTPException(409, "secret_exists")
+                record = initial
+                items.append({"kind": "secret", "op": "create", "ref": ref, "after": record.after})
+            version = await self._custody.sealer.ingest(
+                tx,
+                installation_id=installation_id,
+                team_id=admitted.team_id,
+                secret_id=record.secret_id,
+                value=encode_value(record.kind, value),
+                initial=initial,
+            )
+            context = SealContext(installation_id, admitted.team_id, record.secret_id, version)
+            created_at = await tx.fetch_value(
+                "SELECT created_at FROM {{tables.sealed_versions}}"
+                " WHERE installation_id=$1 AND team_id=$2 AND secret_id=$3 AND version=$4",
+                installation_id, admitted.team_id, record.secret_id, version,
+            )
+            items.append({
+                "kind": "secret_value", "op": "create", "ref": ref,
+                "after": {"v": 1, "secret_ref": ref, "version": version},
+            })
+            _, pending = await changes._record_draft(
+                tx, current, admitted, items=items, sealed=[context], reason=reason
+            )
+        await changes.approvals.deliver(pending)
+        return {"version": version, "created_at": created_at}
 
     async def stage_onepassword_reference(
         self,
@@ -255,5 +308,39 @@ def console_values_router(services: ConsoleValues, *, prefix: str = "") -> APIRo
             "credential_id": context.secret_id,
             "version": context.version,
         }
+
+    return router
+
+
+def console_native_values_router(services: ConsoleValues, *, changes: ConsoleChanges) -> APIRouter:
+    """Stage an owner-entered native value and its draft in one transaction."""
+    router = APIRouter(route_class=ConsoleRoute)
+    root = "/installations/{installation_id}/native-values"
+
+    @router.post(root, status_code=201, dependencies=[Depends(_require_json)])
+    @router.post(root + "/{ref}", status_code=201, dependencies=[Depends(_require_json)])
+    async def draft_native_value(
+        installation_id: str, request: Request, ref: str | None = None
+    ) -> dict[str, int | datetime]:
+        current = await services.console.sessions.current(request)
+        creating = ref is None
+        fields = {"secret", "value", "reason"} if creating else {"value", "reason"}
+        body = await _body(request, fields)
+        async with _errors(services.console, current):
+            try:
+                initial = SecretRecord.from_after(body["secret"]) if creating else None
+                if initial is not None:
+                    if initial.backend != "native":
+                        raise HTTPException(400, "request_invalid")
+                    ref = initial.ref
+                assert ref is not None
+                return await services.draft_native_value(
+                    current, changes=changes, installation_id=installation_id, initial=initial,
+                    ref=ref, value=body["value"], reason=_text(body, "reason"),
+                )
+            except (SecretInvalid, ValueInvalid):
+                raise HTTPException(400, "request_invalid") from None
+            except CustodyUnavailable:
+                raise HTTPException(503, "custody_unavailable") from None
 
     return router

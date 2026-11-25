@@ -33,6 +33,7 @@ from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from nacl.signing import SigningKey
 
 from aweb_secrets import jobs, records, runners
+from aweb_secrets.change import MAX_REASON_CHARS
 from aweb_secrets.composition import create_service
 from aweb_secrets.custody import Custody, LocalKeyFileProvider, encode_value
 from aweb_secrets.destination import DestinationRecord
@@ -40,7 +41,7 @@ from aweb_secrets.grant import GrantRecord
 from aweb_secrets.manifest import MANIFEST_PATH
 from aweb_secrets.owners import OWNER_ROLE, owner_scope
 from aweb_secrets.policy import Policy
-from aweb_secrets.secret import SecretRecord
+from aweb_secrets.secret import SecretRecord, mint_secret_id
 from tests.human_owner import apply_holder, fixture_principal, member_key
 from tests.production_authority import authority, install, install_audit_receiver, no_dns_override
 from tests.test_composition import settings
@@ -326,6 +327,43 @@ async def test_a_canonical_component_holder_logs_into_the_production_console(roo
         pytest.fail(
             f"Expected DNS queries {expected_queries!r} within 5s. Observed {dict(dns.queries)!r}"
         )
+
+
+async def test_native_value_post_is_mounted_only_on_the_production_console(root):
+    service, client, configured, _, installed, *_ = root
+    owner = await enrolled_owner(root)
+    human = configured.console_origin
+    path = f"/installations/{installed['installation_id']}/native-values"
+    entered = secrets.token_urlsafe(24)
+    data = {
+        "secret": {
+            "v": 1, "secret_id": mint_secret_id(), "ref": "native", "description": "",
+            "kind": "bearer", "kind_params": {}, "backend": "native",
+            "sensitivity": "standard", "approve_only": False,
+        },
+        "value": {"value": entered},
+        "reason": "Enter a native value",
+    }
+    csrf = {"X-CSRF-Token": owner.csrf_token}
+    assert (await client.post(AUDIENCE + path, json=data, headers=csrf)).status_code == 404
+    assert (await client.post(human + path, json=data)).status_code == 403
+
+    db = service.runtime.db()
+    refused = await client.post(
+        human + path, json={**data, "reason": "x" * (MAX_REASON_CHARS + 1)}, headers=csrf
+    )
+    assert (refused.status_code, refused.json()) == (409, {"detail": "change_malformed"})
+    assert await db.fetch_value("SELECT count(*) FROM sealed_versions") == 0
+    assert await db.fetch_value("SELECT count(*) FROM custody_secrets") == 0
+    assert await db.fetch_value("SELECT count(*) FROM change_sets") == 0
+
+    staged = await client.post(human + path, json=data, headers=csrf)
+    assert staged.status_code == 201
+    assert set(staged.json()) == {"version", "created_at"} and staged.json()["version"] == 1
+    assert await db.fetch_value("SELECT count(*) FROM change_set_sealed") == 1
+    assert await db.fetch_value("SELECT count(*) FROM secrets") == 0
+    if any(entered in response.text for response in (staged, refused)):
+        pytest.fail("production native ingress reflected the submitted value")
 
 
 async def test_the_production_console_serves_the_access_view_only_to_its_current_owner(root):

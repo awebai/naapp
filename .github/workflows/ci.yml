@@ -382,6 +382,13 @@ jobs:
       - name: Run unit and contract tests
         run: make test
 
+      # A developer's targets work from a clone: make compile, and make run
+      # serves /live against this job's database.
+      - name: Library's developer targets work
+        env:
+          LIBRARY_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: make check-library-dev
+
       - name: Keep the per-test results
         if: always()
         uses: actions/upload-artifact@v4

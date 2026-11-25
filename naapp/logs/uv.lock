@@ -287,10 +287,14 @@ runtime = [
     { name = "asyncpg" },
     { name = "awid-service" },
     { name = "cbor2" },
+    { name = "dnspython" },
     { name = "fastapi" },
+    { name = "httpcore", extra = ["asyncio"] },
     { name = "httpx" },
+    { name = "idna" },
     { name = "jsonschema" },
     { name = "pgdbm" },
+    { name = "publicsuffixlist" },
     { name = "pydantic-settings" },
     { name = "pynacl" },
     { name = "webauthn" },
@@ -299,6 +303,7 @@ runtime = [
 [package.metadata]
 requires-dist = [
     { name = "asyncpg", marker = "extra == 'runtime'", specifier = ">=0.32.0" },
+    { name = "aweb-naapp", extras = ["egress"], marker = "extra == 'runtime'" },
     { name = "awid-service", marker = "extra == 'hooks'", specifier = ">=0.5.40" },
     { name = "awid-service", marker = "extra == 'runtime'", specifier = ">=0.5.40" },
     { name = "cbor2", marker = "extra == 'runtime'", specifier = ">=6.1.2" },

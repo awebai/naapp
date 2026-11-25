@@ -61,6 +61,7 @@ from team_journey_support import (
     first_json,
     install_app,
     publish_team_server,
+    sql_literal,
 )
 from team_journey_support import Holder as SharedHolder
 
@@ -508,7 +509,8 @@ def signs_in_again_after_a_reissue(
         for app_id, _, role, service in apps
     }
     for app_id, console, _, _ in apps:
-        assert holder.login(console, scopes[app_id])["status"] == 200, app_id
+        answer = holder.login(console, scopes[app_id])
+        assert answer["status"] == 200, (app_id, answer)
 
     reissued = aw(controller, "id", "team", "reissue-cert", "holder", "--team", TEAM, "--namespace", DOMAIN,
                   "--did", human["did_key"], "--did-aw", principal, "--global", "--registry", REGISTRY)
@@ -518,7 +520,7 @@ def signs_in_again_after_a_reissue(
 
     holder.run(principal, "--json", "id", "team", "fetch-cert", "--namespace", DOMAIN, "--team", TEAM,
                "--cert-id", reissued["new_certificate_id"], "--registry", REGISTRY, "--force")
-    for app_id, console, role, _ in apps:
+    for app_id, console, role, database in apps:
         # Registration refreshes the certificate for the existing holding.
         # The new passkey is never designated or used to sign back in.
         holder.run_in_browser(
@@ -526,4 +528,13 @@ def signs_in_again_after_a_reissue(
             "--role", role, "--out", f"/runtime/holder/{app_id}-recovery-export.json",
             device="recovery-authenticator.json",
         )
-        assert holder.login(console, scopes[app_id])["status"] == 200, app_id
+        answer = holder.login(console, scopes[app_id])
+        schema = "public" if database == "logs" else SECRETS_SCHEMA
+        certificate_id = sql_literal(reissued["new_certificate_id"])
+        scope = sql_literal(scopes[app_id])
+        renewed = lane.query(
+            "secrets", database,
+            f"SELECT convert_from(certificate, 'UTF8')::jsonb->>'certificate_id' = {certificate_id}"
+            f" FROM {schema}.role_holdings WHERE b3_scope = {scope} AND ended_in IS NULL",
+        ) == "t"
+        assert answer["status"] == 200 and renewed, (app_id, answer, renewed)

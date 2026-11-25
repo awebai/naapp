@@ -433,8 +433,12 @@ def test_the_owner_designates_a_human_holder_registered_on_another_machine(lane:
     invite = aw(controller, "id", "team", "invite", "--team", TEAM, "--namespace", DOMAIN, "--member-global")
     # The owner's machine holds no namespace authority, so the membership
     # names the address the namespace root already issued to this identity.
-    aw(controller, "id", "team", "accept-invite", invite["token"], "--name", "owner", "--global",
-       "--address", owner["address"])
+    lane.redact(invite["token"])
+    accepted = _docker(
+        "exec", "-i", controller, "aw", "--json", "id", "team", "accept-invite", "--token-stdin",
+        "--name", "owner", "--global", "--address", owner["address"], input=invite["token"] + "\n",
+    )
+    lane.checked(accepted, "accept the controller's invite")
     aw(controller, "init", "--url", AWEB, "--name", "owner", "--do-not-touch-agents-md")
     added = aw(controller, "id", "team", "add-member", "--team", TEAM, "--namespace", DOMAIN,
                "--did", human["did_key"], "--did-aw", principal, "--name", "holder", "--global")

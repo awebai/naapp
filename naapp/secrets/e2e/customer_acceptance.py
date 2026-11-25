@@ -54,20 +54,38 @@ def create_agent(lane, controller, founder, *, binary, team, domain, registry, a
         "--registry",
         registry,
     )
-    invite = aw(
-        controller, "id", "team", "invite", "--team", team, "--namespace", domain, "--member-global"
+    # Native invites keep their issuance state on the issuer's machine.
+    # The agent fetches the certificate the team owner issues for its key.
+    added = aw(
+        controller,
+        "id",
+        "team",
+        "add-member",
+        "--team",
+        team,
+        "--namespace",
+        domain,
+        "--did",
+        identity["did_key"],
+        "--did-aw",
+        identity["did_aw"],
+        "--name",
+        "customer-agent",
+        "--global",
     )
     aw(
         agent,
         "id",
         "team",
-        "accept-invite",
-        invite["token"],
-        "--name",
-        "customer-agent",
-        "--global",
-        "--address",
-        identity["address"],
+        "fetch-cert",
+        "--namespace",
+        domain,
+        "--team",
+        team,
+        "--cert-id",
+        added["certificate_id"],
+        "--registry",
+        registry,
     )
     aw(agent, "init", "--url", aweb, "--name", "customer-agent", "--do-not-touch-agents-md")
     checked = docker(

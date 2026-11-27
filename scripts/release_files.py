@@ -193,6 +193,8 @@ def check_installs(
     With ``find_links`` a lane resolves another lane's packages from ``out``
     when PyPI lacks them; without it every other dependency comes from PyPI,
     as it will for whoever installs the published files."""
+    # The import check compares each wheel's file URI, which needs an absolute path.
+    out = out.resolve()
     for prefix, version in versions.items():
         specs = []
         for package, _ in PYPI_LANES[prefix]:

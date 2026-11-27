@@ -3,7 +3,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import io
 import shutil
 import tempfile
 import unittest
@@ -110,7 +112,7 @@ class BuildTest(unittest.TestCase):
 
     def test_the_install_check_installs_each_lanes_wheels_by_path_together(self):
         files = {**lane("aweb-naapp", "0.6.0"), **lane("aweb-naapp-testing", "0.6.0")}
-        out = directory(self, files)
+        out = directory(self, files).resolve()
         commands = []
         FILES.check_installs(out, {"aweb-naapp-v": "0.6.0"}, runner=lambda argv: commands.append(argv),
                              modules=lambda wheel: [wheel.name.split("-")[0]])
@@ -136,6 +138,12 @@ class BuildTest(unittest.TestCase):
     def test_every_lanes_wheels_install_from_this_build_and_import(self):
         out = directory(self, {})
         FILES.check_installs(out, FILES.build(ROOT, out))
+
+    def test_the_command_builds_into_a_relative_directory_as_ci_names_it(self):
+        parent = directory(self, {})
+        with contextlib.chdir(parent), contextlib.redirect_stdout(io.StringIO()) as printed:
+            self.assertEqual(FILES.main(["build", "--out", "release-files", "--lane", "aweb-naapp-v"]), 0)
+        self.assertEqual(printed.getvalue(), (parent / "release-files" / "SHA256SUMS").read_text())
 
     def test_every_lane_is_built_by_default(self):
         self.assertEqual(FILES.lanes_to_build(None), list(PYPI_LANES))

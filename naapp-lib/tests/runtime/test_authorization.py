@@ -374,6 +374,7 @@ async def test_policy_http_refusal_from_the_app_propagates(registry, member):
     grants = InstalledGrants({TEAM_ID: fresh("fixture:read")})
     response = await call(registry, member, grants, refuse, "GET", "/v1/items/abc")
     assert response.status_code == 404
+    assert response.json() == {"detail": {"code": "resource_not_found"}}
 
 
 @pytest.mark.parametrize("caller,contexts,admitted", [

@@ -20,13 +20,12 @@ import pytest
 from aweb.app_manifests import FetchedManifest
 from aweb.installations import install_verified_manifest_on
 from aweb_naapp.manifest import load_manifest
-from aweb_naapp_testing import Member
-from awid_service.testing import REGISTRY_URL, SERVICE_TOKEN, dns_naming
-from nacl.signing import SigningKey
-
 from aweb_naapp.runtime.event_emit import AppEvents
 from aweb_naapp.runtime.installation import InstallationRefused
 from aweb_naapp.runtime.team_auth import Principal
+from aweb_naapp_testing import Member
+from awid_service.testing import REGISTRY_URL, SERVICE_TOKEN, dns_naming
+from nacl.signing import SigningKey
 
 from aweb_tasks.app import REFUSAL_STATUS, create_app
 from aweb_tasks.config import TasksSettings

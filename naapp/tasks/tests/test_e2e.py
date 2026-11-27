@@ -145,7 +145,8 @@ def test_a_member_creates_claims_locks_and_closes_through_aw_tasks(lane: Compose
     installed = aw(machine, "plugin", "install", API)
     assert installed.get("approved"), installed
 
-    task = aw(machine, "tasks", "create", "--title", "Ship the Tasks app", "--labels", "release")
+    # aw takes an array parameter as JSON.
+    task = aw(machine, "tasks", "create", "--title", "Ship the Tasks app", "--labels", '["release"]')
     assert (task["number"], task["status"], task["creator"]["alias"]) == (1, "open", "alice")
 
     claimed = aw(machine, "tasks", "claim", "--number", "1")

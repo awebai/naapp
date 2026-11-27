@@ -21,7 +21,9 @@ A job inherits the Tasks service's own environment. Nothing is set by hand:
 - `TASKS_APP_KEY_FILES`: the deployment's keys, including the grant-read key.
 - `TASKS_APP_EVENTS_ORIGIN`: the team's aweb server, which the app's runtime is started with.
 
-**The staging schema is `<TASKS_DB_SCHEMA>_board_move`,** for example `public_board_move`. The operator's psql files take it as `-v schema=...`, and their database URL is the Tasks database owner URL.
+**The staging schema is `<TASKS_DB_SCHEMA>_board_move`,** for example `public_board_move`. The operator's psql files take it as `-v schema=...`.
+
+**The operator's psql commands reach the Tasks database as `psql "service=tasks"`.** The service is defined in the operator's psql service file (mode 0600), which holds the Tasks database owner URL, so the URL never appears on a command line or in the process list.
 
 **The destination is never typed in.** Every job that names the installation reads the exported team's live grant with the deployment's grant-read key, as the running app does, and starts the app's runtime to do so.
 - That start is the app's own. It runs the outbox drains, so a job can deliver the app's pending events, even while the service is suspended.
@@ -44,7 +46,7 @@ On the operator's host. The export is read-only and runs in one snapshot, agains
 
 The query stops, writing nothing, if any task table has columns other than those of aweb 1.27.55.
 
-    psql "<Tasks database owner URL>" -X -q -At -v ON_ERROR_STOP=1 \
+    psql "service=tasks" -X -q -At -v ON_ERROR_STOP=1 \
       -v schema=<staging schema> -v file=export.json -f naapp/tasks/src/aweb_tasks/board_move/load_export.sql
 
 - This creates the staging schema and loads the export into it.
@@ -77,7 +79,7 @@ As jobs:
 
 They store the listings `export` and `staged`. `list-staged` also logs a `dataset` line for the listing's first lines, before its source facts: the rollback baseline. The operator fetches each listing with:
 
-    psql "<Tasks database owner URL>" -X -q -At -v ON_ERROR_STOP=1 -v schema=<staging schema> \
+    psql "service=tasks" -X -q -At -v ON_ERROR_STOP=1 -v schema=<staging schema> \
       -v name=<export | staged> -f naapp/tasks/src/aweb_tasks/board_move/fetch_listing.sql \
       | base64 --decode > <name>.jsonl
 
@@ -153,7 +155,7 @@ Then grant `tasks.write` and `tasks.override`; our agents switch to `aw tasks`.
    - **The installation id is taken from the approved listing, not from the grant.** Every dataset row of that listing carries it, so another installation's listing can never equal the baseline. A wrong id can only fail the comparison, never pass it.
    - **Where it runs:** as a job only once aweb-adzd.8 has observed that Render runs a one-off job on a suspended service. Until then, and before cutover, the operator proves `no_writers.sql` on the Tasks database itself:
 
-         PGOPTIONS='-c search_path=<TASKS_DB_SCHEMA>' psql "<Tasks database owner URL>" -X -q -v ON_ERROR_STOP=1 \
+         PGOPTIONS='-c search_path=<TASKS_DB_SCHEMA>' psql "service=tasks" -X -q -v ON_ERROR_STOP=1 \
            -c 'BEGIN' -f naapp/tasks/src/aweb_tasks/board_move/no_writers.sql -c 'ROLLBACK'
 
        It must be shown to refuse with another session in a transaction, and to pass without one.

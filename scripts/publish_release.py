@@ -21,7 +21,6 @@ from release_versions import (
     VersionRefusal as PublishRefusal,
     final_version,
     manifest_version_at,
-    require_open_lane,
     require_runner_values,
     tag_parts,
 )
@@ -72,7 +71,6 @@ def run(
 
 def tag_identity(root: Path, tag: str) -> tuple[str, str, str]:
     prefix, version = tag_parts(tag)
-    require_open_lane(prefix)
     try:
         source_sha = run(root, "git", "rev-parse", f"{tag}^{{commit}}", timeout=60)
     except PublishRefusal as error:

@@ -11,17 +11,13 @@ commit.
 | `folio-vX.Y.Z` | `ghcr.io/awebai/folio` image |
 | `library-vX.Y.Z` | `ghcr.io/awebai/library` image |
 | `aweb-secrets-runner-vX.Y.Z` | PyPI `aweb-secrets-values`, then `aweb-secrets-runner`, at the same version |
-| `aweb-naapp-vX.Y.Z` | Closed: aweb publishes `aweb-naapp` and `aweb-naapp-testing` until the cutover |
+| `aweb-naapp-vX.Y.Z` | PyPI `aweb-naapp` (`naapp-lib/`), then `aweb-naapp-testing` (`naapp-lib/testing/`), at the same version |
 
 Manifest-backed tags must equal the version in their package manifest. A tag
 that publishes two packages requires both manifests at the tag version:
 `aweb-naapp-journey-support` versions with Secrets, and the runner and values
 manifests must have equal versions, with the runner requiring exactly that
 values version.
-
-The `aweb-naapp-v` lane exists, with its two packages, but the candidate and the
-publisher both refuse its tags while aweb still publishes `aweb-naapp`. It opens
-at the cutover, when `CLOSED_LANES` in `scripts/release_versions.py` drops it.
 
 The [customer Secrets/Logs/runner procedure](../naapp/secrets/deploy/RELEASE.md)
 uses these same entry points. Neither an image recipe nor these tag mappings

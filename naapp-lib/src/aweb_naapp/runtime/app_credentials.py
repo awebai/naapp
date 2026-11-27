@@ -9,7 +9,7 @@ those of the app-event credential, byte-identical to the Go signer for
 ``app-event`` and to ``test-vectors/app-read-credential-v1.json`` for the read
 purposes. Signatures are unpadded standard base64, the one encoding the server
 accepts for read purposes. ``app-request`` additionally signs the installation
-id and generation (docs/app-task-requests.md §2).
+id and generation (aweb's docs/app-task-requests.md §2).
 """
 
 from __future__ import annotations

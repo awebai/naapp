@@ -14,7 +14,6 @@ from pathlib import Path
 from release_versions import (
     VersionRefusal as CandidateRefusal,
     manifest_version_at,
-    require_open_lane,
     require_runner_values,
     tag_parts,
 )
@@ -73,7 +72,6 @@ def validate_tags(root: Path, tags: list[str], source: str = "HEAD") -> tuple[st
     versions: dict[str, str] = {}
     for tag in tags:
         prefix, version = tag_parts(tag)
-        require_open_lane(prefix)
         if prefix in versions:
             raise CandidateRefusal(f"more than one {prefix} tag was requested")
         versions[prefix] = version

@@ -14,7 +14,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stdout
 from unittest.mock import patch
 from pathlib import Path
 
@@ -132,25 +132,24 @@ class TagContractTest(unittest.TestCase):
                 VERSIONS.tag_parts(tag)
 
 
-class ClosedLaneTest(unittest.TestCase):
-    """aweb publishes aweb-naapp until the cutover; this repository's lane refuses."""
+class AwebNaappLaneTest(unittest.TestCase):
+    """naapp releases aweb-naapp and aweb-naapp-testing, at one version."""
 
-    def test_the_aweb_naapp_lane_refuses_a_candidate(self):
+    def test_an_aweb_naapp_candidate_binds_both_packages_to_its_version(self):
         root = repository(self)
-        with self.assertRaisesRegex(CANDIDATE.CandidateRefusal, "aweb-naapp-v.*closed"):
-            CANDIDATE.validate_tags(root, ["aweb-naapp-v0.1.0"])
-
-    def test_the_aweb_naapp_lane_refuses_publication(self):
-        root = repository(self)
+        self.assertEqual(CANDIDATE.validate_tags(root, ["aweb-naapp-v0.1.0"])[1], {"aweb-naapp-v": "0.1.0"})
         command(root, "git", "tag", "-a", "aweb-naapp-v0.1.0", "-m", "tagged")
-        with self.assertRaisesRegex(PUBLISH.PublishRefusal, "aweb-naapp-v.*closed"):
+        self.assertEqual(PUBLISH.tag_identity(root, "aweb-naapp-v0.1.0")[:2], ("aweb-naapp-v", "0.1.0"))
+
+    def test_an_aweb_naapp_testing_version_that_drifted_refuses(self):
+        root = repository(self)
+        set_version(root, "naapp-lib/testing", "0.1.1")
+        command(root, "git", "commit", "-qam", "drifted")
+        with self.assertRaisesRegex(CANDIDATE.CandidateRefusal, "naapp-lib/testing"):
+            CANDIDATE.validate_tags(root, ["aweb-naapp-v0.1.0"])
+        command(root, "git", "tag", "-a", "aweb-naapp-v0.1.0", "-m", "tagged")
+        with self.assertRaisesRegex(PUBLISH.PublishRefusal, "naapp-lib/testing"):
             PUBLISH.tag_identity(root, "aweb-naapp-v0.1.0")
-        for argv in (["--only", "pypi", "aweb-naapp-v0.1.0"], ["--check-tag", "aweb-naapp-v0.1.0"]):
-            with self.subTest(argv=argv):
-                printed = io.StringIO()
-                with patch.object(Path, "cwd", return_value=root), redirect_stderr(printed):
-                    self.assertEqual(PUBLISH.main(argv), 1)
-                self.assertIn("publish refused: the aweb-naapp-v lane is closed", printed.getvalue())
 
 
 class PypiLaneContractTest(unittest.TestCase):

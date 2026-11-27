@@ -14,10 +14,6 @@ TAG_PATTERN = re.compile(
     rf"^(?:(aweb-naapp-v|aweb-secrets-runner-v)({PYTHON_VERSION})"
     rf"|(secrets-v|logs-v|folio-v|library-v)({SEMVER}))$"
 )
-# Lanes that exist but publish nothing yet, with the reason.
-CLOSED_LANES = {
-    "aweb-naapp-v": "aweb publishes aweb-naapp and aweb-naapp-testing until the cutover",
-}
 
 
 class VersionRefusal(RuntimeError):
@@ -39,11 +35,6 @@ def tag_parts(tag: str) -> tuple[str, str]:
         raise VersionRefusal(f"unsupported release tag {tag!r}")
     groups = matched.groups()
     return next((groups[i], groups[i + 1]) for i in (0, 2) if groups[i])
-
-
-def require_open_lane(prefix: str) -> None:
-    if prefix in CLOSED_LANES:
-        raise VersionRefusal(f"the {prefix} lane is closed: {CLOSED_LANES[prefix]}")
 
 
 def final_version(version: str) -> str | None:

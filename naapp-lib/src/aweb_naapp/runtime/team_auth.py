@@ -1,7 +1,7 @@
 """Team-auth v2 request authentication for naapps.
 
 Verifies that a member holding a valid team certificate signed one concrete
-HTTP request (docs/team-auth-envelope-v2.md): the DIDKey header, the timestamp
+HTTP request (aweb's docs/team-auth-envelope-v2.md): the DIDKey header, the timestamp
 window, the canonical v2 payload bound to audience, method, raw path and query,
 team and body, the member's signature, and the certificate against AWID's
 current team key and revocation state. A certificate's ``member_did_aw`` is

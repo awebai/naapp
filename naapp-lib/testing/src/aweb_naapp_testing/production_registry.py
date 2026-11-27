@@ -47,6 +47,8 @@ from pgdbm import AsyncDatabaseManager, DatabaseConfig
 from aweb_naapp_testing.redis_database import redis_test_url
 
 _SCHEMA_PREFIX = "production_awid_"
+# The name its pool gives PostgreSQL, so pg_stat_activity can tell its backends apart.
+POOL_APPLICATION_NAME = "naapp-production-awid"
 
 # Runs in the release's own environment: its app, its migrations, and a domain
 # verifier that asks the test process (argv[2]) for each domain's authority.
@@ -234,7 +236,16 @@ async def running_production_registry(
                     except httpx.TransportError:
                         pass
                     await asyncio.sleep(0.1)
-        db = AsyncDatabaseManager(DatabaseConfig(connection_string=database_url, schema=schema))
+        # Many of these run at once on one shared PostgreSQL: a small pool, named.
+        db = AsyncDatabaseManager(
+            DatabaseConfig(
+                connection_string=database_url,
+                schema=schema,
+                min_connections=1,
+                max_connections=5,
+                server_settings={"application_name": POOL_APPLICATION_NAME},
+            )
+        )
         await db.connect()
         transport = ProductionServiceTransport(origin)
         registry = Registry(app=app, db=db, transport=transport)  # type: ignore[arg-type]

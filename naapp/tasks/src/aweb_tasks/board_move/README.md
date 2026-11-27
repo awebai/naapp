@@ -23,7 +23,9 @@ A job inherits the Tasks service's own environment. Nothing is set by hand:
 
 **The staging schema is `<TASKS_DB_SCHEMA>_board_move`,** for example `public_board_move`. The operator's psql files take it as `-v schema=...`, and their database URL is the Tasks database owner URL.
 
-**The destination is never typed in.** Every job that names the installation reads the exported team's live grant with the deployment's grant-read key, as the running app does, and starts the app's runtime to do so. It refuses (exit 3) unless that grant is active and grants exactly `tasks.read`. The listings name the installation id and generation it found.
+**The destination is never typed in.** Every job that names the installation reads the exported team's live grant with the deployment's grant-read key, as the running app does, and starts the app's runtime to do so.
+- That start is the app's own. It runs the outbox drains, so a job can deliver the app's pending events, even while the service is suspended.
+- It writes nothing in the installation's dataset. It refuses (exit 3) unless that grant is active and grants exactly `tasks.read`. The listings name the installation id and generation it found.
 
 **A job's log is its receipt.** A listing is stored in the staging schema, and the log shows one line for it: `<name> sha256 <hex> bytes <n> lines <m>`. The operator fetches the stored listing with `fetch_listing.sql`, and the verifier recomputes its sha256 against that line. Exit status 2 is a stop on the export; 3 is a step the move refuses.
 
@@ -127,7 +129,7 @@ A refusal copies and drops nothing. Then grant `tasks.write` and `tasks.override
 3. **Stay suspended for at least 60 seconds after step 2.** A process judges scopes against the grant answer it last read, and reuses an answer for at most 60 seconds. That bound is aweb's `get_app_grant_max_age_seconds` (aweb `config.py`): 60 by default, and the server refuses values outside 1..60. The installation fence row holds no scopes.
    - This step does not rely on what Render does on resume.
    - `tests/test_board_move.py::test_a_rolled_back_installation_refuses_every_write_once_resumed` shows that a process reading the read-only grant refuses the write. A process that had already read the write grant kept admitting writes from it.
-4. **Compare, while still suspended:**
+4. **Compare, while still suspended.** This step runs only once aweb-adzd.8 has observed that Render runs a one-off job on a suspended service. Until then the rollback can't rely on it.
 
        python -m aweb_tasks.board_move list-live --team-id <team id>
 

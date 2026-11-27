@@ -34,6 +34,7 @@ MANIFESTS = {
     "logs-v": "naapp/logs/pyproject.toml",
     "folio-v": "naapp/folio/pyproject.toml",
     "library-v": "naapp/library/pyproject.toml",
+    "tasks-v": "naapp/tasks/pyproject.toml",
     "aweb-secrets-runner-v": "naapp/secrets/runner/pyproject.toml",
 }
 
@@ -156,6 +157,7 @@ OCI_APPS = {
     "logs-v": "logs",
     "folio-v": "folio",
     "library-v": "library",
+    "tasks-v": "tasks",
 }
 # GHCR path segments: lowercase alphanumerics joined by single separators.
 IMAGE_NAMESPACE = re.compile(r"ghcr\.io(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+")

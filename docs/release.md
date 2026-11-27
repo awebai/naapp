@@ -34,8 +34,8 @@ The Python lanes also accept strict `X.Y.ZrcN` versions, with `N >= 1`:
 the runner's lockstep values package, must equal the tag. The image lanes accept
 final versions only.
 
-RCs are optional: a final needs no prior RC. One full run of the release checks
-qualifies the exact tree that is tagged, and that tree is what publishes. Python
+RCs are optional: a final needs no prior RC. One fully green CI run qualifies
+the exact tree that is tagged, and that tree is what publishes. Python
 RCs publish to PyPI. On every image lane only a final published by its own tag
 push moves `latest`. A `workflow_dispatch` of the image workflow publishes an
 existing tag's image again as a recovery (`--recovery`): it publishes and reads
@@ -46,25 +46,27 @@ moves `latest` for a final, with no serialization against workflow runs.
 
 Tags are immutable. Run `git fetch --tags` before either entry point.
 
-## 1. Test the final candidate
+## 1. Qualify the commit and tag it
 
-Choose every artifact tag that this commit should publish, then run one command:
+Choose the commit and every artifact tag it should publish, then run one
+command (`SOURCE` defaults to `HEAD`):
 
 ```sh
-make release-candidate TAGS='secrets-v0.2.0 logs-v0.2.0'
+make release-candidate SOURCE=<sha> TAGS='secrets-v0.2.0 logs-v0.2.0'
 ```
 
-The command requires a clean commit on `origin/main` and refuses a tag that
-already exists. It runs `make release-checks`: lint and type checks, the
-repository's script tests, Library's AATK contract, the Secrets shard check,
-every package's suite and the Folio, Library and Secrets journeys, for every
-package whatever `PACKAGES` the environment names. The host needs PostgreSQL
-and Redis for the suites and Docker for the journeys, as the CI jobs have them.
-Only after all of it passes, and the checkout is still at the same commit and
-clean, does the command create the requested annotated tags locally on the
-exact tested SHA.
+The commit must be on `origin/main`, every tag must match its manifests at that
+commit, and no tag may already exist. The commit qualifies only through a CI
+run of exactly that commit (`ci.yml`), read with `gh`: a push to `main` or a
+manual run, both of which test every package, completed with every job a
+success, the `naapp CI` check among them. A skipped job is a package the run did
+not test, so it does not qualify. A push run that waited behind a newer push is
+replaced and never runs; qualify that commit with a manual run of it
+(`gh workflow run ci.yml --ref <branch at the commit>`). The command then
+creates the annotated tags locally on that SHA, each naming its run.
 
-`main` may move while the checks run. The tested SHA and its local tags do not.
+`make release-checks` runs the same checks on one host, for example to
+reproduce a CI failure.
 
 ## 2. Publish the tested tags
 
@@ -110,7 +112,10 @@ refuses a same-version byte conflict.
 ## App images
 
 An image tag publishes its app's image from `naapp/<app>/Dockerfile` and the
-repository root. It builds Linux amd64 and arm64 into one OCI archive, checked
+repository root, to `<namespace>/<app>`. The namespace is `NAAPP_IMAGE_NAMESPACE`:
+the workflow sets it to `ghcr.io/<repository owner>` (`ghcr.io/awebai`) unless the
+repository variable of that name gives another GHCR namespace, as a dry run under
+throwaway names does. A runnerless publication without it uses `ghcr.io/awebai`. It builds Linux amd64 and arm64 into one OCI archive, checked
 before the registry is touched. The exact OCI helper validates the archive and
 each platform's version/source labels. Version tags are immutable: a conflicting
 digest refuses, an identical one is adopted, and each published index is read

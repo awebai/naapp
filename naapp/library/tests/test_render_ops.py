@@ -40,7 +40,7 @@ def deployment_health_payload(*, git_sha: str = _SHA_A, **deployment_overrides: 
         "service_name": "library-origin",
         "hostname": "library-origin.example",
         "origin_url": "https://library-origin.example",
-        "repo": "awebai/aweb",
+        "repo": "awebai/naapp",
         "branch": "main",
         "commit": git_sha,
         **deployment_overrides,
@@ -137,7 +137,7 @@ def config(tmp_path: Path) -> render_ops.ProductionConfig:
                 "service_name": "library",
                 "service_slug": "library-origin",
                 "region": "virginia",
-                "repo": "https://github.com/awebai/aweb",
+                "repo": "https://github.com/awebai/naapp",
                 "root_dir": "",
                 "dockerfile_path": "./naapp/library/Dockerfile",
                 "docker_context": ".",
@@ -1696,9 +1696,20 @@ def test_production_config_rejects_build_paths_outside_the_repository(
         render_ops.ProductionConfig.load(path)
 
 
-def test_production_config_builds_library_from_the_aweb_repository_root() -> None:
+def test_library_s_package_metadata_names_the_naapp_repository() -> None:
+    import tomllib
+
+    urls = tomllib.loads((render_ops.APP_ROOT / "pyproject.toml").read_text())["project"]["urls"]
+    assert urls == {
+        "Homepage": "https://github.com/awebai/naapp/tree/main/naapp/library",
+        "Repository": "https://github.com/awebai/naapp",
+        "Issues": "https://github.com/awebai/naapp/issues",
+    }
+
+
+def test_production_config_builds_library_from_the_naapp_repository_root() -> None:
     config = render_ops.ProductionConfig.load(render_ops.APP_ROOT / "ops" / "render-production.json")
-    assert render_ops.canonical_git_repo(config.repo) == "github.com/awebai/aweb"
+    assert render_ops.canonical_git_repo(config.repo) == "github.com/awebai/naapp"
     assert config.root_dir == ""
     assert config.docker_context == "."
     assert (render_ops.REPOSITORY_ROOT / config.dockerfile_path).resolve() == render_ops.APP_ROOT / "Dockerfile"
@@ -1840,6 +1851,8 @@ def common_args(config: render_ops.ProductionConfig) -> SimpleNamespace:
         current_deploy_id="dep-candidate",
         allow_legacy_missing_build_for="",
         repo_root=".",
+        from_repository=None,
+        confirm_from_repository="",
         timeout=30,
     )
 
@@ -2759,6 +2772,7 @@ def test_public_runtime_identifier_is_the_pinned_slug_not_api_display_name() -> 
         service_name="library-02jf",
         hostname="library-02jf.onrender.com",
         origin_url=production.origin_url,
+        repo="awebai/naapp",
     )
     assert (
         render_ops.verify_public_deployment_identity(observed, production) == observed["deployment"]
@@ -2818,3 +2832,146 @@ def test_settings_patch_only_changes_reviewed_build_fields(monkeypatch) -> None:
             },
         )
     ]
+
+
+# --- The approved deploy target, on real repositories with a local bare origin ---
+
+
+def _git_in(cwd: Path, *args: str) -> str:
+    env = {key: value for key, value in os.environ.items() if key not in render_ops.GIT_REPOSITORY_ENV}
+    return subprocess.run(
+        ["git", *args], cwd=cwd, check=True, text=True, capture_output=True, env=env
+    ).stdout.strip()
+
+
+def _empty_commit(work: Path, message: str) -> str:
+    _git_in(work, "-c", "user.email=t@example.test", "-c", "user.name=t", "commit", "--allow-empty", "-qm", message)
+    return _git_in(work, "rev-parse", "HEAD")
+
+
+def _bare_with_clone(parent: Path, name: str) -> tuple[Path, Path]:
+    remote = parent / f"{name}.git"
+    _git_in(parent, "init", "-q", "--bare", "-b", "main", str(remote))
+    work = parent / name
+    _git_in(parent, "clone", "-q", str(remote), str(work))
+    return remote, work
+
+
+@pytest.fixture()
+def target_history(tmp_path: Path) -> SimpleNamespace:
+    """live <- approved <- tip on the configured remote's main."""
+    remote, work = _bare_with_clone(tmp_path, "configured")
+    live = _empty_commit(work, "live")
+    approved = _empty_commit(work, "approved")
+    tip = _empty_commit(work, "tip")
+    _git_in(work, "push", "-q", "origin", "HEAD:main")
+    return SimpleNamespace(
+        tmp=tmp_path, remote=str(remote), work=work, live=live, approved=approved, tip=tip
+    )
+
+
+def _verify(h: SimpleNamespace, commit: str, live: str, **kwargs: object) -> None:
+    render_ops.verify_git_target(
+        h.work, commit, expected_repo=h.remote, expected_branch="main", live_commit=live, **kwargs
+    )
+
+
+def test_git_target_accepts_the_tip_and_an_approved_commit_behind_it(target_history) -> None:
+    _verify(target_history, target_history.tip, target_history.live)
+    _verify(target_history, target_history.approved, target_history.live)
+
+
+def test_git_target_reads_the_branch_from_the_remote_not_the_local_tracking_ref(
+    target_history,
+) -> None:
+    h = target_history
+    other = h.tmp / "other"
+    _git_in(h.tmp, "clone", "-q", h.remote, str(other))
+    newer = _empty_commit(other, "newer")
+    _git_in(other, "push", "-q", "origin", "HEAD:main")
+    _verify(h, newer, h.live)
+
+    unpushed = _empty_commit(h.work, "never pushed")
+    _git_in(h.work, "update-ref", "refs/remotes/origin/main", unpushed)
+    with pytest.raises(render_ops.OpsError, match="not on main"):
+        _verify(h, unpushed, h.live)
+
+
+def test_git_target_refuses_a_commit_that_is_not_on_the_configured_branch(target_history) -> None:
+    h = target_history
+    _git_in(h.work, "checkout", "-q", "-b", "side", h.approved)
+    side = _empty_commit(h.work, "side")
+    _git_in(h.work, "push", "-q", "origin", "HEAD:side")
+    with pytest.raises(render_ops.OpsError, match="not on main"):
+        _verify(h, side, h.live)
+
+
+def test_git_target_never_moves_production_backwards(target_history) -> None:
+    h = target_history
+    with pytest.raises(render_ops.OpsError, match="not ahead of the live commit"):
+        _verify(h, h.live, h.live)
+    with pytest.raises(render_ops.OpsError, match="not ahead of the live commit"):
+        _verify(h, h.live, h.approved)
+
+
+def test_git_target_refuses_an_origin_that_is_not_the_configured_repository(target_history) -> None:
+    h = target_history
+    copy = h.tmp / "copy.git"
+    _git_in(h.tmp, "clone", "-q", "--bare", h.remote, str(copy))
+    with pytest.raises(render_ops.OpsError, match="not the configured production repository"):
+        render_ops.verify_git_target(
+            h.work, h.tip, expected_repo=str(copy), expected_branch="main", live_commit=h.live
+        )
+
+
+@pytest.fixture()
+def previous_repository(target_history) -> tuple[str, str]:
+    remote, work = _bare_with_clone(target_history.tmp, "previous")
+    live = _empty_commit(work, "deployed from the previous repository")
+    _git_in(work, "push", "-q", "origin", "HEAD:main")
+    return str(remote), live
+
+
+def test_git_target_after_a_repository_move_names_the_previous_repository(
+    target_history, previous_repository
+) -> None:
+    h = target_history
+    previous, previous_live = previous_repository
+    _verify(h, h.tip, previous_live, from_repository=previous)
+    with pytest.raises(render_ops.OpsError, match="--from-repository"):
+        _verify(h, h.tip, previous_live)
+
+
+def test_git_target_names_a_previous_repository_only_when_something_moved(
+    target_history, previous_repository
+) -> None:
+    h = target_history
+    previous, _previous_live = previous_repository
+    with pytest.raises(render_ops.OpsError, match="is in the configured repository"):
+        _verify(h, h.live, h.live, from_repository=previous)
+    with pytest.raises(render_ops.OpsError, match="not on main of the previous repository"):
+        _verify(h, h.tip, "e" * 40, from_repository=previous)
+
+
+def test_a_repository_move_needs_its_own_confirmation() -> None:
+    render_ops.confirm_repository_change(None, "")
+    render_ops.confirm_repository_change(
+        "https://github.com/awebai/aweb", "git@github.com:awebai/aweb.git"
+    )
+    with pytest.raises(render_ops.OpsError, match="confirmation"):
+        render_ops.confirm_repository_change("https://github.com/awebai/aweb", "")
+    with pytest.raises(render_ops.OpsError, match="confirmation"):
+        render_ops.confirm_repository_change(None, "https://github.com/awebai/aweb")
+
+
+@pytest.mark.parametrize("command", [render_ops.command_deploy, render_ops.command_move_build])
+def test_a_repository_move_without_its_confirmation_changes_nothing(
+    monkeypatch: pytest.MonkeyPatch, config: render_ops.ProductionConfig, command
+) -> None:
+    client = FakeClient(config, deploy("dep-rollback", "a" * 40))
+    monkeypatch.setattr(render_ops, "_client", lambda args: (client, config))
+    args = common_args(config)
+    args.from_repository = "https://github.com/awebai/aweb"
+    with pytest.raises(render_ops.OpsError, match="repository move refused"):
+        command(args)
+    assert client.posts == []

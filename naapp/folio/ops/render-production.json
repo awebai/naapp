@@ -2,7 +2,7 @@
   "service_id": "srv-d8o229r7uimc73a8vsr0",
   "service_name": "folio",
   "region": "virginia",
-  "repo": "https://github.com/awebai/aweb",
+  "repo": "https://github.com/awebai/naapp",
   "branch": "main",
   "root_dir": "",
   "dockerfile_path": "./naapp/folio/Dockerfile",

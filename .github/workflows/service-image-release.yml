@@ -47,6 +47,8 @@ jobs:
         env:
           GHCR_USERNAME: ${{ github.actor }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # The repository variable names another namespace, e.g. for a dry run.
+          NAAPP_IMAGE_NAMESPACE: ${{ vars.NAAPP_IMAGE_NAMESPACE || format('ghcr.io/{0}', github.repository_owner) }}
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
           FIRST_PUBLICATION: ${{ github.event_name == 'workflow_dispatch' && inputs.first_publication || '' }}
         run: |

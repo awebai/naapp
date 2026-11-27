@@ -28,14 +28,21 @@ class FakeRender:
     service: dict[str, Any]
     deploys: list[dict[str, Any]]
     health_status: int = 200
+    # Cloudflare on the public zone answers its browser-signature 403 (error 1010)
+    # to Python's default User-Agent (naapp/library/docs/production-operations.md).
+    edge_refuses_default_python_agent: bool = False
+    health_agents: list[str] = field(default_factory=list)
     requests: list[tuple[str, str, Any]] = field(default_factory=list)
     polls_until_live: int = 1
     _counter: int = 0
 
-    def handle(self, method: str, path: str, body: Any) -> tuple[int, Any]:
+    def handle(self, method: str, path: str, body: Any, user_agent: str = "") -> tuple[int, Any]:
         self.requests.append((method, path, body))
         base = f"/v1/services/{SERVICE_ID}"
         if method == "GET" and path == "/health":
+            self.health_agents.append(user_agent)
+            if self.edge_refuses_default_python_agent and user_agent.startswith("Python-urllib/"):
+                return 403, {"error": 1010}
             return self.health_status, {"status": "ok"}
         if method == "GET" and path == base:
             return 200, self.service
@@ -83,7 +90,9 @@ def fake() -> Iterator[tuple[FakeRender, str]]:
         def _respond(self) -> None:
             length = int(self.headers.get("Content-Length") or 0)
             body = json.loads(self.rfile.read(length)) if length else None
-            status, payload = state.handle(self.command, self.path, body)
+            status, payload = state.handle(
+                self.command, self.path, body, self.headers.get("User-Agent", "")
+            )
             data = json.dumps(payload).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -273,54 +282,163 @@ def checkout(tmp_path: Path) -> tuple[Path, str]:
     return work, _git(work, "rev-parse", "HEAD")
 
 
-def test_deploy_ships_the_exact_reviewed_commit_and_waits_for_it_live(fake, checkout) -> None:
-    state, config, client = _ready(fake)
-    work, commit = checkout
-    config = replace(config, repo=str(work.parent / "aweb.git"))
-    state.service["repo"] = config.repo
+def _commit(work: Path, message: str) -> str:
+    _git(work, "-c", "user.email=t@example.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", message)
+    return _git(work, "rev-parse", "HEAD")
 
-    result = render.deploy(
-        client, config, commit=commit, rollback_deploy_id=LIVE_DEPLOY, rollback_commit=LIVE_COMMIT,
-        repo_root=work, timeout_seconds=10, interval_seconds=0,
+
+def _push(work: Path, ref: str = "main") -> None:
+    _git(work, "push", "origin", f"HEAD:{ref}")
+
+
+def _live(state: FakeRender, commit: str) -> None:
+    """The service's live deploy is ``commit``, as LIVE_DEPLOY."""
+    state.deploys[0]["commit"] = {"id": commit}
+
+
+def _deploy(client, config, work, commit, live, **kwargs):
+    return render.deploy(
+        client, config, commit=commit, rollback_deploy_id=LIVE_DEPLOY, rollback_commit=live,
+        repo_root=work, timeout_seconds=10, interval_seconds=0, **kwargs,
     )
 
-    assert state.posts() == [(f"/v1/services/{SERVICE_ID}/deploys", {"clearCache": "clear", "commitId": commit})]
-    assert result["deploy"]["commit"] == commit
+
+@pytest.fixture()
+def history(fake, checkout):
+    """live <- approved <- tip on the configured remote's main, with ``live`` live."""
+    state, config, client = _ready(fake)
+    work, live = checkout
+    config = replace(config, repo=str(work.parent / "aweb.git"))
+    state.service["repo"] = config.repo
+    approved = _commit(work, "approved")
+    tip = _commit(work, "tip")
+    _push(work)
+    _live(state, live)
+    return state, config, client, work, live, approved, tip
+
+
+def test_deploy_ships_the_branch_tip_and_waits_for_it_live(history) -> None:
+    state, config, client, work, live, _approved, tip = history
+
+    result = _deploy(client, config, work, tip, live)
+
+    assert state.posts() == [(f"/v1/services/{SERVICE_ID}/deploys", {"clearCache": "clear", "commitId": tip})]
+    assert result["deploy"]["commit"] == tip
     assert result["deploy"]["status"] == "live"
     assert result["rollback"]["id"] == LIVE_DEPLOY
 
 
-def test_deploy_refuses_a_commit_that_is_not_the_remote_branch_tip(fake, checkout) -> None:
-    state, config, client = _ready(fake)
-    work, _commit = checkout
-    config = replace(config, repo=str(work.parent / "aweb.git"))
-    state.service["repo"] = config.repo
-    with pytest.raises(OpsError, match="not the approved target"):
-        render.deploy(
-            client, config, commit="d" * 40, rollback_deploy_id=LIVE_DEPLOY, rollback_commit=LIVE_COMMIT,
-            repo_root=work, timeout_seconds=10, interval_seconds=0,
-        )
-    assert state.posts() == []
+def test_deploy_ships_an_approved_commit_the_branch_has_moved_past(history) -> None:
+    state, config, client, work, live, approved, _tip = history
+
+    result = _deploy(client, config, work, approved, live)
+
+    assert state.posts() == [(f"/v1/services/{SERVICE_ID}/deploys", {"clearCache": "clear", "commitId": approved})]
+    assert result["deploy"]["commit"] == approved
 
 
-def test_deploy_refuses_a_commit_the_remote_has_moved_past_without_a_local_fetch(fake, checkout, tmp_path) -> None:
-    state, config, client = _ready(fake)
-    work, stale = checkout
-    remote = work.parent / "aweb.git"
-    config = replace(config, repo=str(remote))
-    state.service["repo"] = config.repo
+def test_deploy_reads_the_branch_from_the_remote_not_a_stale_local_fetch(history, tmp_path) -> None:
+    state, config, client, work, live, _approved, _tip = history
     other = tmp_path / "other"
-    _git(tmp_path, "clone", str(remote), str(other))
-    _git(other, "-c", "user.email=t@example.test", "-c", "user.name=t", "commit", "--allow-empty", "-m", "newer")
-    _git(other, "push", "origin", "HEAD:main")
-    # work has not fetched, so its origin/main still names the stale commit.
-    assert _git(work, "rev-parse", "origin/main") == stale
-    with pytest.raises(OpsError, match="not the approved target"):
-        render.deploy(
-            client, config, commit=stale, rollback_deploy_id=LIVE_DEPLOY, rollback_commit=LIVE_COMMIT,
-            repo_root=work, timeout_seconds=10, interval_seconds=0,
-        )
+    _git(tmp_path, "clone", str(work.parent / "aweb.git"), str(other))
+    newer = _commit(other, "newer")
+    _push(other)
+    # work has not fetched: its origin/main does not know newer, the remote does.
+    assert _git(work, "rev-parse", "origin/main") != newer
+
+    result = _deploy(client, config, work, newer, live)
+
+    assert result["deploy"]["commit"] == newer
+
+
+def test_deploy_refuses_a_commit_only_a_stale_local_ref_names(history) -> None:
+    state, config, client, work, live, _approved, _tip = history
+    unpushed = _commit(work, "never pushed")
+    _git(work, "update-ref", "refs/remotes/origin/main", unpushed)
+    with pytest.raises(OpsError, match="not on main"):
+        _deploy(client, config, work, unpushed, live)
     assert state.posts() == []
+
+
+def test_deploy_refuses_a_commit_that_is_not_on_the_configured_branch(history) -> None:
+    state, config, client, work, live, approved, _tip = history
+    _git(work, "checkout", "-q", "-b", "side", approved)
+    side = _commit(work, "side")
+    _push(work, "side")
+    with pytest.raises(OpsError, match="not on main"):
+        _deploy(client, config, work, side, live)
+    assert state.posts() == []
+
+
+@pytest.mark.parametrize("which", ["live", "behind"])
+def test_deploy_never_moves_production_backwards(history, which) -> None:
+    state, config, client, work, live, approved, _tip = history
+    # behind: approved is live, and the deploy would go back to its parent.
+    commit, live_now = (live, live) if which == "live" else (live, approved)
+    _live(state, live_now)
+    with pytest.raises(OpsError, match="not ahead of the live commit"):
+        _deploy(client, config, work, commit, live_now)
+    assert state.posts() == []
+
+
+@pytest.fixture()
+def previous(history, tmp_path):
+    """The repository the service deployed from before it moved, holding the live commit."""
+    remote = tmp_path / "previous.git"
+    _git(tmp_path, "init", "--bare", "-b", "main", str(remote))
+    work = tmp_path / "previous"
+    _git(tmp_path, "clone", str(remote), str(work))
+    live = _commit(work, "deployed from the previous repository")
+    _push(work)
+    return str(remote), live
+
+
+def test_a_first_deploy_after_a_repository_move_names_the_previous_repository(history, previous) -> None:
+    state, config, client, work, _live_here, _approved, tip = history
+    previous_repo, previous_live = previous
+    _live(state, previous_live)
+
+    result = _deploy(client, config, work, tip, previous_live, from_repository=previous_repo)
+
+    assert result["deploy"]["commit"] == tip
+
+
+def test_without_the_previous_repository_a_live_commit_from_elsewhere_refuses(history, previous) -> None:
+    state, config, client, work, _live_here, _approved, tip = history
+    _previous_repo, previous_live = previous
+    _live(state, previous_live)
+    with pytest.raises(OpsError, match="--from-repository"):
+        _deploy(client, config, work, tip, previous_live)
+    assert state.posts() == []
+
+
+def test_naming_a_previous_repository_does_not_skip_the_forward_check_within_one(history, previous) -> None:
+    state, config, client, work, live, _approved, _tip = history
+    previous_repo, _previous_live = previous
+    # The live commit is in the configured repository, so nothing moved.
+    with pytest.raises(OpsError, match="is in the configured repository"):
+        _deploy(client, config, work, live, live, from_repository=previous_repo)
+    assert state.posts() == []
+
+
+def test_a_live_commit_in_neither_repository_refuses(history, previous) -> None:
+    state, config, client, work, _live_here, _approved, tip = history
+    previous_repo, _previous_live = previous
+    _live(state, "e" * 40)
+    with pytest.raises(OpsError, match="not on main of the previous repository"):
+        _deploy(client, config, work, tip, "e" * 40, from_repository=previous_repo)
+    assert state.posts() == []
+
+
+def test_a_repository_move_needs_its_own_confirmation() -> None:
+    render.confirm_repository_change(None, "")
+    render.confirm_repository_change(
+        "https://github.com/awebai/aweb", "git@github.com:awebai/aweb.git"
+    )
+    with pytest.raises(OpsError, match="confirmation"):
+        render.confirm_repository_change("https://github.com/awebai/aweb", "")
+    with pytest.raises(OpsError, match="confirmation"):
+        render.confirm_repository_change(None, "https://github.com/awebai/aweb")
 
 
 def test_deploy_refuses_a_checkout_whose_origin_is_another_repository(fake, checkout, tmp_path) -> None:
@@ -427,6 +545,23 @@ def test_verify_fails_when_health_is_not_ok(fake) -> None:
         render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT)
 
 
+def test_verify_reaches_health_through_an_edge_that_refuses_python_s_default_agent(fake) -> None:
+    state, config, client = _ready(fake)
+    state.edge_refuses_default_python_agent = True
+
+    result = render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT)
+
+    assert result["health"] == {config.origin_url + "/health": 200}
+    assert state.health_agents == [render.HEALTH_USER_AGENT]
+
+
+def test_a_403_from_health_is_a_failure(fake) -> None:
+    state, config, client = _ready(fake)
+    state.health_status = 403
+    with pytest.raises(OpsError, match="HTTP 403"):
+        render.verify(client, config, deploy_id=LIVE_DEPLOY, commit=LIVE_COMMIT)
+
+
 def test_wait_stops_on_a_failed_build(fake) -> None:
     state, config, client = _ready(fake)
     state.deploys.insert(0, {"id": "dep-failed01", "status": "build_failed", "commit": {"id": "c" * 40}})
@@ -457,7 +592,11 @@ def _cli(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedP
     import os
     import sys
 
-    clean = {key: value for key, value in os.environ.items() if key not in {"APPLY", "CONFIRM_SERVICE_ID"}}
+    clean = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in {"APPLY", "CONFIRM_SERVICE_ID", "FROM_REPOSITORY", "CONFIRM_FROM_REPOSITORY"}
+    }
     clean.update(env or {})
     return subprocess.run(
         [sys.executable, "-m", "aweb_naapp.ops", *args], text=True, capture_output=True, env=clean
@@ -469,6 +608,16 @@ def test_cli_refuses_a_mutation_without_apply_before_reading_any_key(tmp_path: P
     result = _cli("--config", str(_write_config(tmp_path)), "--env-file", str(tmp_path / "absent"), command)
     assert result.returncode == 2
     assert "--apply" in result.stderr
+    assert result.stdout == ""
+
+
+def test_cli_refuses_an_unconfirmed_repository_move_before_reading_any_key(tmp_path: Path) -> None:
+    result = _cli(
+        "--config", str(_write_config(tmp_path)), "--env-file", str(tmp_path / "absent"), "deploy",
+        env={"APPLY": "1", "CONFIRM_SERVICE_ID": SERVICE_ID, "FROM_REPOSITORY": "https://github.com/awebai/aweb"},
+    )
+    assert result.returncode == 2
+    assert "repository move refused" in result.stderr
     assert result.stdout == ""
 
 

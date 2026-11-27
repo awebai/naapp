@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 import pytest
-from aweb_naapp.ops.render import ProductionConfig
+from aweb_naapp.ops.render import ProductionConfig, canonical_git_repo
 
 _FOLIO_ROOT = Path(__file__).resolve().parents[1]
 _REPO_ROOT = _FOLIO_ROOT.parents[1]
@@ -18,6 +18,7 @@ def _config() -> ProductionConfig:
 def test_the_production_manifest_is_valid_and_builds_folio_from_the_repository_root() -> None:
     config = _config()
 
+    assert canonical_git_repo(config.repo) == "github.com/awebai/naapp"
     assert config.root_dir == ""
     assert config.docker_context == "."
     assert (_REPO_ROOT / config.dockerfile_path).resolve() == _FOLIO_ROOT / "Dockerfile"

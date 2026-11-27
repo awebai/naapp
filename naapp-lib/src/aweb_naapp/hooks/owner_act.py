@@ -1,7 +1,7 @@
 """The ``aweb.owner-act/1`` verifier: the team owner's signed governance act.
 
-This is the Python reading of ``docs/owner-act.md``; the Go authority in
-``cli/go/awid/owneract.go`` pins the bytes, and both pass the same public
+This is the Python reading of aweb's ``docs/owner-act.md``; the Go authority in
+aweb's ``cli/go/awid/owneract.go`` pins the bytes, and both pass the same public
 vector with the same refusal codes and order. A verifier proves that the act
 was signed by the team's current controller key, for this verifier, within its
 lifetime, naming the expected subject. It cannot tell who held the key: that

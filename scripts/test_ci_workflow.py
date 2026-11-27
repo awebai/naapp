@@ -57,6 +57,13 @@ class Workflow(unittest.TestCase):
                 self.assertEqual(uploads[0]['if'], 'always()')
                 self.assertEqual(uploads[0]['with']['path'], 'junit/')
 
+    def test_the_scripts_job_lints_the_scripts(self):
+        steps = [step.get('run', '') for step in workflow()['jobs']['scripts']['steps']]
+        self.assertIn('make lint-scripts', steps)
+        makefile = (WORKFLOWS.parents[1] / 'Makefile').read_text()
+        recipe = makefile.split('\nlint-scripts:', 1)[1].split('\n\n', 1)[0]
+        self.assertIn('ruff check --select F,E9 scripts', recipe)
+
     def test_no_trigger_filters_by_path(self):
         for path in sorted(WORKFLOWS.glob('*.yml')):
             triggers = yaml.load(path.read_text(), Loader=yaml.BaseLoader)['on']

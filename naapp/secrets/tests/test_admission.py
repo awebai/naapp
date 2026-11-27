@@ -198,6 +198,7 @@ async def _admit(
     now: datetime = NOW,
     clock=None,
     derived_max_ttl_s: int = 3600,
+    integrity_key=None,
 ):
     async with db.transaction() as tx:
         return await admit_use(
@@ -209,6 +210,7 @@ async def _admit(
             attestation=attestation,
             now=now,
             derived_max_ttl_s=derived_max_ttl_s,
+            integrity_key=integrity_key,
             **({} if clock is None else {"clock": clock}),
         )
 

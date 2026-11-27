@@ -46,6 +46,10 @@ class EgressNotSent(Exception):
     """The request failed before any byte of it was written."""
 
 
+class EgressUnresolved(EgressNotSent):
+    """The destination's name resolved to no address, so nothing was sent."""
+
+
 class EgressOutcomeUnknown(Exception):
     """The request failed after bytes of it were written; it may have taken effect."""
 
@@ -91,21 +95,28 @@ class Response:
 
 class Resolver(Protocol):
     async def resolve(self, host: str) -> list[IPAddress]:
-        """Every A and AAAA address of ``host``; raises EgressNotSent if none."""
+        """Every A and AAAA address of ``host``; raises EgressUnresolved if none."""
         ...
 
 
 class DnsResolver:
-    """The guard's own resolver: A and AAAA queries, no search domains.
+    """The guard's resolver: A and AAAA queries, no search domains.
 
-    Without ``nameservers`` it uses the system's resolver configuration.
+    Without ``nameservers`` it asks dnspython's process default resolver at each
+    query, which is built from the system's resolver configuration: the app's
+    one DNS boundary, shared with its AWID lookups. ``port`` belongs to the
+    explicit ``nameservers`` and never changes the shared resolver.
     """
 
     def __init__(self, nameservers: Sequence[str] | None = None, port: int = 53) -> None:
-        self._resolver = dns.asyncresolver.Resolver(configure=nameservers is None)
-        if nameservers is not None:
-            self._resolver.nameservers = list(nameservers)
-        self._resolver.port = port
+        self._own: dns.asyncresolver.Resolver | None = None
+        if nameservers is None:
+            if port != 53:
+                raise ValueError("a DNS port needs explicit nameservers")
+            return
+        self._own = dns.asyncresolver.Resolver(configure=False)
+        self._own.nameservers = list(nameservers)
+        self._own.port = port
 
     async def resolve(self, host: str) -> list[IPAddress]:
         name = dns.name.from_text(host)
@@ -115,17 +126,18 @@ class DnsResolver:
         addresses: list[IPAddress] = []
         for answer in answers:
             if isinstance(answer, dns.resolver.NXDOMAIN):
-                raise EgressNotSent(f"{host} does not exist") from answer
+                raise EgressUnresolved(f"{host} does not exist") from answer
             if isinstance(answer, BaseException):
-                raise EgressNotSent(f"{host} could not be resolved") from answer
+                raise EgressUnresolved(f"{host} could not be resolved") from answer
             addresses += answer
         if not addresses:
-            raise EgressNotSent(f"{host} has no address")
+            raise EgressUnresolved(f"{host} has no address")
         return addresses
 
     async def _query(self, name: dns.name.Name, kind: str) -> list[IPAddress]:
         try:
-            answer = await self._resolver.resolve(name, kind, search=False)
+            resolver = self._own or dns.asyncresolver.get_default_resolver()
+            answer = await resolver.resolve(name, kind, search=False)
         except dns.resolver.NoAnswer:
             return []
         return [ip_address(record.address) for record in answer]
@@ -208,7 +220,7 @@ class Egress:
             async with asyncio.timeout_at(resolve_by):
                 return await self.resolver.resolve(host)
         except TimeoutError as error:
-            raise EgressNotSent(f"resolving {host} timed out") from error
+            raise EgressUnresolved(f"resolving {host} timed out") from error
 
     def _ssl_context(self) -> ssl.SSLContext:
         context = ssl.create_default_context()

@@ -13,6 +13,8 @@ from aweb_naapp_testing.smtp import SmtpServer
 from aweb_secrets.composition import create_service
 from aweb_secrets.config import ServiceSettings
 from aweb_secrets.custody import Custody, LocalKeyFileProvider, encode_value
+from aweb_secrets.deployment import DeploymentSettings, create_deployment
+from tests.custody.test_key_file import key_init
 from tests.test_app import API, CONSOLE, _settings
 
 
@@ -156,15 +158,28 @@ async def test_production_startup_prepares_every_store_before_serving_and_cleans
                 assert (await client.get(CONSOLE + "/enrolment")).status_code == 404
 
 
-async def test_missing_required_custody_key_refuses_the_production_constructor(
-    test_db_factory, registry, tmp_path
+async def test_production_startup_requires_the_explicit_custody_key(
+    test_db_factory, registry, tmp_path, monkeypatch
 ):
+    monkeypatch.setenv("APP_ENV", "production")
     database = await test_db_factory.create_db(suffix="secrets_production_missing_key")
     with SmtpServer(tmp_path / "smtp", password=secrets.token_urlsafe(32)) as smtp:
-        configured = settings(database, tmp_path, smtp)
-        configured.custody_key_file.unlink()
+        configured = DeploymentSettings.model_validate(settings(database, tmp_path, smtp).model_dump())
+        key_file = configured.custody_key_file
+        assert key_file is not None
+        key_file.unlink()
         with pytest.raises(KeyFileError):
-            create_service(configured, awid_transport=registry.transport)
+            create_deployment(configured, awid_transport=registry.transport)
+        assert not key_file.exists()
+
+        result = key_init(key_file)
+        assert result.returncode == 0
+        service = create_deployment(configured, awid_transport=registry.transport)
+        async with service.api_app.router.lifespan_context(service.api_app):
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(service)) as client:
+                response = await client.get(API + "/ready")
+                assert response.status_code == 200
+                assert response.json()["labels"]["custody_mode"] == "local_key_file"
 
 
 async def test_restarted_service_requires_the_key_for_its_retained_ciphertext(

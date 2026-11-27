@@ -110,13 +110,7 @@ async def revoke_grant_tree(
     )
     await records.revoke_grant(tx, installation_id, grant_id)
     for secret_id in ids:
-        await tx.execute(
-            "UPDATE {{tables.secrets}} SET state='disabled'"
-            " WHERE installation_id=$1 AND team_id=$2 AND secret_id=$3",
-            installation_id,
-            team_id,
-            secret_id,
-        )
+        await records.disable_secret(tx, installation_id, team_id, secret_id)
         await custody.disable(
             tx,
             installation_id=installation_id,

@@ -286,6 +286,27 @@ def test_rendered_pages_use_monochrome_wordmark_and_incoming_symbol() -> None:
     assert '<a href="https://awid.ai" class="brand-word">awid</a> identity' in landing
 
 
+def _source_url() -> str:
+    """Where the installed package says its source lives (pyproject's Homepage)."""
+    from importlib.metadata import metadata
+
+    urls = dict(entry.split(", ", 1) for entry in metadata("library").get_all("Project-URL") or ())
+    return urls["Homepage"]
+
+
+def test_every_page_links_the_source_its_package_names() -> None:
+    from library.surfaces import render_landing_page, render_reference_page
+
+    landing = render_landing_page(public_origin="https://library.aweb.ai", blueprints=[])
+    reference = render_reference_page(public_origin="https://library.aweb.ai")
+    source = _source_url()
+    # The header's GitHub link on both pages, and the hero's open-source line.
+    assert f'class="gh-link" href="{source}"' in landing
+    assert f'class="gh-link" href="{source}"' in reference
+    assert f'Open source, MIT-licensed — <a href="{source}"' in landing
+    assert "github.com/awebai/aweb/tree/" not in landing + reference
+
+
 def test_reference_page_documents_every_operation_dual() -> None:
     """The reference page documents every manifest operation in parallel: the aw
     library verb and the raw HTTP wire form, styled with aweb.css."""

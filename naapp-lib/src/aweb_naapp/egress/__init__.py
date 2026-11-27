@@ -17,6 +17,7 @@ from .send import (
     Egress,
     EgressNotSent,
     EgressOutcomeUnknown,
+    EgressUnresolved,
     Resolver,
     Response,
 )
@@ -45,6 +46,7 @@ __all__ = [
     "EgressNotSent",
     "EgressOutcomeUnknown",
     "EgressRefused",
+    "EgressUnresolved",
     "HeaderRules",
     "InternalDestinations",
     "Network",

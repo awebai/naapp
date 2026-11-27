@@ -2,7 +2,7 @@
 # calls only these targets. PACKAGES narrows a run to the packages a change
 # affects (scripts/affected_packages.py); by default it is every package.
 
-ALL_PACKAGES := naapp-lib naapp/folio naapp/library naapp/logs naapp/secrets naapp/secrets/runner naapp/secrets/values
+ALL_PACKAGES := naapp-lib naapp/folio naapp/library naapp/logs naapp/secrets naapp/secrets/runner naapp/secrets/values naapp/tasks
 PACKAGES ?= $(ALL_PACKAGES)
 
 # The suites run behind the egress guard, which refuses network access beyond

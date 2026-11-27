@@ -830,6 +830,43 @@ jobs:
           path: junit/
           if-no-files-found: warn
 
+  tasks:
+    name: Tasks lint and tests
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.packages), 'naapp/tasks')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
+      PACKAGES: naapp/tasks
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: naapp/tasks/uv.lock
+
+      - name: Install locked dependencies
+        run: make sync
+
+      - name: Lint and type-check
+        run: make lint
+
+      - name: Run unit tests
+        run: make test
+
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
   result:
     name: naapp CI
     if: always()
@@ -849,6 +886,7 @@ jobs:
       - secrets-e2e
       - secrets-runner
       - secrets-values
+      - tasks
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

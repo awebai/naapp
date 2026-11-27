@@ -30,6 +30,7 @@ JOBS = {
     'secrets-e2e': 'naapp/secrets',
     'secrets-runner': 'naapp/secrets/runner',
     'secrets-values': 'naapp/secrets/values',
+    'tasks': 'naapp/tasks',
 }
 
 

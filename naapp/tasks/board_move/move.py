@@ -19,6 +19,7 @@ from typing import Any
 
 from awid.team_ids import team_slug
 from pgdbm import AsyncDatabaseManager, AsyncMigrationManager, DatabaseConfig
+from pgdbm.core import TransactionManager
 
 from aweb_tasks.app import MIGRATIONS_PATH
 
@@ -358,7 +359,7 @@ async def _connected(dsn: str, schema: str) -> AsyncIterator[AsyncDatabaseManage
         await db.disconnect()
 
 
-async def _schema_exists(db: AsyncDatabaseManager, schema: str) -> bool:
+async def _schema_exists(db: AsyncDatabaseManager | TransactionManager, schema: str) -> bool:
     return bool(await db.fetch_value("SELECT 1 FROM pg_namespace WHERE nspname = $1", schema))
 
 

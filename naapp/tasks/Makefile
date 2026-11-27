@@ -8,4 +8,4 @@ e2e:
 
 lint:
 	uv run ruff check .
-	uv run mypy src
+	uv run mypy src board_move

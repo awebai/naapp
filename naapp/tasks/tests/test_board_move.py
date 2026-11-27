@@ -7,7 +7,11 @@ against that server's database; the target is a real Tasks database.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -468,3 +472,56 @@ async def test_open_refuses_another_installation(board: OldBoard, live: Any, tmp
         await move.open_staged(target(live), "inst-other")
 
     assert await move.live_listing(target(live), "inst-other") == b""
+
+
+def run(live: Any, *args: str) -> subprocess.CompletedProcess[bytes]:
+    """The operator's command, as the README gives it, with the deployment's database settings."""
+    env = {**os.environ, "TASKS_DATABASE_URL": live.config.get_dsn(), "TASKS_DB_SCHEMA": live.schema}
+    return subprocess.run(
+        [sys.executable, "-m", "board_move", *args],
+        cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, check=False,
+    )
+
+
+async def test_the_operator_moves_the_board_with_the_commands(
+    board: OldBoard, live: Any, tmp_path: Path
+) -> None:
+    await full_board(board)
+    path = tmp_path / "export.json"
+    assert (await board.export(path)).returncode == 0
+    ids = ["--installation-id", INSTALLATION, "--app-id", APP_ID]
+
+    checked = await asyncio.to_thread(run, live, "check", str(path))
+    assert (checked.returncode, checked.stdout, checked.stderr) == (0, b"no stops\n", b"")
+    from_export = await asyncio.to_thread(run, live, "list-export", str(path), *ids)
+    assert from_export.returncode == 0, from_export.stderr
+    staged = await asyncio.to_thread(run, live, "stage", str(path), *ids)
+    assert staged.returncode == 0, staged.stderr
+    from_staging = await asyncio.to_thread(run, live, "list-staged", "--installation-id", INSTALLATION)
+    assert (from_staging.returncode, from_staging.stdout) == (0, from_export.stdout)
+    opened = await asyncio.to_thread(run, live, "open", "--installation-id", INSTALLATION)
+    assert opened.returncode == 0, opened.stderr
+    dataset_only = await asyncio.to_thread(run, live, "list-export", str(path), *ids, "--dataset-only")
+    from_live = await asyncio.to_thread(run, live, "list-live", "--installation-id", INSTALLATION)
+    assert (from_live.returncode, from_live.stdout) == (0, dataset_only.stdout)
+    assert from_live.stdout and len(from_live.stdout) < len(from_export.stdout)
+
+
+async def test_the_commands_refuse_with_the_stop_or_the_reason(
+    board: OldBoard, live: Any, tmp_path: Path
+) -> None:
+    task = await board.create("alice", title=" ")
+    path = tmp_path / "export.json"
+    assert (await board.export(path)).returncode == 0
+    ids = ["--installation-id", INSTALLATION, "--app-id", APP_ID]
+
+    checked = await asyncio.to_thread(run, live, "check", str(path))
+    assert checked.returncode == 2
+    assert json.loads(checked.stdout) == {
+        "code": "blank_title", "reason": "a task's title is blank, which the app refuses",
+        "subjects": [task["task_ref"]],
+    }
+    staged = await asyncio.to_thread(run, live, "stage", str(path), *ids)
+    assert (staged.returncode, staged.stderr) == (3, b"refused: the export has stops: blank_title\n")
+    opened = await asyncio.to_thread(run, live, "open", "--installation-id", INSTALLATION)
+    assert (opened.returncode, opened.stderr) == (3, f"refused: {target(live).staging_schema} does not exist\n".encode())

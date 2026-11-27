@@ -1,7 +1,7 @@
 -- One listing a board move job stored in the staging schema, as base64 of its
 -- exact bytes, for the operator to hand to the verifier:
 --
---   psql "<Tasks database owner URL>" -X -q -At -v ON_ERROR_STOP=1 \
+--   psql "service=tasks" -X -q -At -v ON_ERROR_STOP=1 \
 --     -v schema=<TASKS_DB_SCHEMA>_board_move -v name=staged -f fetch_listing.sql \
 --     | base64 --decode > staged.jsonl
 --

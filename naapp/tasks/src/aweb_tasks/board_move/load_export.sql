@@ -2,7 +2,7 @@
 -- the Tasks database (spec section 8, step 3), so that the move's jobs read it
 -- without the aweb server's database:
 --
---   psql "<Tasks database owner URL>" -X -q -At -v ON_ERROR_STOP=1 \
+--   psql "service=tasks" -X -q -At -v ON_ERROR_STOP=1 \
 --     -v schema=<TASKS_DB_SCHEMA>_board_move -v file=export.json -f load_export.sql
 --
 -- psql reads the file itself, so the board never passes through a command

@@ -771,13 +771,13 @@ class ChangeSets:
                         "job credential source unavailable", code="job_source_unknown"
                     )
                 record = stored.record
-            required, optional = CAPTURE_FIELDS[record.kind]
+            fields = CAPTURE_FIELDS.get(record.kind)
             selected = {
                 entry["field"]
                 for entry in item["after"]["env"].values()
                 if isinstance(entry, dict) and entry.get("$credential") == ref
             }
-            if not selected <= required | optional:
+            if fields is None or not selected <= fields[0] | fields[1]:
                 raise ChangeRefused(
                     "job credential fields differ from source kind", code="job_source_invalid"
                 )

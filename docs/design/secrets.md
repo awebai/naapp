@@ -872,11 +872,29 @@ The scheme is executed server-side, so the raw value never leaves secrets
 | `header` | `<owner-set name>: <owner-set prefix><v>` | The name is fixed in secret metadata, never chosen by the agent. |
 | `query` | `<owner-set param>=<v>` | Recorded URLs replace the value with `[REDACTED]`. Upstream logs will hold it. **Open (aweb-acgh.18.11):** the console warns. |
 | `oauth2-client-credentials` | The broker exchanges client credentials at the owner-set token endpoint, then injects `Bearer <access_token>`. | The token endpoint passes the same egress guard and is an internal step of the dispatch. The access token is cached in process memory with its TTL minus 60 s, never returned, and added to the redaction set. The scope string is owner-set. |
+| `oauth2-certificate-credentials` | On a token cache miss, the broker signs a short-lived `private_key_jwt` client assertion and sends it only to the configured token endpoint. The resource request uses the access token as a bearer. | Uses the same endpoint guard and version-bound cache as shared-secret OAuth. The certificate and exportable RSA key use native custody. Runner delivery, derived capture, and 1Password references do not accept this kind. |
 | `aws-sigv4` | The broker signs the final canonical request (after header filtering) with SigV4, including `x-amz-date` and `x-amz-content-sha256`. | Region and service are owner-set per secret and never agent-chosen. `X-Amz-Target`, which selects the operation for AWS JSON APIs, is allowed only when a named operation fixes it. STS is token-issuing (§8.3). |
 
-`oauth2-refresh` and `mtls-client-cert` are in the secrets SOT §3. The launch
-set is the six kinds above. mTLS and refresh tokens come later through the
-existing interface (Q9).
+For certificate authentication, register the public certificate with the
+authorization server. In the Secrets console choose **OAuth2 certificate
+credentials** and enter the client ID, one PEM certificate, its matching
+unencrypted RSA private key, and the registered key ID if the server
+requires one. Configure the token endpoint, scope, assertion audience, and
+signing algorithm (`PS256` or `RS256`). Use the audience string the server
+requires, preserving any trailing slash it specifies. The token endpoint and
+the resource each need an approved destination.
+
+For Microsoft Graph, use the tenant's
+`https://login.microsoftonline.com/<tenant-id>/oauth2/v2.0/token` URL as both
+token endpoint and audience, `PS256`, and the scope
+`https://graph.microsoft.com/.default`. Microsoft Entra identifies the
+certificate by its SHA-256 thumbprint. Replace the value through the same
+owner-approved native rotation flow. The newly active version obtains its
+own token with the replacement key.
+
+`oauth2-refresh` and `mtls-client-cert` are in the secrets SOT §3.
+Certificate client assertions authenticate the OAuth token request.
+mTLS and refresh tokens come later through the existing interface (Q9).
 
 ### 7.6 Response handling and default deny on credential-shaped results
 

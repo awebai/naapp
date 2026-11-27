@@ -9,7 +9,16 @@ from pathlib import Path
 import pytest
 
 from aweb_secrets.principal import is_principal
-from aweb_secrets.secret import KINDS, SecretInvalid, SecretRecord, mint_secret_id, widened_fields
+from aweb_secrets.secret import (
+    KINDS,
+    OAUTH2_CERTIFICATE,
+    OAUTH2_SECRET,
+    SecretInvalid,
+    SecretRecord,
+    mint_secret_id,
+    sealed_shape_changed,
+    widened_fields,
+)
 
 RECORD = {
     "v": 1,
@@ -34,6 +43,12 @@ KIND_PARAMS = {
         "client_auth": "client_secret_basic",
         "scope": "payments:read refunds:write",
     },
+    "oauth2-certificate-credentials": {
+        "token_endpoint": "https://auth.example.com/oauth/token",
+        "audience": "https://auth.example.com",
+        "signing_alg": "PS256",
+        "scope": "payments:read",
+    },
 }
 OAUTH2 = KIND_PARAMS["oauth2-client-credentials"]
 
@@ -44,13 +59,14 @@ def _record(**changes):
     return record
 
 
-def test_the_kinds_are_the_six_auth_schemes() -> None:
+def test_the_kinds_are_the_supported_auth_schemes() -> None:
     assert KINDS == (
         "bearer",
         "basic",
         "header",
         "query",
         "oauth2-client-credentials",
+        "oauth2-certificate-credentials",
         "aws-sigv4",
     )
 
@@ -106,6 +122,25 @@ def test_the_record_round_trips_as_its_after() -> None:
         },
         {"kind": "oauth2-client-credentials", "kind_params": {**OAUTH2, "scope": "a\\b"}},
         {"kind": "oauth2-client-credentials", "kind_params": {**OAUTH2, "scope": "a  b"}},
+        {
+            "kind": OAUTH2_CERTIFICATE,
+            "kind_params": {
+                **KIND_PARAMS[OAUTH2_CERTIFICATE],
+                "signing_alg": "HS256",
+            },
+        },
+        {
+            "kind": OAUTH2_CERTIFICATE,
+            "kind_params": {
+                **KIND_PARAMS[OAUTH2_CERTIFICATE],
+                "audience": "http://auth.example.com",
+            },
+        },
+        {
+            "kind": OAUTH2_CERTIFICATE,
+            "kind_params": KIND_PARAMS[OAUTH2_CERTIFICATE],
+            "backend": "onepassword",
+        },
         {
             "kind": "oauth2-client-credentials",
             "kind_params": {"token_endpoint": OAUTH2["token_endpoint"]},
@@ -212,11 +247,30 @@ def test_an_update_widens_when_it_leaves_sensitive_or_approve_only(current, afte
         ("payments:read", "payments:write", {"kind_params.scope"}),
     ],
 )
-def test_oauth_scope_widening_compares_token_sets(before, after, widened) -> None:
+@pytest.mark.parametrize("kind", [OAUTH2_SECRET, OAUTH2_CERTIFICATE])
+def test_oauth_scope_widening_compares_token_sets(kind, before, after, widened) -> None:
     current = SecretRecord.from_after(
-        _record(kind="oauth2-client-credentials", kind_params={**OAUTH2, "scope": before})
+        _record(kind=kind, kind_params={**KIND_PARAMS[kind], "scope": before})
     )
     proposed = SecretRecord.from_after(
-        _record(kind="oauth2-client-credentials", kind_params={**OAUTH2, "scope": after})
+        _record(kind=kind, kind_params={**KIND_PARAMS[kind], "scope": after})
     )
     assert widened_fields(current, proposed) == widened
+    assert not sealed_shape_changed(current, proposed)
+
+
+@pytest.mark.parametrize(
+    "param,value",
+    [
+        ("token_endpoint", "https://auth.example.com/other/token"),
+        ("audience", "https://auth.example.com/other"),
+        ("signing_alg", "RS256"),
+    ],
+)
+def test_certificate_assertion_configuration_is_bound_to_custody(param, value):
+    config = KIND_PARAMS[OAUTH2_CERTIFICATE]
+    current = SecretRecord.from_after(_record(kind=OAUTH2_CERTIFICATE, kind_params=config))
+    proposed = SecretRecord.from_after(
+        _record(kind=OAUTH2_CERTIFICATE, kind_params={**config, param: value})
+    )
+    assert sealed_shape_changed(current, proposed)

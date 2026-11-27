@@ -31,7 +31,7 @@ from aweb_secrets.destination import DestinationInvalid, parse_destination_scope
 from aweb_secrets.grant import GRANT_TEMPLATE_ID
 from aweb_secrets.policy import DIGEST, IDENTIFIER
 from aweb_secrets.response_limits import DEFAULT_RESPONSE_BYTES, MAX_RESPONSE_BYTES
-from aweb_secrets.secret import KINDS, SECRET_ID, SecretInvalid, validate_kind_params
+from aweb_secrets.secret import SECRET_ID, SecretInvalid, validate_kind_params
 
 DIGEST_PREFIX = b"aweb.secrets.operation/1\n"
 
@@ -267,7 +267,10 @@ def _check_store_as_secret(store: Any) -> None:
         ),
         "store_as_secret",
     )
-    _require(store["derived_kind"] in KINDS, "the stored secret's kind is an auth scheme")
+    _require(
+        isinstance(store["derived_kind"], str) and store["derived_kind"] in CAPTURE_FIELDS,
+        "the stored secret's kind supports capture",
+    )
     try:
         validate_kind_params(store["derived_kind"], store["kind_params"])
         destinations = store["destinations"]

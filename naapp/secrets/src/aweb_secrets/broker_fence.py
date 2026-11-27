@@ -44,6 +44,7 @@ from aweb_secrets.grant import is_secrets_role
 from aweb_secrets.operation import OperationTemplate
 from aweb_secrets.operation_request import OperationRequest, render_operation
 from aweb_secrets.policy import Policy
+from aweb_secrets.secret import OAUTH2_KINDS
 from aweb_secrets.use_approval import BrokerOpen
 
 
@@ -275,7 +276,7 @@ class BrokerFence:
             target = chosen.path
         _require(len(rendered.body) <= policy.body["request"]["max_bytes"], "params_invalid")
         token_destination = None
-        if stored.record.kind == "oauth2-client-credentials":
+        if stored.record.kind in OAUTH2_KINDS:
             token_destination = self._destination(
                 destinations, "POST", stored.record.kind_params["token_endpoint"]
             ).destination

@@ -44,6 +44,7 @@ from aweb_naapp.runtime.installation import (
     InstallationRefused,
 )
 from aweb_naapp.runtime.passkeys import Passkeys
+from aweb_secrets_values import CAPTURE_FIELDS
 from aweb_secrets_values.credential_shapes import CredentialScan
 from nacl.signing import SigningKey
 from pgdbm import AsyncDatabaseManager
@@ -839,9 +840,12 @@ class RunDispatch:
             raise CustodyUnavailable("run slots must identify distinct source secrets")
         async with asyncio.timeout(self._assignment_ttl.total_seconds()):
             for slot, context in zip(original.plan.slots, contexts, strict=True):
+                kind = slot.body["source"]["record"]["kind"]
+                if kind not in CAPTURE_FIELDS:
+                    raise CustodyUnavailable("the secret's kind cannot be released to a runner")
                 observation = await self._opener.observe(context)
                 value = await self._opener.open(context)
-                fields = decode_value(slot.body["source"]["record"]["kind"], value.reveal())
+                fields = decode_value(kind, value.reveal())
                 required = {
                     binding["field"]
                     for binding in _job(original).after["env"].values()

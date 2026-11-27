@@ -14,7 +14,7 @@ from playwright.async_api import expect
 
 from aweb_secrets.operation import CAPTURE_FIELDS
 from aweb_secrets.owners import OWNER_ROLE
-from aweb_secrets.secret import KINDS, SecretRecord
+from aweb_secrets.secret import SecretRecord
 from tests.test_change_sets import ALICE, enrol_owner
 from tests.test_change_sets import world as _world
 from tests.test_console_changes import ROOT, approve, clients, sign_in, token_draft
@@ -76,7 +76,7 @@ async def test_reference_form_uses_only_the_current_scoped_backend_version(world
         assert version["type"] == "hidden" and version["value"] == "1"
         assert {
             attrs["value"] for tag, attrs in tags if tag == "option" and "data-auth-kind" in attrs
-        } == set(KINDS)
+        } == set(CAPTURE_FIELDS)
         assert (
             await human.get("/installations/not-this-installation/onepassword/references/new")
         ).status_code == 403
@@ -100,7 +100,7 @@ async def connect_backend(world, page, origin):
 
 
 @pytest.mark.parametrize(
-    "kind,width", [(kind, 375 if index % 2 == 0 else 1440) for index, kind in enumerate(KINDS)]
+    "kind,width", [(kind, 375 if index % 2 == 0 else 1440) for index, kind in enumerate(CAPTURE_FIELDS)]
 )
 async def test_reference_browser_builds_kind_specific_metadata_and_stops_after_session_loss(
     world, browser, service, kind, width, tmp_path

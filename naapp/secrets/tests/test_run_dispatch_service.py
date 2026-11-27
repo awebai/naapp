@@ -4,12 +4,14 @@ import asyncio
 import json
 from datetime import timedelta
 from functools import cached_property
+from uuid import uuid4
 
 import asyncpg
 import pytest
 from aweb_naapp.crypto import open_sealed
 from aweb_naapp.hooks.strictjson import decode_base64url, encode_base64url
 from aweb_naapp.runtime.approvals import Assurance, Decision
+from aweb_secrets_values import OAUTH2_CERTIFICATE
 from awid.did import did_from_public_key
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from nacl.signing import SigningKey
@@ -18,10 +20,12 @@ from aweb_secrets import runners
 from aweb_secrets.custody import decode_value
 from aweb_secrets.run_service import RunDispatch
 from aweb_secrets.runner_protocol import RunnerRefused, canonical
+from aweb_secrets.secret import SecretRecord
+from tests.harness import oauth_certificate
 from tests.run_world import RunWorld
 from tests.run_world import setup as setup_world
 from tests.test_broker_audit import envelopes
-from tests.test_use_approvals import TEAM
+from tests.test_use_approvals import SECRET, TEAM
 from tests.test_use_approvals import uses as uses
 from tests.test_use_approvals import world as world
 from tests.test_use_audit import targets
@@ -50,6 +54,8 @@ async def setup(
     variant="",
     reuse_source=None,
     paired=False,
+    primary=None,
+    credential_field="value",
 ):
     original = await setup_world(
         uses,
@@ -60,6 +66,8 @@ async def setup(
         variant=variant,
         reuse_source=reuse_source,
         paired=paired,
+        primary=primary,
+        credential_field=credential_field,
     )
     return Context(**vars(original))
 
@@ -108,6 +116,31 @@ async def test_one_admitted_run_replays_the_same_signed_sealed_assignment(uses):
         "admitted",
         "dispatching",
     ]
+
+
+async def test_a_runner_cannot_obtain_certificate_material_through_client_id_binding(uses):
+    record = SecretRecord.from_after({
+        **SECRET,
+        "kind": OAUTH2_CERTIFICATE,
+        "kind_params": {
+            "token_endpoint": "https://auth.example.com/oauth/token",
+            "audience": "https://auth.example.com",
+            "signing_alg": "PS256",
+            "scope": "service:read",
+        },
+    })
+    _, value = oauth_certificate(str(uuid4()))
+    # The client_id binding overlaps with shared-secret OAuth. A run grant and
+    # that valid binding must never release the entire certificate bundle.
+    context = await setup(uses, primary=(record, value), credential_field="client_id")
+    admitted = await context.service.submit(job=context.job.job_id, submission=context.submission)
+    assert admitted.status == 202 and admitted.body["state"] == "admitted"
+    with pytest.raises(RunnerRefused) as refused:
+        await context.service.claim(context.signed("/runner/v1/claim"))
+    assert refused.value.code == "runner_unavailable"
+    db = uses.world.db
+    assert await db.fetch_value("SELECT state FROM {{tables.dispatches}}") == "refused"
+    assert await db.fetch_value("SELECT count(*) FROM {{tables.run_deliveries}} WHERE assignment IS NOT NULL") == 0
 
 
 def report(stdout="safe"):

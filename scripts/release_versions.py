@@ -15,6 +15,16 @@ TAG_PATTERN = re.compile(
     rf"|(secrets-v|logs-v|folio-v|library-v)({SEMVER}))$"
 )
 
+# Each PyPI lane: the (package, directory) pairs it publishes, in order. A
+# lane's packages share the tag's version.
+PYPI_LANES = {
+    "aweb-naapp-v": (("aweb-naapp", "naapp-lib"), ("aweb-naapp-testing", "naapp-lib/testing")),
+    "aweb-secrets-runner-v": (
+        ("aweb-secrets-values", "naapp/secrets/values"),
+        ("aweb-secrets-runner", "naapp/secrets/runner"),
+    ),
+    "secrets-v": (("aweb-naapp-journey-support", "naapp/secrets/e2e"),),
+}
 
 class VersionRefusal(RuntimeError):
     pass

@@ -83,6 +83,33 @@ jobs:
       - name: Test the selection, digests, shards and test infrastructure
         run: make test-scripts
 
+  # The files a PyPI release uploads, built twice and identical, each lane's
+  # wheels installed by path and imported, kept as this run's artifact. A
+  # release tag locks their sha256 (scripts/release_files.py, docs/release.md).
+  release-files:
+    name: PyPI release files
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Build, lock and install-check the release files
+        run: python3 scripts/release_files.py build --out release-files
+
+      - name: Keep the release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: release-files/
+          if-no-files-found: error
+
   # Two shards that together are the whole suite: tests/runtime, and every
   # other test. Either shard failing fails the job.
   naapp-lib:
@@ -809,6 +836,7 @@ jobs:
     needs:
       - plan
       - scripts
+      - release-files
       - naapp-lib
       - folio
       - folio-e2e

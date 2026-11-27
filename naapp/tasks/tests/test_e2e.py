@@ -26,6 +26,8 @@ from aweb_naapp_testing.compose_lane import (
 from awid.did import did_from_public_key
 from nacl.signing import SigningKey
 
+from aweb_tasks import MANIFEST_PATH
+
 pytestmark = pytest.mark.e2e
 
 APP_DIR = Path(__file__).resolve().parents[1]
@@ -46,16 +48,19 @@ def first_json(text: str):
     return json.JSONDecoder().raw_decode(text[start:])[0]
 
 
-def aw(machine: str, *args: str):
-    """aw --json in a machine, without a terminal; its JSON answer."""
-    result = docker("exec", machine, "aw", "--json", *args, timeout=300)
+def aw(machine: str, *args: str, home: str | None = None):
+    """aw --json in a machine, without a terminal; its JSON answer. ``home``
+    acts as another identity home in that machine, such as a worker's grant."""
+    env = [] if home is None else [f"--env=AWEB_IDENTITY_HOME={home}"]
+    result = docker("exec", *env, machine, "aw", "--json", *args, timeout=300)
     assert result.returncode == 0, f"aw {' '.join(args)}\n{result.stdout}\n{result.stderr}"
     return first_json(result.stdout)
 
 
-def aw_refused(machine: str, *args: str) -> str:
-    """aw --json expecting the app's refusal; the whole output, for its code."""
-    result = docker("exec", machine, "aw", "--json", *args, timeout=300)
+def aw_refused(machine: str, *args: str, home: str | None = None) -> str:
+    """aw --json expecting a refusal; the whole output, for its code."""
+    env = [] if home is None else [f"--env=AWEB_IDENTITY_HOME={home}"]
+    result = docker("exec", *env, machine, "aw", "--json", *args, timeout=300)
     assert result.returncode != 0, result.stdout
     return result.stdout + result.stderr
 
@@ -184,3 +189,58 @@ def test_a_member_creates_claims_locks_and_closes_through_aw_tasks(lane: Compose
     # the claim the close ended, and the close.
     states = delivered_events(lane, 6)
     assert set(states) == {"delivered"}, states
+
+
+def ordinary_tools() -> list[str]:
+    """Every tool the manifest does not put under tasks.override."""
+    tools = json.loads(MANIFEST_PATH.read_bytes())["tools"]
+    return [tool["name"] for tool in tools if tool["scopes"] != ["tasks.override"]]
+
+
+def serve_custody(machine: str) -> None:
+    """The resident's custody service, which signs its workers' app calls; at most 30 s to answer."""
+    started = docker("exec", "-d", machine, "aw", "custody", "serve")
+    assert started.returncode == 0, started.stdout + started.stderr
+    for _ in range(60):
+        if docker("exec", machine, "aw", "--json", "custody", "status", timeout=30).returncode == 0:
+            return
+        time.sleep(0.5)
+    raise AssertionError("the resident's custody service never answered")
+
+
+def test_a_worker_granted_only_the_ordinary_tools_acts_as_its_resident(lane: ComposeLane) -> None:
+    released_aw = os.environ.get("NAAPP_AW_BINARY")
+    assert released_aw, "set NAAPP_AW_BINARY to the pinned Linux aw release"
+    machine = lane.machine("alice", aw_binary=Path(released_aw))
+    member = found_team(lane, machine)
+    admit_app_member(lane, machine)
+    lane.up("tasks")
+    assert aw(machine, "plugin", "install", API).get("approved")
+
+    # The installation grants all three scopes; the worker's grant names only
+    # the ordinary tools.
+    serve_custody(machine)
+    worker = "/runtime/alice/worker"
+    selection = [arg for tool in ordinary_tools() for arg in ("--app-tool", f"tasks:{tool}")]
+    minted = aw(machine, "id", "grant", "mint", "--bundle", "normal-agent", "--ttl", "1h",
+                "--custody-socket", "auto", "--out", worker, *selection)
+    (delegated,) = [app for app in minted["apps"] if app["app_id"] == "tasks"]
+    assert sorted(delegated["tools"]) == sorted(ordinary_tools()), minted
+
+    # The worker's ordinary calls are its resident's: it holds as the resident.
+    aw(machine, "tasks", "create", "--title", "Delegated", home=worker)
+    claimed = aw(machine, "tasks", "claim", "--number", "1", home=worker)
+    assert claimed["claim"]["holder"] == member["did_aw"], claimed
+    revision = str(claimed["claim"]["revision"])
+
+    # The resident's own override reaches the app, which judges it: its own claim.
+    assert "not_overridable" in aw_refused(machine, "tasks", "takeover", "--number", "1", "--revision", revision)
+    # The worker's override tools are refused before any request reaches the app.
+    for override in (
+        ("takeover", "--number", "1", "--revision", revision),
+        ("close-claimed", "--number", "1", "--revision", revision),
+        ("break", "--resource", "naapp/main", "--revision", "1"),
+    ):
+        assert "app_tool_denied" in aw_refused(machine, "tasks", *override, home=worker), override
+    shown = aw(machine, "tasks", "show", "--number", "1", home=worker)
+    assert (shown["status"], shown["claim"]["holder"]) == ("open", member["did_aw"])

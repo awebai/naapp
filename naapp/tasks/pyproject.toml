@@ -43,6 +43,9 @@ testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "fixture-scope"
 filterwarnings = ["error"]
+markers = [
+  "e2e: the Compose journey with the real aw, run only by make e2e-tasks",
+]
 
 [tool.ruff]
 target-version = "py312"

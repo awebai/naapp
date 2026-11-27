@@ -20,7 +20,7 @@ SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_rele
 	test_secrets_shards test_shipping
 
 .PHONY: affected sync lint lint-scripts test test-scripts production-awid-sync browsers renderer-deps test-renderer image-smoke-folio image-smoke-library image-smoke-tasks check-library-dev aw \
-	check-library-aatk check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets release-checks \
+	check-library-aatk check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets e2e-tasks release-checks \
 	release-candidate release-publish
 
 # The packages the change from BASE to HEAD affects, as a JSON list.
@@ -135,6 +135,9 @@ e2e-library:
 e2e-secrets:
 	NAAPP_AW_BINARY="$${NAAPP_AW_BINARY:-$(AW_DIR)/aw}" $(MAKE) -C naapp/secrets e2e
 
+e2e-tasks:
+	NAAPP_AW_BINARY="$${NAAPP_AW_BINARY:-$(AW_DIR)/aw}" $(MAKE) -C naapp/tasks e2e
+
 # Each Secrets test module is in exactly one shard of candidate-gate/secrets-shards.json.
 check-secrets-shards:
 	uv sync --frozen --project naapp/secrets
@@ -154,6 +157,7 @@ release-checks:
 	$(MAKE) e2e-folio
 	$(MAKE) e2e-library
 	$(MAKE) e2e-secrets
+	$(MAKE) e2e-tasks
 
 # Tags SOURCE (default HEAD), a commit of origin/main that a fully green CI run
 # tested (docs/release.md).

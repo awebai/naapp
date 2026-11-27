@@ -1,4 +1,4 @@
-"""Validation of aweb.page/1 page snapshots (docs/page-format.md).
+"""Validation of aweb.page/1 page snapshots (aweb's docs/page-format.md).
 
 Three layers run in order and stop at the first that fails: host limits, then
 the JSON Schema, then semantic lint. Limits are checked iteratively before any

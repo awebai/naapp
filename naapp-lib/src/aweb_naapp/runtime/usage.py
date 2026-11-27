@@ -1,4 +1,4 @@
-"""App usage reporting, aweb.usage/1 (docs/app-usage.md).
+"""App usage reporting, aweb.usage/1 (aweb's docs/app-usage.md).
 
 The app is the authority for its own usage and reports it in batches signed
 with its app-usage credential. This module validates a batch, computes its
@@ -160,7 +160,7 @@ def _check_inventory(inventory: object, first: int, last: int) -> None:
 
 
 def validate_report(batch: object) -> None:
-    """Check a report batch against docs/app-usage.md §3."""
+    """Check a report batch against aweb's docs/app-usage.md §3."""
     if not isinstance(batch, Mapping):
         raise _bad("batch is not an object")
     keys = set(batch)

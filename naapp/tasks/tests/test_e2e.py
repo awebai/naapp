@@ -5,9 +5,11 @@ image behind TLS. Run by ``make e2e-tasks``; the unit run deselects it.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import secrets
+import shutil
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -21,6 +23,8 @@ from aweb_naapp_testing.compose_lane import (
     await_awid_txt,
     docker,
 )
+from awid.did import did_from_public_key
+from nacl.signing import SigningKey
 
 pytestmark = pytest.mark.e2e
 
@@ -56,29 +60,35 @@ def aw_refused(machine: str, *args: str) -> str:
     return result.stdout + result.stderr
 
 
-def write_app_files(lane: ComposeLane) -> None:
-    keys = lane.runtime / "tasks-keys"
-    keys.mkdir(mode=0o755)
-    keys.chmod(0o755)  # mkdir's mode is masked by the launching umask
-    for name in ("emit", "grant"):
+def admit_app_member(lane: ComposeLane, machine: str) -> None:
+    """The app as an ordinary member of the team, with its own key: the
+    owner's add-member, and the member's own fetch of its certificate. Its
+    credential, keys and database URL are the files compose.tasks.yaml names."""
+    key = SigningKey.generate()
+    added = aw(machine, "id", "team", "add-member", "--team", TEAM, "--namespace", DOMAIN,
+               "--did", did_from_public_key(bytes(key.verify_key)), "--name", "tasks-service", "--global")
+    home = lane.runtime / "tasks-member"
+    home.mkdir(mode=0o700)
+    pem = ("-----BEGIN ED25519 PRIVATE KEY-----\n" + base64.b64encode(bytes(key)).decode()
+           + "\n-----END ED25519 PRIVATE KEY-----\n")
+    lane.redact(pem)
+    (home / "signing.key").write_text(pem)
+    (home / "signing.key").chmod(0o600)
+    fetched = aw(machine, "--identity-home", f"/runtime/{home.name}", "id", "team", "fetch-cert",
+                 "--namespace", DOMAIN, "--team", TEAM, "--cert-id", added["certificate_id"],
+                 "--registry", REGISTRY_ORIGIN)
+    files = lane.runtime / "tasks"
+    files.mkdir(mode=0o755)
+    files.chmod(0o755)  # mkdir's mode is masked by the launching umask
+    (files / "awid-member-key").write_text(pem)
+    shutil.copyfile(home / fetched["cert_path"], files / "awid-member-certificate")
+    for name in ("emit", "grant-read"):
         value = secrets.token_hex(32)
         lane.redact(value)
-        (keys / name).write_text(value + "\n")
-        (keys / name).chmod(0o644)
-    settings = {
-        "TASKS_DATABASE_URL": f"postgresql://tasks:disposable@postgres:5432/{DATABASE}",
-        "TASKS_PUBLIC_ORIGIN": API,
-        "TASKS_AWID_REGISTRY_URL": REGISTRY_ORIGIN,
-        "TASKS_AWID_SERVICE_TOKEN": lane.env["NAAPP_E2E_AWID_SERVICE_TOKEN"],
-        "TASKS_APP_KEY_FILES": json.dumps(
-            {"tasks:emit-1": "/run/tasks-keys/emit", "tasks:grant-read-1": "/run/tasks-keys/grant"}
-        ),
-        "TASKS_APP_EVENTS_ORIGIN": TEAM_SERVER_ORIGIN,
-        "SSL_CERT_FILE": "/runtime/tls/ca.pem",
-        "APP_ENV": "development",
-    }
-    (lane.runtime / "tasks.env").write_text("".join(f"{k}={v}\n" for k, v in settings.items()))
-    (lane.runtime / "tasks.env").chmod(0o644)
+        (files / name).write_text(value + "\n")
+    (files / "database-url").write_text(f"postgresql://tasks:disposable@postgres:5432/{DATABASE}\n")
+    for path in files.iterdir():
+        path.chmod(0o644)
 
 
 @pytest.fixture
@@ -87,20 +97,23 @@ def lane(tmp_path_factory: pytest.TempPathFactory, request: pytest.FixtureReques
         pytest.fail("run by make e2e-tasks, which sets TASKS_E2E=1")
     lane = ComposeLane(
         "tasks-e2e", tmp_path_factory.mktemp("tasks-e2e"), APP_DIR / "docker-compose.e2e.yml",
-        env={"NAAPP_E2E_POSTGRES_USER": "tasks", "NAAPP_E2E_POSTGRES_DB": "tasks"},
+        env={
+            "NAAPP_E2E_POSTGRES_USER": "tasks", "NAAPP_E2E_POSTGRES_DB": "tasks",
+            # compose.tasks.yaml's settings, for this lane.
+            "TASKS_APP_ID": "tasks", "TASKS_PUBLIC_ORIGIN": API, "AWID_REGISTRY_URL": REGISTRY_ORIGIN,
+            "TEAM_ID": TEAM_ID, "TASKS_APP_EVENTS_ORIGIN": TEAM_SERVER_ORIGIN,
+        },
         subnet=DEFAULT_SUBNET,
     )
     lane.prepare(
         domain=DOMAIN, upstreams={HOST: "tasks:8765"}, app_origins=(API,),
         controller_did="did:key:z6MkpendingpendingpendingpendingpendingpendingP",
     )
-    write_app_files(lane)
     try:
         lane.start_core()
         created = lane.compose("exec", "-T", "postgres", "psql", "-U", "tasks", "-d", "tasks", "-v",
                                "ON_ERROR_STOP=1", "-c", f"CREATE DATABASE {DATABASE}")
         assert created.returncode == 0, created.stdout + created.stderr
-        lane.up("tasks")
         yield lane
     finally:
         request.node.add_report_section("teardown", "lane Compose", lane.close())
@@ -142,6 +155,9 @@ def test_a_member_creates_claims_locks_and_closes_through_aw_tasks(lane: Compose
     assert released_aw, "set NAAPP_AW_BINARY to the pinned Linux aw release"
     machine = lane.machine("alice", aw_binary=Path(released_aw))
     member = found_team(lane, machine)
+    # The app starts once it is a member of the team it serves.
+    admit_app_member(lane, machine)
+    lane.up("tasks")
     installed = aw(machine, "plugin", "install", API)
     assert installed.get("approved"), installed
 

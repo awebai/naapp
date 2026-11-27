@@ -1,7 +1,7 @@
 # The Tasks journey (tests/test_e2e.py): a member installs the app and runs
 # the real aw against it. The test writes NAAPP_E2E_RUNTIME (DNS zone, TLS,
-# keys, the app's env file) before it starts each service, and drives aw only
-# inside the CLI containers. Everything is disposable.
+# the app's member credential and keys) before it starts each service, and
+# drives aw only inside the CLI containers. Everything is disposable.
 services:
   dns:
     extends: {file: "${NAAPP_E2E_BASE_COMPOSE:?}", service: dns}
@@ -18,18 +18,21 @@ services:
   aweb:
     extends: {file: "${NAAPP_E2E_BASE_COMPOSE:?}", service: aweb}
 
-  # The production image, behind the lane's TLS front at the hosted origin,
-  # which the lane's private DNS and CA serve instead of the public one.
+  # The production image as compose.tasks.yaml runs it, behind the lane's TLS
+  # front at the hosted origin, which the lane's private DNS and CA serve
+  # instead of the public one.
   tasks:
+    extends: {file: compose.tasks.yaml, service: tasks}
     build:
       context: ../..
       dockerfile: naapp/tasks/Dockerfile
-    read_only: true
-    tmpfs: [/tmp]
+    restart: "no"
     dns: ["${NAAPP_E2E_DNS_IP:-127.0.0.11}"]
-    env_file: ["${NAAPP_E2E_RUNTIME:?}/tasks.env"]
+    environment:
+      APP_ENV: development
+      SSL_CERT_FILE: /runtime/tls/ca.pem
     volumes:
-      - "${NAAPP_E2E_RUNTIME:?}/tasks-keys:/run/tasks-keys:ro"
+      - "${NAAPP_E2E_RUNTIME:?}/tasks:/run/secrets/tasks:ro"
       - "${NAAPP_E2E_RUNTIME:?}/tls:/runtime/tls:ro"
     depends_on:
       postgres: {condition: service_healthy}

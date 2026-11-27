@@ -1,0 +1,1079 @@
+{
+  "manifest_version": 2,
+  "app": {
+    "id": "tasks",
+    "version": "0.1.0",
+    "origin": "https://tasks.aweb.ai"
+  },
+  "app_keys": [
+    {
+      "kid": "tasks:emit-1",
+      "purposes": [
+        "app-event"
+      ]
+    },
+    {
+      "kid": "tasks:grant-read-1",
+      "purposes": [
+        "app-grant-read"
+      ]
+    }
+  ],
+  "events": [
+    {
+      "type": "task.status",
+      "default_delivery_intent": "wake",
+      "description": "A task was created, closed or reopened, or its stored status changed. resource_ref is the task number; the payload carries the status only."
+    },
+    {
+      "type": "task.claim",
+      "default_delivery_intent": "wake",
+      "description": "A task's claim was taken, released, taken over or ended by a close. resource_ref is the task number; the payload carries the claim's revision only."
+    },
+    {
+      "type": "lock",
+      "default_delivery_intent": "wake",
+      "description": "A lock was taken, released or broken. resource_ref is the resource; the payload carries the lock's revision only."
+    }
+  ],
+  "tools": [
+    {
+      "name": "create",
+      "description": "Create a task. Numbers start at 1 and are never reused.",
+      "method": "POST",
+      "path": "/v1/tasks",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "task",
+              "bug",
+              "feature",
+              "epic"
+            ]
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "parent": {
+            "type": "integer"
+          },
+          "assignee": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "title"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "title",
+          "in": "body"
+        },
+        {
+          "name": "body",
+          "in": "body"
+        },
+        {
+          "name": "type",
+          "in": "body"
+        },
+        {
+          "name": "priority",
+          "in": "body"
+        },
+        {
+          "name": "labels",
+          "in": "body"
+        },
+        {
+          "name": "parent",
+          "in": "body"
+        },
+        {
+          "name": "assignee",
+          "in": "body"
+        }
+      ],
+      "scopes": [
+        "tasks.write"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "show",
+      "description": "Show one task, with its live claim and dependencies.",
+      "method": "GET",
+      "path": "/v1/tasks/{number}",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "number"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "number",
+          "in": "path"
+        }
+      ],
+      "scopes": [
+        "tasks.read"
+      ],
+      "mutation": false,
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "list",
+      "description": "List tasks, filtered by status, label, assignee, parent, type and priority.",
+      "method": "GET",
+      "path": "/v1/tasks",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "blocked",
+              "closed"
+            ]
+          },
+          "label": {
+            "type": "string"
+          },
+          "assignee": {
+            "type": "string"
+          },
+          "parent": {
+            "type": "integer"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "task",
+              "bug",
+              "feature",
+              "epic"
+            ]
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "status",
+          "in": "query"
+        },
+        {
+          "name": "label",
+          "in": "query"
+        },
+        {
+          "name": "assignee",
+          "in": "query"
+        },
+        {
+          "name": "parent",
+          "in": "query"
+        },
+        {
+          "name": "type",
+          "in": "query"
+        },
+        {
+          "name": "priority",
+          "in": "query"
+        }
+      ],
+      "scopes": [
+        "tasks.read"
+      ],
+      "mutation": false,
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "update",
+      "description": "Change a task's title, body, type, priority, labels, parent, assignee or status. Closing through update follows close's rules.",
+      "method": "PATCH",
+      "path": "/v1/tasks/{number}",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          },
+          "title": {
+            "type": "string"
+          },
+          "body": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string",
+            "enum": [
+              "task",
+              "bug",
+              "feature",
+              "epic"
+            ]
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 4
+          },
+          "labels": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "parent": {
+            "type": "integer"
+          },
+          "assignee": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "open",
+              "blocked",
+              "closed"
+            ]
+          }
+        },
+        "required": [
+          "number"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "number",
+          "in": "path"
+        },
+        {
+          "name": "title",
+          "in": "body"
+        },
+        {
+          "name": "body",
+          "in": "body"
+        },
+        {
+          "name": "type",
+          "in": "body"
+        },
+        {
+          "name": "priority",
+          "in": "body"
+        },
+        {
+          "name": "labels",
+          "in": "body"
+        },
+        {
+          "name": "parent",
+          "in": "body"
+        },
+        {
+          "name": "assignee",
+          "in": "body"
+        },
+        {
+          "name": "status",
+          "in": "body"
+        }
+      ],
+      "scopes": [
+        "tasks.write"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "close",
+      "description": "Close a task. with_children closes every open descendant with it. Refused while someone else holds a live claim on any task it would close.",
+      "method": "POST",
+      "path": "/v1/tasks/{number}/close",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          },
+          "with_children": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "number"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "number",
+          "in": "path"
+        },
+        {
+          "name": "with_children",
+          "in": "body"
+        }
+      ],
+      "scopes": [
+        "tasks.write"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "reopen",
+      "description": "Reopen a closed task.",
+      "method": "POST",
+      "path": "/v1/tasks/{number}/reopen",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "number"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "number",
+          "in": "path"
+        }
+      ],
+      "scopes": [
+        "tasks.write"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "comment-add",
+      "description": "Add a comment to a task. Comments are append-only.",
+      "method": "POST",
+      "path": "/v1/tasks/{number}/comments",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          },
+          "body": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "number",
+          "body"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "number",
+          "in": "path"
+        },
+        {
+          "name": "body",
+          "in": "body"
+        }
+      ],
+      "scopes": [
+        "tasks.write"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "comment-list",
+      "description": "List a task's comments.",
+      "method": "GET",
+      "path": "/v1/tasks/{number}/comments",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "number"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "number",
+          "in": "path"
+        }
+      ],
+      "scopes": [
+        "tasks.read"
+      ],
+      "mutation": false,
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "dep-add",
+      "description": "Make a task wait on another. Refused if it would make a cycle.",
+      "method": "POST",
+      "path": "/v1/tasks/{number}/dependencies",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          },
+          "on": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "number",
+          "on"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "number",
+          "in": "path"
+        },
+        {
+          "name": "on",
+          "in": "body"
+        }
+      ],
+      "scopes": [
+        "tasks.write"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "dep-remove",
+      "description": "Stop a task waiting on another.",
+      "method": "DELETE",
+      "path": "/v1/tasks/{number}/dependencies/{on}",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          },
+          "on": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "number",
+          "on"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "number",
+          "in": "path"
+        },
+        {
+          "name": "on",
+          "in": "path"
+        }
+      ],
+      "scopes": [
+        "tasks.write"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "ready",
+      "description": "Open tasks with nothing to wait on and no live claim.",
+      "method": "GET",
+      "path": "/v1/ready",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "params": [],
+      "scopes": [
+        "tasks.read"
+      ],
+      "mutation": false,
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "active",
+      "description": "Tasks with a live claim; holder narrows them to one holder's.",
+      "method": "GET",
+      "path": "/v1/active",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "holder": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "holder",
+          "in": "query"
+        }
+      ],
+      "scopes": [
+        "tasks.read"
+      ],
+      "mutation": false,
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "blocked",
+      "description": "Open tasks waiting on another task.",
+      "method": "GET",
+      "path": "/v1/blocked",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "required": [],
+        "additionalProperties": false
+      },
+      "params": [],
+      "scopes": [
+        "tasks.read"
+      ],
+      "mutation": false,
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "claim",
+      "description": "Claim a task for 24 hours. Claiming one you hold renews it.",
+      "method": "POST",
+      "path": "/v1/tasks/{number}/claim",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "number"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "number",
+          "in": "path"
+        }
+      ],
+      "scopes": [
+        "tasks.write"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "release",
+      "description": "Release your claim on a task, or with all, every claim and lock you hold.",
+      "method": "POST",
+      "path": "/v1/releases",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "all": {
+            "type": "boolean"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "number",
+          "in": "body"
+        },
+        {
+          "name": "revision",
+          "in": "body"
+        },
+        {
+          "name": "all",
+          "in": "body"
+        }
+      ],
+      "scopes": [
+        "tasks.write"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "claim-renew",
+      "description": "Renew your claim on a task for 24 hours.",
+      "method": "POST",
+      "path": "/v1/tasks/{number}/claim/renew",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          },
+          "revision": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "number"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "number",
+          "in": "path"
+        },
+        {
+          "name": "revision",
+          "in": "body"
+        }
+      ],
+      "scopes": [
+        "tasks.write"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "lock",
+      "description": "Lock a resource the team names for 30 minutes. Locking one you hold renews it.",
+      "method": "POST",
+      "path": "/v1/locks",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "resource": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "resource"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "resource",
+          "in": "body"
+        },
+        {
+          "name": "reason",
+          "in": "body"
+        }
+      ],
+      "scopes": [
+        "tasks.write"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "lock-renew",
+      "description": "Renew your lock on a resource for 30 minutes.",
+      "method": "POST",
+      "path": "/v1/locks/renew",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "resource": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "resource"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "resource",
+          "in": "body"
+        },
+        {
+          "name": "revision",
+          "in": "body"
+        }
+      ],
+      "scopes": [
+        "tasks.write"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "unlock",
+      "description": "Release your lock on a resource.",
+      "method": "POST",
+      "path": "/v1/locks/release",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "resource": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "resource"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "resource",
+          "in": "body"
+        },
+        {
+          "name": "revision",
+          "in": "body"
+        }
+      ],
+      "scopes": [
+        "tasks.write"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "locks",
+      "description": "List live locks; holder narrows them to one holder's.",
+      "method": "GET",
+      "path": "/v1/locks",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "holder": {
+            "type": "string"
+          }
+        },
+        "required": [],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "holder",
+          "in": "query"
+        }
+      ],
+      "scopes": [
+        "tasks.read"
+      ],
+      "mutation": false,
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "takeover",
+      "description": "Take over someone else's live claim, at the revision you saw. Records both holders.",
+      "method": "POST",
+      "path": "/v1/tasks/{number}/takeover",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          },
+          "revision": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "number",
+          "revision"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "number",
+          "in": "path"
+        },
+        {
+          "name": "revision",
+          "in": "body"
+        }
+      ],
+      "scopes": [
+        "tasks.override"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "break",
+      "description": "Break someone else's live lock, at the revision you saw. The lock becomes free.",
+      "method": "POST",
+      "path": "/v1/locks/break",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "resource": {
+            "type": "string"
+          },
+          "revision": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "resource",
+          "revision"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "resource",
+          "in": "body"
+        },
+        {
+          "name": "revision",
+          "in": "body"
+        }
+      ],
+      "scopes": [
+        "tasks.override"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "close-claimed",
+      "description": "Close a task someone else holds, ending its claims, at the claim revision you saw (none if you saw it unheld). Records both holders.",
+      "method": "POST",
+      "path": "/v1/tasks/{number}/close-claimed",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          },
+          "revision": {
+            "type": "integer"
+          },
+          "with_children": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "number"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "number",
+          "in": "path"
+        },
+        {
+          "name": "revision",
+          "in": "body"
+        },
+        {
+          "name": "with_children",
+          "in": "body"
+        }
+      ],
+      "scopes": [
+        "tasks.override"
+      ],
+      "mutation": true,
+      "body": {
+        "mode": "json"
+      },
+      "invocation_contexts": [
+        "agent"
+      ]
+    },
+    {
+      "name": "history",
+      "description": "A task's event log: every change, with its actor and cause.",
+      "method": "GET",
+      "path": "/v1/tasks/{number}/history",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "number": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "number"
+        ],
+        "additionalProperties": false
+      },
+      "params": [
+        {
+          "name": "number",
+          "in": "path"
+        }
+      ],
+      "scopes": [
+        "tasks.read"
+      ],
+      "mutation": false,
+      "invocation_contexts": [
+        "agent"
+      ]
+    }
+  ]
+}

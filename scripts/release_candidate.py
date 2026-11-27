@@ -31,6 +31,7 @@ MANIFESTS = {
     "logs-v": "naapp/logs/pyproject.toml",
     "folio-v": "naapp/folio/pyproject.toml",
     "library-v": "naapp/library/pyproject.toml",
+    "tasks-v": "naapp/tasks/pyproject.toml",
     "aweb-secrets-runner-v": "naapp/secrets/runner/pyproject.toml",
 }
 # Packages a tag lane publishes together with its manifest's, at the same version.

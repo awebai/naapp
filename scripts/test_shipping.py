@@ -335,6 +335,7 @@ class OciLaneContractTest(unittest.TestCase):
                 "logs-v": ("ghcr.io/awebai/logs",),
                 "folio-v": ("ghcr.io/awebai/folio",),
                 "library-v": ("ghcr.io/awebai/library",),
+                "tasks-v": ("ghcr.io/awebai/tasks",),
             })
 
     def test_the_image_namespace_can_name_another_ghcr_owner_or_path(self):
@@ -371,7 +372,7 @@ class OciLaneContractTest(unittest.TestCase):
 
     def test_each_image_builds_its_app_dockerfile_from_the_repository_root(self):
         for prefix, app in (("secrets-v", "secrets"), ("logs-v", "logs"),
-                            ("folio-v", "folio"), ("library-v", "library")):
+                            ("folio-v", "folio"), ("library-v", "library"), ("tasks-v", "tasks")):
             with self.subTest(prefix=prefix):
                 self.assertTrue((ROOT / f"naapp/{app}/Dockerfile").is_file())
                 calls: list[tuple[str, ...]] = []

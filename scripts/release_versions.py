@@ -12,7 +12,7 @@ SEMVER = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 PYTHON_VERSION = rf"{SEMVER}(?:rc[1-9][0-9]*)?"
 TAG_PATTERN = re.compile(
     rf"^(?:(aweb-naapp-v|aweb-secrets-runner-v)({PYTHON_VERSION})"
-    rf"|(secrets-v|logs-v|folio-v|library-v)({SEMVER}))$"
+    rf"|(secrets-v|logs-v|folio-v|library-v|tasks-v)({SEMVER}))$"
 )
 
 # Each PyPI lane: the (package, directory) pairs it publishes, in order. A

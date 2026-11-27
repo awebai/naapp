@@ -1,0 +1,32 @@
+# The TASKS app as every Compose file here runs it. A file that runs it
+# extends this service and adds the image, its secrets mount, its network
+# and its port.
+#
+# Every credential is a file under /run/secrets/tasks, which no agent and no
+# other service mounts; none is in the environment. The image carries the
+# healthcheck: /live.
+services:
+  tasks:
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      TASKS_DATABASE_URL_FILE: /run/secrets/tasks/database-url
+      TASKS_DB_SCHEMA: ${TASKS_DB_SCHEMA:-public}
+      TASKS_APP_ID: ${TASKS_APP_ID:?TASKS_APP_ID is required, tasks.appId}
+      TASKS_PUBLIC_ORIGIN: ${TASKS_PUBLIC_ORIGIN:?TASKS_PUBLIC_ORIGIN is required, tasks.publicOrigin}
+      TASKS_AWID_REGISTRY_URL: ${AWID_REGISTRY_URL:-https://api.awid.ai}
+      # The app is an ordinary member of the team: it holds that member's key
+      # and certificate, and no AWID_SERVICE_TOKEN.
+      TASKS_AWID_MEMBER_CREDENTIALS: >-
+        {"${TEAM_ID:?TEAM_ID is required, team.id}":
+        {"signing_key_file": "/run/secrets/tasks/awid-member-key",
+        "certificate_file": "/run/secrets/tasks/awid-member-certificate"}}
+      # tasks:emit-1 signs the app's events to the team's aweb server;
+      # tasks:grant-read-1 signs its reads of the team's installation grant.
+      TASKS_APP_KEY_FILES: >-
+        {"tasks:emit-1": "/run/secrets/tasks/emit",
+        "tasks:grant-read-1": "/run/secrets/tasks/grant-read"}
+      # The team's aweb server, where the app's events go.
+      TASKS_APP_EVENTS_ORIGIN: ${TASKS_APP_EVENTS_ORIGIN:?TASKS_APP_EVENTS_ORIGIN is required, tasks.appEventsOrigin}

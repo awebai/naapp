@@ -10,6 +10,7 @@ commit.
 | `logs-vX.Y.Z` | `ghcr.io/awebai/logs` image |
 | `folio-vX.Y.Z` | `ghcr.io/awebai/folio` image |
 | `library-vX.Y.Z` | `ghcr.io/awebai/library` image |
+| `tasks-vX.Y.Z` | `ghcr.io/awebai/tasks` image |
 | `aweb-secrets-runner-vX.Y.Z` | PyPI `aweb-secrets-values`, then `aweb-secrets-runner`, at the same version |
 | `aweb-naapp-vX.Y.Z` | PyPI `aweb-naapp` (`naapp-lib/`), then `aweb-naapp-testing` (`naapp-lib/testing/`), at the same version |
 

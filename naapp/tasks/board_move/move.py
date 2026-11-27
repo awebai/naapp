@@ -8,12 +8,19 @@ reason, before the board is moved.
 from __future__ import annotations
 
 import json
+import re
 from collections import Counter
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from awid.team_ids import team_slug
+from pgdbm import AsyncDatabaseManager, AsyncMigrationManager, DatabaseConfig
+
+from aweb_tasks.app import MIGRATIONS_PATH
 
 EXPORT_FORMAT = "aweb-board-export/1"
 # The old store's types the app has, and the one naapps ruled into "task".
@@ -22,6 +29,10 @@ KNOWN_TYPES = {"task", "bug", "feature", "epic", "chore"}
 
 class ExportError(ValueError):
     """The file is not an export this script reads."""
+
+
+class MoveRefused(Exception):
+    """A step that would leave the move in a state the procedure does not allow."""
 
 
 @dataclass(frozen=True)
@@ -128,3 +139,340 @@ def stops(export: Export) -> list[Stop]:
             [str(counter)] if numbers and (counter is None or counter <= max(numbers)) else [],
         ),
     ]
+
+
+# --- the moved dataset (step 4) -----------------------------------------------
+
+# The app's tables in the order they are written and listed, each with its
+# columns and their types, and the key that orders its rows.
+TABLES: dict[str, tuple[tuple[tuple[str, str], ...], str]] = {
+    "installations": ((("installation_id", "text"), ("next_number", "integer")), "installation_id"),
+    "tasks": ((
+        ("installation_id", "text"), ("number", "integer"), ("title", "text"), ("body", "text"),
+        ("type", "text"), ("priority", "smallint"), ("status", "text"), ("labels", "text[]"),
+        ("parent", "integer"), ("assignee", "text"), ("creator", "jsonb"), ("closer", "jsonb"),
+        ("created_at", "timestamptz"), ("updated_at", "timestamptz"), ("closed_at", "timestamptz"),
+    ), "number"),
+    "claims": ((
+        ("installation_id", "text"), ("number", "integer"), ("holder_team", "text"),
+        ("holder_identity", "text"), ("holder_alias", "text"), ("revision", "bigint"),
+        ("expires_at", "timestamptz"),
+    ), "number"),
+    "locks": ((
+        ("installation_id", "text"), ("resource", "text"), ("holder_team", "text"),
+        ("holder_identity", "text"), ("holder_alias", "text"), ("reason", "text"),
+        ("revision", "bigint"), ("expires_at", "timestamptz"),
+    ), "resource"),
+    "comments": ((
+        ("installation_id", "text"), ("number", "integer"), ("author", "jsonb"), ("body", "text"),
+        ("created_at", "timestamptz"),
+    ), "comment_id"),
+    "dependencies": ((
+        ("installation_id", "text"), ("number", "integer"), ("waits_on", "integer"),
+    ), "number, waits_on"),
+    "events": ((
+        ("installation_id", "text"), ("number", "integer"), ("resource", "text"), ("kind", "text"),
+        ("cause", "text"), ("actor", "jsonb"), ("detail", "jsonb"), ("occurred_at", "timestamptz"),
+    ), "event_id"),
+}
+CAUSE = "board-move"
+STATUS = {"open": "open", "in_progress": "open", "closed": "closed"}
+TYPE = {"task": "task", "bug": "bug", "feature": "feature", "epic": "epic", "chore": "task"}
+
+
+@dataclass
+class Dataset:
+    """The rows of one installation's dataset, table by table, and the source
+    facts the app does not hold, which only the staging schema keeps."""
+
+    rows: dict[str, list[dict[str, Any]]]
+    source: list[dict[str, Any]]
+
+
+def _time(value: str | None) -> datetime | None:
+    return None if value is None else datetime.fromisoformat(value)
+
+
+def dataset(export: Export, *, installation_id: str, app_id: str) -> Dataset:
+    """The export as the app's rows: numbers and the saved counter kept, actors
+    exactly as stored, no lease live, and every original the app has no field
+    for in the task's import entry."""
+    refused = stops(export)
+    if refused:
+        raise MoveRefused("the export has stops: " + ", ".join(stop.code for stop in refused))
+    exported_at = _time(export.document["exported_at"])
+    actor = {"app": app_id}
+    number_of = {task["task_id"]: task["task_number"] for task in export.kept}
+
+    def event(kind: str, detail: dict[str, Any], *, number: int | None = None,
+              resource: str | None = None) -> dict[str, Any]:
+        return {
+            "installation_id": installation_id, "number": number, "resource": resource,
+            "kind": kind, "cause": CAUSE, "actor": actor, "detail": detail,
+            "occurred_at": exported_at,
+        }
+
+    tasks, claims, events = [], [], []
+    claims_by_ref: dict[str, list[dict[str, Any]]] = {}
+    for claim in export.claims:
+        claims_by_ref.setdefault(claim["task_ref"], []).append(claim)
+    for task in export.kept:
+        number, ref = task["task_number"], export.ref(task)
+        closed = task["status"] == "closed"
+        tasks.append({
+            "installation_id": installation_id, "number": number, "title": task["title"],
+            "body": task["description"], "type": TYPE[task["task_type"]],
+            "priority": task["priority"], "status": STATUS[task["status"]],
+            "labels": task["labels"],
+            "parent": None if task["parent_task_id"] is None else number_of[task["parent_task_id"]],
+            "assignee": task["assignee_alias"],
+            "creator": {"alias": task["created_by_alias"], "did": task["created_by_did"]},
+            "closer": {"alias": task["closed_by_alias"], "did": task["closed_by_did"]} if closed else None,
+            "created_at": _time(task["created_at"]),
+            "updated_at": _time(task["updated_at"] or task["created_at"]),
+            "closed_at": _time(task["closed_at"]),
+        })
+        claims.append({
+            "installation_id": installation_id, "number": number, "holder_team": None,
+            "holder_identity": None, "holder_alias": None, "revision": 0, "expires_at": None,
+        })
+        detail: dict[str, Any] = {"task_id": task["task_id"], "ref": ref}
+        if STATUS[task["status"]] != task["status"]:
+            detail["status"] = task["status"]
+        if TYPE[task["task_type"]] != task["task_type"]:
+            detail["type"] = task["task_type"]
+        if task["notes"]:
+            detail["notes"] = task["notes"]
+        if task["assignee_did"] is not None:
+            detail["assignee_did"] = task["assignee_did"]
+        if task["updated_at"] is None:
+            detail["updated_at"] = None
+        events.append(event("imported", detail, number=number))
+        for claim in claims_by_ref.get(ref, []):
+            events.append(event("claim_not_proven", {
+                "summary": f"claimed by {claim['alias']} from workspace {claim['workspace_id']},"
+                           " holder not proven",
+                "claim_id": claim["id"], "alias": claim["alias"],
+                "workspace_id": claim["workspace_id"], "human_name": claim["human_name"],
+                "apex_task_ref": claim["apex_task_ref"], "claimed_at": claim["claimed_at"],
+            }, number=number))
+    for reservation in export.reservations:
+        if reservation["live"]:
+            events.append(event("lock_not_proven", {
+                "summary": f"locked by {reservation['holder_alias']} from agent"
+                           f" {reservation['holder_agent_id']}, holder not proven",
+                **{key: reservation[key] for key in (
+                    "holder_alias", "holder_agent_id", "acquired_at", "expires_at", "metadata_json",
+                )},
+            }, resource=reservation["resource_key"]))
+    kept_ids = set(number_of)
+    return Dataset(
+        rows={
+            "installations": [{"installation_id": installation_id,
+                               "next_number": export.document["task_counter"]}],
+            "tasks": tasks,
+            "claims": claims,
+            "locks": [],
+            "comments": [
+                {"installation_id": installation_id, "number": number_of[c["task_id"]],
+                 "author": {"alias": c["author_alias"]}, "body": c["body"],
+                 "created_at": _time(c["created_at"])}
+                for c in export.comments if c["task_id"] in kept_ids
+            ],
+            "dependencies": sorted((
+                {"installation_id": installation_id, "number": number_of[d["task_id"]],
+                 "waits_on": number_of[d["depends_on_id"]]}
+                for d in export.dependencies
+                if d["task_id"] in kept_ids and d["depends_on_id"] in kept_ids
+            ), key=lambda d: (d["number"], d["waits_on"])),
+            "events": events,
+        },
+        source=[
+            {"kind": "export", "team_id": export.team_id,
+             "exported_at": export.document["exported_at"],
+             "last_write_at": export.document["last_write_at"]},
+            {"kind": "root_task_counter", "next_number": export.document["root_task_counter"]},
+            *({"kind": "deleted_task", "task_id": t["task_id"], "ref": export.ref(t),
+               "number": t["task_number"], "deleted_at": t["deleted_at"]}
+              for t in export.tasks if t["deleted_at"] is not None),
+            *({"kind": "expired_lock", **r} for r in export.reservations if not r["live"]),
+        ],
+    )
+
+
+# --- the canonical listing (step 5) -------------------------------------------
+
+def _plain(value: Any) -> Any:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    raise TypeError(f"{type(value).__name__} is not listed")
+
+
+def _line(record: dict[str, Any]) -> bytes:
+    return json.dumps(record, sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+                      default=_plain).encode() + b"\n"
+
+
+def listing(data: Dataset, *, source: bool = True) -> bytes:
+    """One line per row, table by table in a fixed order, then the ref-to-number
+    map and, for an export or a staging schema, the source facts."""
+    lines = [_line({"table": table, **row}) for table in TABLES for row in data.rows[table]]
+    lines += [
+        _line({"table": "ref", "ref": e["detail"]["ref"], "number": e["number"]})
+        for e in data.rows["events"] if e["kind"] == "imported"
+    ]
+    if source:
+        lines += [_line({"table": "source", **record}) for record in data.source]
+    return b"".join(lines)
+
+
+# --- the Tasks database ---------------------------------------------------------
+
+SCHEMA_NAME = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,50}$")
+SOURCE_TABLE = "board_move_source"
+
+
+@dataclass(frozen=True)
+class Target:
+    """The Tasks database: its live schema, and beside it the staging schema."""
+
+    dsn: str
+    live_schema: str
+
+    def __post_init__(self) -> None:
+        if not SCHEMA_NAME.match(self.live_schema):
+            raise ValueError(f"not a schema name: {self.live_schema!r}")
+
+    @property
+    def staging_schema(self) -> str:
+        return f"{self.live_schema}_board_move"
+
+
+@asynccontextmanager
+async def _connected(dsn: str, schema: str) -> AsyncIterator[AsyncDatabaseManager]:
+    db = AsyncDatabaseManager(DatabaseConfig(connection_string=dsn, schema=schema))
+    await db.connect()
+    try:
+        yield db
+    finally:
+        await db.disconnect()
+
+
+async def _schema_exists(db: AsyncDatabaseManager, schema: str) -> bool:
+    return bool(await db.fetch_value("SELECT 1 FROM pg_namespace WHERE nspname = $1", schema))
+
+
+def _record(row: Any, table: str) -> dict[str, Any]:
+    record = {}
+    for column, kind in TABLES[table][0]:
+        value = row[column]
+        if kind == "jsonb" and isinstance(value, str):
+            value = json.loads(value)
+        elif kind == "text[]" and value is not None:
+            value = list(value)
+        record[column] = value
+    return record
+
+
+async def _read(db: Any, installation_id: str, *, source: bool) -> Dataset:
+    rows = {}
+    for table, (columns, order) in TABLES.items():
+        names = ", ".join(column for column, _ in columns)
+        fetched = await db.fetch_all(
+            f"SELECT {names} FROM {{{{tables.{table}}}}} WHERE installation_id = $1 ORDER BY {order}",
+            installation_id,
+        )
+        rows[table] = [_record(row, table) for row in fetched]
+    records = []
+    if source:
+        fetched = await db.fetch_all(f"SELECT record FROM {{{{tables.{SOURCE_TABLE}}}}} ORDER BY seq")
+        records = [json.loads(row["record"]) for row in fetched]
+    return Dataset(rows=rows, source=records)
+
+
+async def _write(tx: Any, data: Dataset) -> None:
+    for table, (columns, _) in TABLES.items():
+        names = ", ".join(column for column, _ in columns)
+        typed = ", ".join(f"{column} {kind}" for column, kind in columns)
+        await tx.execute(
+            f"INSERT INTO {{{{tables.{table}}}}} ({names}) SELECT {names}"
+            f" FROM ROWS FROM (jsonb_to_recordset($1::jsonb) AS ({typed})) WITH ORDINALITY AS r({names}, seq)"
+            " ORDER BY seq",
+            json.dumps(data.rows[table], default=_plain),
+        )
+    await tx.execute(
+        f"INSERT INTO {{{{tables.{SOURCE_TABLE}}}}} (seq, record)"
+        " SELECT seq, record FROM jsonb_array_elements($1::jsonb) WITH ORDINALITY AS r(record, seq)",
+        json.dumps(data.source),
+    )
+
+
+async def stage(target: Target, export: Export, *, installation_id: str, app_id: str) -> None:
+    """Writes the export's dataset into a new staging schema, built by the app's
+    own migrations; no member request reads or writes it."""
+    data = dataset(export, installation_id=installation_id, app_id=app_id)
+    async with _connected(target.dsn, target.live_schema) as live:
+        if await _schema_exists(live, target.staging_schema):
+            raise MoveRefused(f"{target.staging_schema} exists: discard it, then stage from a new export")
+        await live.execute(f'CREATE SCHEMA "{target.staging_schema}"')
+    try:
+        async with _connected(target.dsn, target.staging_schema) as staging:
+            await AsyncMigrationManager(
+                staging, migrations_path=str(MIGRATIONS_PATH), module_name="tasks"
+            ).apply_pending_migrations()
+            async with staging.transaction() as tx:
+                await tx.execute(
+                    f"CREATE TABLE {{{{tables.{SOURCE_TABLE}}}}}"
+                    " (seq INTEGER PRIMARY KEY, record JSONB NOT NULL)"
+                )
+                await _write(tx, data)
+    except BaseException:
+        await discard(target)
+        raise
+
+
+async def staged_listing(target: Target, installation_id: str) -> bytes:
+    async with _connected(target.dsn, target.staging_schema) as staging:
+        if not await _schema_exists(staging, target.staging_schema):
+            raise MoveRefused(f"{target.staging_schema} does not exist")
+        return listing(await _read(staging, installation_id, source=True))
+
+
+async def discard(target: Target) -> bool:
+    """Drops the staging schema; whether there was one."""
+    async with _connected(target.dsn, target.live_schema) as live:
+        existed = await _schema_exists(live, target.staging_schema)
+        await live.execute(f'DROP SCHEMA IF EXISTS "{target.staging_schema}" CASCADE')
+        return existed
+
+
+async def live_listing(target: Target, installation_id: str) -> bytes:
+    """The installation's live dataset, listed as its staging was."""
+    async with _connected(target.dsn, target.live_schema) as live:
+        return listing(await _read(live, installation_id, source=False))
+
+
+async def open_staged(target: Target, installation_id: str) -> None:
+    """Copies the staged rows into the live tables and drops the staging schema,
+    in one transaction, while the installation has no live rows."""
+    staging = target.staging_schema
+    async with _connected(target.dsn, target.live_schema) as live:
+        async with live.transaction() as tx:
+            if not await _schema_exists(tx, staging):
+                raise MoveRefused(f"{staging} does not exist")
+            staged = await tx.fetch_all(f"SELECT installation_id FROM {{{{tables.{staging}.installations}}}}")
+            if [row["installation_id"] for row in staged] != [installation_id]:
+                raise MoveRefused(f"{staging} is staged for {[row['installation_id'] for row in staged]}")
+            for table in TABLES:
+                if await tx.fetch_value(
+                    f"SELECT 1 FROM {{{{tables.{table}}}}} WHERE installation_id = $1 LIMIT 1", installation_id
+                ):
+                    raise MoveRefused(f"the installation already has live {table}")
+            for table, (columns, order) in TABLES.items():
+                names = ", ".join(column for column, _ in columns)
+                await tx.execute(
+                    f"INSERT INTO {{{{tables.{table}}}}} ({names}) SELECT {names}"
+                    f" FROM {{{{tables.{staging}.{table}}}}} WHERE installation_id = $1 ORDER BY {order}",
+                    installation_id,
+                )
+            await tx.execute(f'DROP SCHEMA "{staging}" CASCADE')

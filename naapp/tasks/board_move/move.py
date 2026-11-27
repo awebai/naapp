@@ -7,6 +7,8 @@ reason, before the board is moved.
 
 from __future__ import annotations
 
+import dataclasses
+import hashlib
 import json
 import re
 from collections import Counter
@@ -17,6 +19,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from aweb_naapp.runtime.authorization import GrantUnavailable
+from aweb_naapp.runtime.team_grants import TeamGrantSource
 from awid.team_ids import team_slug
 from pgdbm import AsyncDatabaseManager, AsyncMigrationManager, DatabaseConfig
 from pgdbm.core import TransactionManager
@@ -142,6 +146,41 @@ def stops(export: Export) -> list[Stop]:
     ]
 
 
+# --- the destination (step 1) ---------------------------------------------------
+
+READ_ONLY = frozenset({"tasks.read"})
+
+
+@dataclass(frozen=True)
+class Destination:
+    """The installation the exported team's live grant names, granting only
+    tasks.read, as the deployment's own grant-read key reads it."""
+
+    team_id: str
+    app_id: str
+    installation_id: str
+    generation: int
+
+
+async def destination(grants: TeamGrantSource, *, team_id: str, app_id: str) -> Destination:
+    """The team's active installation of this deployment, while it is read-only."""
+    try:
+        status = await grants.status_for(team_id)
+    except GrantUnavailable as unavailable:
+        raise MoveRefused(f"the installation authority is unavailable: {unavailable}") from unavailable
+    if (status is None or status.state != "active"
+            or status.installation_id is None or status.generation is None):
+        raise MoveRefused(f"{team_id} has no active installation of {app_id}")
+    if status.granted_scopes != READ_ONLY:
+        raise MoveRefused(
+            f"the installation for {team_id} grants {sorted(status.granted_scopes)}, not only tasks.read"
+        )
+    return Destination(
+        team_id=team_id, app_id=app_id,
+        installation_id=status.installation_id, generation=status.generation,
+    )
+
+
 # --- the moved dataset (step 4) -----------------------------------------------
 
 # The app's tables in the order they are written and listed, each with its
@@ -194,15 +233,18 @@ def _time(value: str | None) -> datetime | None:
     return None if value is None else datetime.fromisoformat(value)
 
 
-def dataset(export: Export, *, installation_id: str, app_id: str) -> Dataset:
-    """The export as the app's rows: numbers and the saved counter kept, actors
-    exactly as stored, no lease live, and every original the app has no field
-    for in the task's import entry."""
+def dataset(export: Export, destination: Destination) -> Dataset:
+    """The export as the rows of the exported team's installation: numbers and
+    the saved counter kept, actors exactly as stored, no lease live, and every
+    original the app has no field for in the task's import entry."""
+    if destination.team_id != export.team_id:
+        raise MoveRefused(f"the export is {export.team_id}'s, the destination {destination.team_id}'s")
     refused = stops(export)
     if refused:
         raise MoveRefused("the export has stops: " + ", ".join(stop.code for stop in refused))
+    installation_id = destination.installation_id
     exported_at = _time(export.document["exported_at"])
-    actor = {"app": app_id}
+    actor = {"app": destination.app_id}
     number_of = {task["task_id"]: task["task_number"] for task in export.kept}
 
     def event(kind: str, detail: dict[str, Any], *, number: int | None = None,
@@ -289,6 +331,7 @@ def dataset(export: Export, *, installation_id: str, app_id: str) -> Dataset:
             "events": events,
         },
         source=[
+            {"kind": "destination", **dataclasses.asdict(destination)},
             {"kind": "export", "team_id": export.team_id,
              "exported_at": export.document["exported_at"],
              "last_write_at": export.document["last_write_at"]},
@@ -375,18 +418,23 @@ def _record(row: Any, table: str) -> dict[str, Any]:
     return record
 
 
-async def _read(db: Any, installation_id: str, *, source: bool) -> Dataset:
+def _table(name: str, schema: str | None) -> str:
+    """A table of the connection's schema, or of the named one."""
+    return f"{{{{tables.{name}}}}}" if schema is None else f"{{{{tables.{schema}.{name}}}}}"
+
+
+async def _read(db: Any, installation_id: str, *, source: bool, schema: str | None = None) -> Dataset:
     rows = {}
     for table, (columns, order) in TABLES.items():
         names = ", ".join(column for column, _ in columns)
         fetched = await db.fetch_all(
-            f"SELECT {names} FROM {{{{tables.{table}}}}} WHERE installation_id = $1 ORDER BY {order}",
+            f"SELECT {names} FROM {_table(table, schema)} WHERE installation_id = $1 ORDER BY {order}",
             installation_id,
         )
         rows[table] = [_record(row, table) for row in fetched]
     records = []
     if source:
-        fetched = await db.fetch_all(f"SELECT record FROM {{{{tables.{SOURCE_TABLE}}}}} ORDER BY seq")
+        fetched = await db.fetch_all(f"SELECT record FROM {_table(SOURCE_TABLE, schema)} ORDER BY seq")
         records = [json.loads(row["record"]) for row in fetched]
     return Dataset(rows=rows, source=records)
 
@@ -408,10 +456,10 @@ async def _write(tx: Any, data: Dataset) -> None:
     )
 
 
-async def stage(target: Target, export: Export, *, installation_id: str, app_id: str) -> None:
+async def stage(target: Target, export: Export, destination: Destination) -> None:
     """Writes the export's dataset into a new staging schema, built by the app's
     own migrations; no member request reads or writes it."""
-    data = dataset(export, installation_id=installation_id, app_id=app_id)
+    data = dataset(export, destination)
     async with _connected(target.dsn, target.live_schema) as live:
         if await _schema_exists(live, target.staging_schema):
             raise MoveRefused(f"{target.staging_schema} exists: discard it, then stage from a new export")
@@ -432,11 +480,25 @@ async def stage(target: Target, export: Export, *, installation_id: str, app_id:
         raise
 
 
-async def staged_listing(target: Target, installation_id: str) -> bytes:
-    async with _connected(target.dsn, target.staging_schema) as staging:
-        if not await _schema_exists(staging, target.staging_schema):
+async def _staged(db: Any, *, schema: str | None = None) -> Dataset:
+    """The staging schema's one installation, with its source facts."""
+    installations = await db.fetch_all(f"SELECT installation_id FROM {_table('installations', schema)}")
+    if len(installations) != 1:
+        raise MoveRefused(f"the staging schema holds {len(installations)} installations, not one")
+    return await _read(db, installations[0]["installation_id"], source=True, schema=schema)
+
+
+async def staged_listing(target: Target) -> bytes:
+    # Through the live schema: connecting to a missing schema would create it.
+    async with _connected(target.dsn, target.live_schema) as live:
+        if not await _schema_exists(live, target.staging_schema):
             raise MoveRefused(f"{target.staging_schema} does not exist")
-        return listing(await _read(staging, installation_id, source=True))
+        return listing(await _staged(live, schema=target.staging_schema))
+
+
+def listing_digest(data: bytes) -> str:
+    """The SHA-256 of a listing, as `shasum -a 256` prints it."""
+    return hashlib.sha256(data).hexdigest()
 
 
 async def discard(target: Target) -> bool:
@@ -447,26 +509,33 @@ async def discard(target: Target) -> bool:
         return existed
 
 
-async def live_listing(target: Target, installation_id: str) -> bytes:
+async def live_listing(target: Target, destination: Destination) -> bytes:
     """The installation's live dataset, listed as its staging was."""
     async with _connected(target.dsn, target.live_schema) as live:
-        return listing(await _read(live, installation_id, source=False))
+        return listing(await _read(live, destination.installation_id, source=False))
 
 
-async def open_staged(target: Target, installation_id: str) -> None:
+async def open_staged(target: Target, destination: Destination, *, listing_sha256: str) -> None:
     """Copies the staged rows into the live tables and drops the staging schema,
-    in one transaction, while the installation has no live rows."""
+    in one transaction: only the staging contents whose listing the verifier
+    approved, staged for this destination, into an installation with no live rows."""
     staging = target.staging_schema
     async with _connected(target.dsn, target.live_schema) as live:
         async with live.transaction() as tx:
             if not await _schema_exists(tx, staging):
                 raise MoveRefused(f"{staging} does not exist")
-            staged = await tx.fetch_all(f"SELECT installation_id FROM {{{{tables.{staging}.installations}}}}")
-            if [row["installation_id"] for row in staged] != [installation_id]:
-                raise MoveRefused(f"{staging} is staged for {[row['installation_id'] for row in staged]}")
+            # Nothing changes the staged rows between the digest and the copy.
+            for table in (*TABLES, SOURCE_TABLE):
+                await tx.execute(f"LOCK TABLE {{{{tables.{staging}.{table}}}}} IN EXCLUSIVE MODE")
+            staged = await _staged(tx, schema=staging)
+            if listing_digest(listing(staged)) != listing_sha256:
+                raise MoveRefused(f"{staging} does not list as the approved listing {listing_sha256}")
+            if staged.source[0] != {"kind": "destination", **dataclasses.asdict(destination)}:
+                raise MoveRefused(f"{staging} was staged for {staged.source[0]}, not {destination}")
             for table in TABLES:
                 if await tx.fetch_value(
-                    f"SELECT 1 FROM {{{{tables.{table}}}}} WHERE installation_id = $1 LIMIT 1", installation_id
+                    f"SELECT 1 FROM {{{{tables.{table}}}}} WHERE installation_id = $1 LIMIT 1",
+                    destination.installation_id,
                 ):
                     raise MoveRefused(f"the installation already has live {table}")
             for table, (columns, order) in TABLES.items():
@@ -474,6 +543,7 @@ async def open_staged(target: Target, installation_id: str) -> None:
                 await tx.execute(
                     f"INSERT INTO {{{{tables.{table}}}}} ({names}) SELECT {names}"
                     f" FROM {{{{tables.{staging}.{table}}}}} WHERE installation_id = $1 ORDER BY {order}",
-                    installation_id,
+                    destination.installation_id,
                 )
             await tx.execute(f'DROP SCHEMA "{staging}" CASCADE')
+

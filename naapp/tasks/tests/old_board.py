@@ -18,8 +18,10 @@ from typing import Any
 from uuid import uuid4
 
 from aweb_naapp_testing import Member
+from nacl.signing import SigningKey
 
 DOMAIN = "board.example"
+NAMESPACE_KEY = SigningKey.generate()
 EXPORT_SQL = Path(__file__).resolve().parents[1] / "board_move" / "export.sql"
 
 
@@ -101,7 +103,7 @@ async def old_board(coordination: Any, connection: Any, aliases: list[str]) -> O
         for i, alias in enumerate(aliases[1:], start=2)
     }
     for member in members.values():
-        await coordination.add_member(member)
+        await coordination.add_member(member, namespace_controller=NAMESPACE_KEY)
     await coordination.publish_server(first)
     for member in members.values():
         await coordination.connect(member)

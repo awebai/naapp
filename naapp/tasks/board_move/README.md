@@ -10,12 +10,15 @@ landed commit. Someone other than the script's author verifies step 5.
 
 ## Before step 3
 
-- **Step 1:** the app is installed on the team, granting only `tasks.read`. Note the installation id.
+- **Step 1:** the app is installed on the team, granting only `tasks.read`.
 - **Step 2:** every writer is stopped, and that has been shown.
-- The Tasks database settings are in the environment:
+- **The environment is the Tasks deployment's own `TASKS_*` configuration:**
   - `TASKS_DATABASE_URL`: a role that can create and drop a schema in the Tasks database.
   - `TASKS_DB_SCHEMA`: the deployment's live schema; `public` when unset.
+  - its app id, origin, registry settings and `TASKS_APP_KEY_FILES`, including the grant-read key.
 - **The staging schema is `<TASKS_DB_SCHEMA>_board_move`,** for example `public_board_move`. It must not exist before step 4.
+
+**The destination is never typed in.** Every command that names the installation reads the exported team's live grant, with the deployment's own grant-read key, as the running app does. It refuses (exit 3) unless that grant is active and grants exactly `tasks.read`. The listings name the installation id and generation it found, so the verifier sees which installation the board is bound to.
 
 ## Step 3: export
 
@@ -33,17 +36,18 @@ The query stops, writing nothing, if any task table has columns other than those
 
 ## Step 4: stage
 
-    uv run python -m board_move stage export.json --installation-id <id> --app-id tasks
+    uv run python -m board_move stage export.json
 
 - This builds the staging schema with the app's own migrations and writes the board into it.
 - Nothing in the live tables changes, so `tasks.read` can't reach the staged rows.
-- It refuses (exit 3) if the export has stops or the staging schema already exists.
+- It refuses (exit 3) if the export has stops, if the team's grant is not active and read-only, or if the staging schema already exists.
 
 ## Step 5: verify
 
-    uv run python -m board_move list-export export.json --installation-id <id> --app-id tasks > from-export.jsonl
-    uv run python -m board_move list-staged --installation-id <id> > from-staging.jsonl
+    uv run python -m board_move list-export export.json > from-export.jsonl
+    uv run python -m board_move list-staged > from-staging.jsonl
     cmp from-export.jsonl from-staging.jsonl
+    shasum -a 256 from-staging.jsonl
 
 **The two listings must be identical, byte for byte.** One line per row, in a fixed order:
 - the counter
@@ -55,12 +59,15 @@ The query stops, writing nothing, if any task table has columns other than those
 - the event log
 - then the ref-to-number map
 - then the source facts the app doesn't hold:
+  - the destination: team, app id, installation id and generation
   - the export time and the board's last write time
   - the root task counter
   - each deleted task
   - each expired lock
 
 Read the board's last write time again with a fresh export, as a cross-check.
+
+**The verifier approves the staging listing by its SHA-256.** Step 6 opens only the staging contents with that digest.
 
 **What the comparison proves.** The export-side listing goes through the same mapping the import used. So equal listings prove the staged rows are what the mapping produces from this export. They don't prove the mapping is right. The verifier reads the mapping in `move.py` (`dataset`) against the rulings listed in the pull request.
 
@@ -70,19 +77,22 @@ Read the board's last write time again with a fresh export, as a cross-check.
 
 ## Step 6: open
 
-    uv run python -m board_move open --installation-id <id>
+    uv run python -m board_move open export.json --listing-sha256 <the approved digest>
 
-In one transaction this does three things:
-- it refuses unless the staging schema is staged for this installation and the installation has no live rows;
-- it copies the staged rows into the live tables;
-- it drops the staging schema.
+It reads the team's grant afresh, then in one transaction:
+- locks the staging tables, so nothing changes them until the transaction ends;
+- refuses unless the staging lists with the approved digest, was staged for the installation and generation the grant names now, and the installation has no live rows;
+- copies the staged rows into the live tables;
+- drops the staging schema.
+
+A refusal copies and drops nothing.
 
 Then grant `tasks.write` and `tasks.override`.
 
 **The rollback boundary is the app's first write after opening.** To confirm that no write has committed:
 
-    uv run python -m board_move list-export export.json --installation-id <id> --app-id tasks --dataset-only > dataset.jsonl
-    uv run python -m board_move list-live --installation-id <id> > live.jsonl
+    uv run python -m board_move list-export export.json --dataset-only > dataset.jsonl
+    uv run python -m board_move list-live export.json > live.jsonl
     cmp dataset.jsonl live.jsonl
 
 The live dataset lists exactly as staged until the app's first write.

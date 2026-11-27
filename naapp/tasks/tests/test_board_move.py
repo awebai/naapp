@@ -8,23 +8,41 @@ against that server's database; the target is a real Tasks database.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
+import hashlib
+import io
 import json
 import os
 import subprocess
 import sys
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import pytest
+from aweb.app_manifests import FetchedManifest
+from aweb.installations import install_verified_manifest_on, uninstall_installation_on
+from aweb_naapp.manifest import load_manifest
+from aweb_naapp.outbox import RetryPolicy
+from aweb_naapp.runtime.event_emit import AppEvents
 from awid.team_ids import team_slug
+from awid_service.testing import REGISTRY_URL, SERVICE_TOKEN, dns_naming
 from pgdbm import AsyncMigrationManager
 
-from aweb_tasks.app import MIGRATIONS_PATH
+from aweb_tasks.app import MIGRATIONS_PATH, create_app
+from aweb_tasks.config import TasksSettings
+from aweb_tasks.store import TaskStore
+from board_move import __main__ as cli
 from board_move import move
 
-from .old_board import OldBoard, old_board
-from .test_store import store
+from .deployment import TEST_APP_ID, served_manifest, write_key_files
+from .old_board import DOMAIN, NAMESPACE_KEY, OldBoard, old_board
+from .test_store import principal
+
+ORIGIN = "https://tasks.example.test"
 
 
 @pytest.fixture
@@ -268,8 +286,32 @@ async def test_export_stops_on_a_counter_behind_its_numbers(board: OldBoard, tmp
     assert await stop_codes(board, tmp_path) == {"counter_behind_numbers": ["2"]}
 
 
-INSTALLATION = "installation-1"
-APP_ID = "tasks"
+@dataclass
+class Deployment:
+    """The Tasks deployment the move targets: its settings, and the live grant
+    source its own grant-read key reads the team's installation through."""
+
+    settings: TasksSettings
+    grants: Any
+    app_id: str
+    manifest: bytes
+    server_db: Any
+
+    async def install(self, team_id: str, scopes: list[str], *, expected_generation: int | None = None) -> dict:
+        manifest = load_manifest(self.manifest)
+        fetched = FetchedManifest(
+            origin=ORIGIN, url=ORIGIN + "/.well-known/aweb-app.json",
+            digest="sha256:" + hashlib.sha256(self.manifest).hexdigest(), data=self.manifest,
+            manifest=manifest,
+        )
+        async with self.server_db.transaction() as tx:
+            return await install_verified_manifest_on(
+                tx, team_id=team_id, fetched=fetched, granted_scopes=scopes,
+                expected_generation=expected_generation,
+            )
+
+    async def destination(self, team_id: str) -> move.Destination:
+        return await move.destination(self.grants, team_id=team_id, app_id=self.app_id)
 
 
 @pytest.fixture
@@ -281,8 +323,101 @@ async def live(tasks_db: Any) -> Any:
     return tasks_db
 
 
+@pytest.fixture
+async def deployment(coordination: Any, live: Any, tmp_path: Path) -> AsyncIterator[Deployment]:
+    key_files = write_key_files(tmp_path)
+    settings = TasksSettings(
+        _env_file=None, database_url=live.config.get_dsn(), db_schema=live.schema,
+        app_id=TEST_APP_ID, public_origin=ORIGIN, awid_registry_url=REGISTRY_URL,
+        awid_service_token=SERVICE_TOKEN, app_key_files=key_files,
+    )
+    app = create_app(
+        settings, awid_transport=coordination.registry.transport,
+        awid_txt_resolver=dns_naming(DOMAIN, NAMESPACE_KEY),
+        team_server_transport=coordination.server.transport,
+    )
+    runtime = app.state.runtime
+    async with app.router.lifespan_context(app):
+        yield Deployment(
+            settings=settings, grants=runtime.installation_grants(), app_id=runtime.manifest.app_id,
+            manifest=served_manifest(key_files, origin=ORIGIN),
+            server_db=coordination.server.db.get_manager("aweb"),
+        )
+
+
+@pytest.fixture
+async def installed(board: OldBoard, deployment: Deployment) -> dict:
+    """Step 1: the app installed on the exported team, granting only tasks.read."""
+    return await deployment.install(board.team_id, ["tasks.read"])
+
+
+async def test_the_destination_is_the_exported_teams_read_only_installation(
+    board: OldBoard, deployment: Deployment, installed: dict
+) -> None:
+    destination = await deployment.destination(board.team_id)
+
+    assert destination == move.Destination(
+        team_id=board.team_id, app_id=deployment.app_id,
+        installation_id=installed["installation_id"], generation=installed["generation"],
+    )
+
+
+async def test_the_destination_refuses_a_team_the_installation_is_not_for(
+    board: OldBoard, coordination: Any, tasks_db: Any, deployment: Deployment, installed: dict
+) -> None:
+    neighbour = await old_board(coordination, tasks_db, ["carol"])
+
+    with pytest.raises(move.MoveRefused, match="no active installation"):
+        await deployment.destination(neighbour.team_id)
+
+
+async def test_the_destination_refuses_an_uninstalled_installation(
+    board: OldBoard, deployment: Deployment, installed: dict
+) -> None:
+    async with deployment.server_db.transaction() as tx:
+        await uninstall_installation_on(
+            tx, team_id=board.team_id, app_id=deployment.app_id, expected_generation=installed["generation"],
+        )
+
+    with pytest.raises(move.MoveRefused, match="no active installation"):
+        await deployment.destination(board.team_id)
+
+
+async def test_the_destination_refuses_an_installation_that_grants_writes(
+    board: OldBoard, deployment: Deployment
+) -> None:
+    await deployment.install(board.team_id, ["tasks.read", "tasks.write", "tasks.override"])
+
+    with pytest.raises(move.MoveRefused, match="not only tasks.read"):
+        await deployment.destination(board.team_id)
+
+
+INSTALLATION = "installation-mapping"
+
+
+def destination_of(exported: move.Export) -> move.Destination:
+    """A destination value for the pure mapping; staging and opening read the live grant."""
+    return move.Destination(
+        team_id=exported.team_id, app_id=TEST_APP_ID, installation_id=INSTALLATION, generation=1,
+    )
+
+
 def target(live: Any) -> move.Target:
     return move.Target(dsn=live.config.get_dsn(), live_schema=live.schema)
+
+
+def app_store(live: Any, destination: move.Destination, alias: str) -> TaskStore:
+    """The app's own store on the moved installation, acting for one member."""
+    events = AppEvents(app_id=destination.app_id, origin=None, key=None,
+                       policy=RetryPolicy(stalled_after=timedelta(hours=1)))
+    return TaskStore(live, installation_id=destination.installation_id, principal=principal(alias),
+                     events=events, app_id=destination.app_id)
+
+
+async def staging_exists(live: Any) -> bool:
+    return bool(await live.fetch_value(
+        "SELECT 1 FROM pg_namespace WHERE nspname = $1", target(live).staging_schema
+    ))
 
 
 async def full_board(board: OldBoard) -> dict[str, dict[str, Any]]:
@@ -313,44 +448,13 @@ async def full_board(board: OldBoard) -> dict[str, dict[str, Any]]:
     return {"epic": epic, "script": script, "chore": chore, "done": done, "gone": gone}
 
 
-async def test_the_staged_board_lists_exactly_as_its_export(
-    board: OldBoard, live: Any, tmp_path: Path
-) -> None:
-    await full_board(board)
-    exported = move.Export(await export(board, tmp_path))
-
-    await move.stage(target(live), exported, installation_id=INSTALLATION, app_id=APP_ID)
-
-    expected = move.listing(move.dataset(exported, installation_id=INSTALLATION, app_id=APP_ID))
-    assert await move.staged_listing(target(live), INSTALLATION) == expected
-    # Staging is out of reach of the installation's members: the live tables hold none of it.
-    for table in ("installations", "tasks", "claims", "locks", "comments", "dependencies", "events"):
-        assert await live.fetch_value(f"SELECT count(*) FROM {{{{tables.{table}}}}}") == 0, table
-
-
-async def test_a_staged_row_that_differs_from_the_export_shows_in_the_listing(
-    board: OldBoard, live: Any, tmp_path: Path
-) -> None:
-    tasks = await full_board(board)
-    exported = move.Export(await export(board, tmp_path))
-    await move.stage(target(live), exported, installation_id=INSTALLATION, app_id=APP_ID)
-    expected = move.listing(move.dataset(exported, installation_id=INSTALLATION, app_id=APP_ID))
-
-    await live.execute(
-        f'UPDATE "{target(live).staging_schema}".tasks SET title = $1 WHERE number = $2',
-        "Written by someone else", tasks["script"]["task_number"],
-    )
-
-    assert await move.staged_listing(target(live), INSTALLATION) != expected
-
-
 async def test_the_dataset_follows_each_mapping_rule(board: OldBoard, tmp_path: Path) -> None:
     tasks = await full_board(board)
     exported = move.Export(await export(board, tmp_path))
     by_id = {task["task_id"]: task for task in exported.tasks}
     number = {name: task["task_number"] for name, task in tasks.items()}
 
-    data = move.dataset(exported, installation_id=INSTALLATION, app_id=APP_ID)
+    data = move.dataset(exported, destination_of(exported))
     rows = data.rows
     staged = {task["number"]: task for task in rows["tasks"]}
     imported = {e["number"]: e["detail"] for e in rows["events"] if e["kind"] == "imported"}
@@ -392,7 +496,7 @@ async def test_the_dataset_follows_each_mapping_rule(board: OldBoard, tmp_path: 
     )
     [locked] = [e for e in rows["events"] if e["kind"] == "lock_not_proven"]
     assert (locked["resource"], locked["detail"]["metadata_json"]) == ("naapp/tasks", {"reason": "writing"})
-    assert {e["actor"]["app"] for e in rows["events"]} == {APP_ID}
+    assert {e["actor"]["app"] for e in rows["events"]} == {TEST_APP_ID}
     assert {e["cause"] for e in rows["events"]} == {"board-move"}
     assert [(c["author"], c["body"]) for c in rows["comments"]] == [
         ({"alias": "bob"}, "Taking it"), ({"alias": "alice"}, "Thanks"),
@@ -402,58 +506,99 @@ async def test_the_dataset_follows_each_mapping_rule(board: OldBoard, tmp_path: 
     ]
     # What the app does not hold is in the listing's source facts.
     kinds = [record["kind"] for record in data.source]
-    assert kinds == ["export", "root_task_counter", "deleted_task", "expired_lock"]
-    assert data.source[1]["next_number"] == exported.document["root_task_counter"]
-    assert data.source[2]["ref"] == tasks["gone"]["task_ref"]
-    assert data.source[3]["resource_key"] == "old/lock"
+    assert kinds == ["destination", "export", "root_task_counter", "deleted_task", "expired_lock"]
+    assert data.source[0] == {"kind": "destination", **dataclasses.asdict(destination_of(exported))}
+    assert data.source[2]["next_number"] == exported.document["root_task_counter"]
+    assert data.source[3]["ref"] == tasks["gone"]["task_ref"]
+    assert data.source[4]["resource_key"] == "old/lock"
 
 
-async def test_stage_refuses_an_export_with_stops(board: OldBoard, live: Any, tmp_path: Path) -> None:
-    await board.create("alice", title=" ")
+async def test_the_dataset_is_only_for_the_exported_teams_destination(
+    board: OldBoard, tmp_path: Path
+) -> None:
+    await board.create("alice", title="Ours")
     exported = move.Export(await export(board, tmp_path))
+    elsewhere = dataclasses.replace(destination_of(exported), team_id="other-team:board.example")
+
+    with pytest.raises(move.MoveRefused, match="the destination other-team"):
+        move.dataset(exported, elsewhere)
+
+
+async def staged(board: OldBoard, live: Any, deployment: Deployment, tmp_path: Path,
+                 ) -> tuple[move.Export, move.Destination, bytes]:
+    """Steps 3 to 5: the export, staged for the team's installation, and its listing."""
+    exported = move.Export(await export(board, tmp_path))
+    destination = await deployment.destination(board.team_id)
+    await move.stage(target(live), exported, destination)
+    return exported, destination, await move.staged_listing(target(live))
+
+
+async def test_the_staged_board_lists_exactly_as_its_export(
+    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
+) -> None:
+    await full_board(board)
+
+    exported, destination, from_staging = await staged(board, live, deployment, tmp_path)
+
+    assert from_staging == move.listing(move.dataset(exported, destination))
+    assert destination.installation_id == installed["installation_id"]
+    # Staging is out of reach of the installation's members: the live tables hold none of it.
+    for table in ("installations", "tasks", "claims", "locks", "comments", "dependencies", "events"):
+        assert await live.fetch_value(f"SELECT count(*) FROM {{{{tables.{table}}}}}") == 0, table
+
+
+async def test_a_staged_row_that_differs_from_the_export_shows_in_the_listing(
+    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
+) -> None:
+    tasks = await full_board(board)
+    exported, destination, _ = await staged(board, live, deployment, tmp_path)
+
+    await live.execute(
+        f'UPDATE "{target(live).staging_schema}".tasks SET title = $1 WHERE number = $2',
+        "Written by someone else", tasks["script"]["task_number"],
+    )
+
+    assert await move.staged_listing(target(live)) != move.listing(move.dataset(exported, destination))
+
+
+async def test_stage_refuses_an_export_with_stops(
+    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
+) -> None:
+    await board.create("alice", title=" ")
 
     with pytest.raises(move.MoveRefused, match="blank_title"):
-        await move.stage(target(live), exported, installation_id=INSTALLATION, app_id=APP_ID)
-    assert not await live.fetch_value(
-        "SELECT 1 FROM pg_namespace WHERE nspname = $1", target(live).staging_schema
-    )
+        await staged(board, live, deployment, tmp_path)
+    assert not await staging_exists(live)
 
 
 async def test_a_retry_stages_only_after_the_last_stage_is_discarded(
-    board: OldBoard, live: Any, tmp_path: Path
+    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
 ) -> None:
     await board.create("alice", title="One")
-    first = move.Export(await export(board, tmp_path))
-    await move.stage(target(live), first, installation_id=INSTALLATION, app_id=APP_ID)
+    await staged(board, live, deployment, tmp_path)
     await board.create("alice", title="Two")
-    second = move.Export(await export(board, tmp_path))
 
     with pytest.raises(move.MoveRefused, match="exists"):
-        await move.stage(target(live), second, installation_id=INSTALLATION, app_id=APP_ID)
+        await staged(board, live, deployment, tmp_path)
     assert await move.discard(target(live)) is True
-    await move.stage(target(live), second, installation_id=INSTALLATION, app_id=APP_ID)
+    exported, destination, from_staging = await staged(board, live, deployment, tmp_path)
 
-    assert await move.staged_listing(target(live), INSTALLATION) == move.listing(
-        move.dataset(second, installation_id=INSTALLATION, app_id=APP_ID)
-    )
+    assert from_staging == move.listing(move.dataset(exported, destination))
 
 
-async def test_open_makes_the_staged_board_the_installation_dataset(
-    board: OldBoard, live: Any, tmp_path: Path
+async def test_open_makes_the_approved_staging_the_installation_dataset(
+    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
 ) -> None:
     tasks = await full_board(board)
-    exported = move.Export(await export(board, tmp_path))
-    data = move.dataset(exported, installation_id=INSTALLATION, app_id=APP_ID)
-    await move.stage(target(live), exported, installation_id=INSTALLATION, app_id=APP_ID)
+    exported, destination, from_staging = await staged(board, live, deployment, tmp_path)
 
-    await move.open_staged(target(live), INSTALLATION)
+    await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(from_staging))
 
-    assert await move.live_listing(target(live), INSTALLATION) == move.listing(data, source=False)
-    assert not await live.fetch_value(
-        "SELECT 1 FROM pg_namespace WHERE nspname = $1", target(live).staging_schema
-    )
+    data = move.dataset(exported, destination)
+    assert await move.live_listing(target(live), destination) == move.listing(data, source=False)
+    assert not await staging_exists(live)
     # The app itself reads and writes the moved board.
-    alice = store(live, "alice")
+    alice = app_store(live, destination, "alice")
     script = tasks["script"]["task_number"]
     assert (await alice.show(script))["title"] == "Write the script"
     history = await alice.history(script)
@@ -469,43 +614,124 @@ async def test_open_makes_the_staged_board_the_installation_dataset(
     claimed = await alice.claim(script)
     assert claimed["claim"]["holder_alias"] == "alice"
     # The rollback boundary: after the app's first write the dataset no longer lists as staged.
-    assert await move.live_listing(target(live), INSTALLATION) != move.listing(data, source=False)
+    assert await move.live_listing(target(live), destination) != move.listing(data, source=False)
+
+
+async def test_open_refuses_staging_that_changed_after_its_listing_was_approved(
+    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
+) -> None:
+    tasks = await full_board(board)
+    _, destination, approved = await staged(board, live, deployment, tmp_path)
+    await live.execute(
+        f'UPDATE "{target(live).staging_schema}".tasks SET title = $1 WHERE number = $2',
+        "Written by someone else", tasks["script"]["task_number"],
+    )
+    changed = await move.staged_listing(target(live))
+
+    with pytest.raises(move.MoveRefused, match="does not list as the approved listing"):
+        await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved))
+
+    assert await move.staged_listing(target(live)) == changed
+    assert await move.live_listing(target(live), destination) == b""
+
+
+async def test_open_refuses_a_stage_replaced_after_its_listing_was_approved(
+    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
+) -> None:
+    await board.create("alice", title="One")
+    _, destination, approved = await staged(board, live, deployment, tmp_path)
+    await move.discard(target(live))
+    await board.create("alice", title="Two")
+    _, _, replacement = await staged(board, live, deployment, tmp_path)
+
+    with pytest.raises(move.MoveRefused, match="does not list as the approved listing"):
+        await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved))
+
+    assert await move.staged_listing(target(live)) == replacement
+    assert await move.live_listing(target(live), destination) == b""
+
+
+async def test_open_refuses_when_the_installation_changed_after_staging(
+    board: OldBoard, live: Any, deployment: Deployment, coordination: Any, installed: dict,
+    tmp_path: Path,
+) -> None:
+    await board.create("alice", title="One")
+    exported, staged_for, approved = await staged(board, live, deployment, tmp_path)
+    reinstalled = await deployment.install(
+        board.team_id, ["tasks.read"], expected_generation=installed["generation"]
+    )
+    # Each command reads the grant afresh, as a new process does.
+    async with cli.destination_of(exported, deployment.settings, app_options(coordination)) as now:
+        assert now.generation == reinstalled["generation"] != staged_for.generation
+
+        with pytest.raises(move.MoveRefused, match="was staged for"):
+            await move.open_staged(target(live), now, listing_sha256=move.listing_digest(approved))
+
+    assert await move.staged_listing(target(live)) == approved
 
 
 async def test_open_refuses_an_installation_that_already_has_rows(
-    board: OldBoard, live: Any, tmp_path: Path
+    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
 ) -> None:
     await board.create("alice", title="Old")
-    exported = move.Export(await export(board, tmp_path))
-    await move.stage(target(live), exported, installation_id=INSTALLATION, app_id=APP_ID)
-    await store(live, "alice").create(
+    _, destination, approved = await staged(board, live, deployment, tmp_path)
+    await app_store(live, destination, "alice").create(
         title="Written in the app first", body="", type="task", priority=2, labels=[], parent=None,
         assignee=None,
     )
-    before = await move.live_listing(target(live), INSTALLATION)
+    before = await move.live_listing(target(live), destination)
 
     with pytest.raises(move.MoveRefused, match="already has"):
-        await move.open_staged(target(live), INSTALLATION)
+        await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved))
 
-    assert await move.live_listing(target(live), INSTALLATION) == before
-    assert await move.staged_listing(target(live), INSTALLATION) == move.listing(
-        move.dataset(exported, installation_id=INSTALLATION, app_id=APP_ID)
+    assert await move.live_listing(target(live), destination) == before
+    assert await move.staged_listing(target(live)) == approved
+
+
+def app_options(coordination: Any) -> dict[str, Any]:
+    """How the app reaches the in-process registry and server."""
+    return {
+        "awid_transport": coordination.registry.transport,
+        "awid_txt_resolver": dns_naming(DOMAIN, NAMESPACE_KEY),
+        "team_server_transport": coordination.server.transport,
+    }
+
+
+async def command(deployment: Deployment, coordination: Any, *args: str) -> bytes:
+    """One operator command, in-process, with the deployment's settings; the app
+    reaches the in-process registry and server through their transports."""
+    out = io.BytesIO()
+    status = await cli.run(
+        list(args), settings=deployment.settings, out=out, app_options=app_options(coordination),
     )
+    assert status == 0
+    return out.getvalue()
 
 
-async def test_open_refuses_another_installation(board: OldBoard, live: Any, tmp_path: Path) -> None:
-    await board.create("alice", title="Old")
-    exported = move.Export(await export(board, tmp_path))
-    await move.stage(target(live), exported, installation_id=INSTALLATION, app_id=APP_ID)
+async def test_the_operator_moves_the_board_with_the_commands(
+    board: OldBoard, live: Any, deployment: Deployment, coordination: Any, installed: dict,
+    tmp_path: Path,
+) -> None:
+    await full_board(board)
+    path = tmp_path / "export.json"
+    assert (await board.export(path)).returncode == 0
 
-    with pytest.raises(move.MoveRefused, match="staged for"):
-        await move.open_staged(target(live), "inst-other")
-
-    assert await move.live_listing(target(live), "inst-other") == b""
+    assert await command(deployment, coordination, "check", str(path)) == b"no stops\n"
+    from_export = await command(deployment, coordination, "list-export", str(path))
+    await command(deployment, coordination, "stage", str(path))
+    from_staging = await command(deployment, coordination, "list-staged")
+    assert from_staging == from_export
+    digest = hashlib.sha256(from_staging).hexdigest()
+    await command(deployment, coordination, "open", str(path), "--listing-sha256", digest)
+    dataset_only = await command(deployment, coordination, "list-export", str(path), "--dataset-only")
+    from_live = await command(deployment, coordination, "list-live", str(path))
+    assert from_live == dataset_only
+    assert from_live and len(from_live) < len(from_export)
+    assert installed["installation_id"].encode() in from_export
 
 
 def run(live: Any, *args: str) -> subprocess.CompletedProcess[bytes]:
-    """The operator's command, as the README gives it, with the deployment's database settings."""
+    """An operator command as a process, with the deployment's database settings."""
     env = {**os.environ, "TASKS_DATABASE_URL": live.config.get_dsn(), "TASKS_DB_SCHEMA": live.schema}
     return subprocess.run(
         [sys.executable, "-m", "board_move", *args],
@@ -513,37 +739,12 @@ def run(live: Any, *args: str) -> subprocess.CompletedProcess[bytes]:
     )
 
 
-async def test_the_operator_moves_the_board_with_the_commands(
-    board: OldBoard, live: Any, tmp_path: Path
-) -> None:
-    await full_board(board)
-    path = tmp_path / "export.json"
-    assert (await board.export(path)).returncode == 0
-    ids = ["--installation-id", INSTALLATION, "--app-id", APP_ID]
-
-    checked = await asyncio.to_thread(run, live, "check", str(path))
-    assert (checked.returncode, checked.stdout, checked.stderr) == (0, b"no stops\n", b"")
-    from_export = await asyncio.to_thread(run, live, "list-export", str(path), *ids)
-    assert from_export.returncode == 0, from_export.stderr
-    staged = await asyncio.to_thread(run, live, "stage", str(path), *ids)
-    assert staged.returncode == 0, staged.stderr
-    from_staging = await asyncio.to_thread(run, live, "list-staged", "--installation-id", INSTALLATION)
-    assert (from_staging.returncode, from_staging.stdout) == (0, from_export.stdout)
-    opened = await asyncio.to_thread(run, live, "open", "--installation-id", INSTALLATION)
-    assert opened.returncode == 0, opened.stderr
-    dataset_only = await asyncio.to_thread(run, live, "list-export", str(path), *ids, "--dataset-only")
-    from_live = await asyncio.to_thread(run, live, "list-live", "--installation-id", INSTALLATION)
-    assert (from_live.returncode, from_live.stdout) == (0, dataset_only.stdout)
-    assert from_live.stdout and len(from_live.stdout) < len(from_export.stdout)
-
-
-async def test_the_commands_refuse_with_the_stop_or_the_reason(
+async def test_the_commands_exit_with_the_stop_or_the_refusal(
     board: OldBoard, live: Any, tmp_path: Path
 ) -> None:
     task = await board.create("alice", title=" ")
     path = tmp_path / "export.json"
     assert (await board.export(path)).returncode == 0
-    ids = ["--installation-id", INSTALLATION, "--app-id", APP_ID]
 
     checked = await asyncio.to_thread(run, live, "check", str(path))
     assert checked.returncode == 2
@@ -551,7 +752,12 @@ async def test_the_commands_refuse_with_the_stop_or_the_reason(
         "code": "blank_title", "reason": "a task's title is blank, which the app refuses",
         "subjects": [task["task_ref"]],
     }
-    staged = await asyncio.to_thread(run, live, "stage", str(path), *ids)
-    assert (staged.returncode, staged.stderr) == (3, b"refused: the export has stops: blank_title\n")
-    opened = await asyncio.to_thread(run, live, "open", "--installation-id", INSTALLATION)
-    assert (opened.returncode, opened.stderr) == (3, f"refused: {target(live).staging_schema} does not exist\n".encode())
+    listed = await asyncio.to_thread(run, live, "list-staged")
+    assert (listed.returncode, listed.stderr) == (
+        3, f"refused: {target(live).staging_schema} does not exist\n".encode(),
+    )
+    assert not await staging_exists(live)
+    discarded = await asyncio.to_thread(run, live, "discard")
+    assert (discarded.returncode, discarded.stdout) == (
+        0, f"{target(live).staging_schema} did not exist\n".encode(),
+    )

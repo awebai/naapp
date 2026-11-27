@@ -382,11 +382,13 @@ async def deployment(coordination: Any, live: Any, tmp_path: Path) -> AsyncItera
         _env_file=None, database_url=live.config.get_dsn(), db_schema=live.schema,
         app_id=TEST_APP_ID, public_origin=ORIGIN, awid_registry_url=REGISTRY_URL,
         awid_service_token=SERVICE_TOKEN, app_key_files=key_files,
+        # The coordination server is the operator's own, on its network.
+        **coordination.site.settings(),
     )
     app = create_app(
         settings, awid_transport=coordination.registry.transport,
         awid_txt_resolver=dns_naming(DOMAIN, NAMESPACE_KEY),
-        team_server_transport=coordination.server.transport,
+        resolver=coordination.site.resolver(),
     )
     runtime = app.state.runtime
     async with app.router.lifespan_context(app):
@@ -974,13 +976,13 @@ def app_options(coordination: Any) -> dict[str, Any]:
     return {
         "awid_transport": coordination.registry.transport,
         "awid_txt_resolver": dns_naming(DOMAIN, NAMESPACE_KEY),
-        "team_server_transport": coordination.server.transport,
+        "resolver": coordination.site.resolver(),
     }
 
 
 async def command(deployment: Deployment, coordination: Any, *args: str) -> str:
     """One operator job, in-process, with the deployment's settings; the app
-    reaches the in-process registry and server through their transports."""
+    reaches the in-process registry through its transport and the server at its site."""
     out = io.StringIO()
     status = await cli.run(
         list(args), settings=deployment.settings, out=out, app_options=app_options(coordination),

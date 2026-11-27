@@ -43,7 +43,7 @@ from aweb_tasks.store import TaskStore
 
 from .deployment import TEST_APP_ID, served_manifest, write_key_files
 from .old_board import DOMAIN, NAMESPACE_KEY, OldBoard, old_board
-from .test_store import principal
+from .test_store import principal, waiting_on_locks
 
 ORIGIN = "https://tasks.example.test"
 
@@ -641,6 +641,21 @@ async def test_a_retry_stages_only_from_a_new_load_after_a_discard(
     assert [task["title"] for task in exported.tasks] == ["One", "Two"]
 
 
+async def test_an_export_changed_after_loading_is_refused_under_its_hash(
+    board: OldBoard, live: Any, tmp_path: Path
+) -> None:
+    await board.create("alice", title="As exported")
+    unchanged = await loaded(board, live, tmp_path)
+    assert unchanged.tasks[0]["title"] == "As exported"
+    await live.execute(
+        f'UPDATE "{target(live).staging_schema}".board_move_export'
+        " SET document = replace(document, 'As exported', 'Changed after')"
+    )
+
+    with pytest.raises(move.MoveRefused, match="does not match its sha256"):
+        await move.read_export(target(live))
+
+
 async def test_the_loader_refuses_a_staging_schema_that_exists(
     board: OldBoard, live: Any, tmp_path: Path
 ) -> None:
@@ -690,7 +705,7 @@ async def test_open_makes_the_approved_staging_the_installation_dataset(
     tasks = await full_board(board)
     exported, destination, from_staging = await staged(board, live, deployment, tmp_path)
 
-    await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(from_staging))
+    await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(from_staging), current=lambda: deployment.destination(board.team_id))
 
     data = move.dataset(exported, destination)
     assert await move.live_listing(target(live), destination) == move.listing(data, source=False)
@@ -736,7 +751,7 @@ async def test_a_rolled_back_installation_refuses_every_write_once_resumed(
 ) -> None:
     await board.create("alice", title="Old")
     _, destination, approved = await staged(board, live, deployment, tmp_path)
-    await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved))
+    await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved), current=lambda: deployment.destination(board.team_id))
     opened = await deployment.install(
         board.team_id, ["tasks.read", "tasks.write", "tasks.override"],
         expected_generation=installed["generation"],
@@ -764,7 +779,7 @@ async def test_open_refuses_staging_that_changed_after_its_listing_was_approved(
     changed = await move.staged_listing(target(live))
 
     with pytest.raises(move.MoveRefused, match="does not list as the approved listing"):
-        await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved))
+        await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved), current=lambda: deployment.destination(board.team_id))
 
     assert await move.staged_listing(target(live)) == changed
     assert await move.live_listing(target(live), destination) == b""
@@ -780,7 +795,7 @@ async def test_open_refuses_a_stage_replaced_after_its_listing_was_approved(
     _, _, replacement = await staged(board, live, deployment, tmp_path)
 
     with pytest.raises(move.MoveRefused, match="does not list as the approved listing"):
-        await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved))
+        await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved), current=lambda: deployment.destination(board.team_id))
 
     assert await move.staged_listing(target(live)) == replacement
     assert await move.live_listing(target(live), destination) == b""
@@ -799,10 +814,43 @@ async def test_open_refuses_when_the_installation_changed_after_staging(
     async with cli.destination_of(exported.team_id, deployment.settings, app_options(coordination)) as now:
         assert now.generation == reinstalled["generation"] != staged_for.generation
 
+        async def current() -> move.Destination:
+            return now
+
         with pytest.raises(move.MoveRefused, match="was staged for"):
-            await move.open_staged(target(live), now, listing_sha256=move.listing_digest(approved))
+            await move.open_staged(target(live), now, listing_sha256=move.listing_digest(approved), current=current)
 
     assert await move.staged_listing(target(live)) == approved
+
+
+@pytest.mark.parametrize(("scopes", "refusal"), [
+    (["tasks.read"], "changed while open waited"),
+    (["tasks.read", "tasks.write", "tasks.override"], "not only tasks.read"),
+])
+async def test_open_refuses_an_installation_changed_while_it_waited_for_the_staging_locks(
+    board: OldBoard, live: Any, deployment: Deployment, coordination: Any, installed: dict,
+    tmp_path: Path, scopes: list[str], refusal: str,
+) -> None:
+    await board.create("alice", title="One")
+    exported, destination, approved = await staged(board, live, deployment, tmp_path)
+
+    async def current() -> move.Destination:
+        async with cli.destination_of(exported.team_id, deployment.settings, app_options(coordination)) as now:
+            return now
+
+    async with live.transaction() as writer:
+        # A writer on the staging tables: open waits for it.
+        await writer.execute(f'LOCK TABLE "{target(live).staging_schema}".tasks IN ROW EXCLUSIVE MODE')
+        opening = asyncio.ensure_future(move.open_staged(
+            target(live), destination, listing_sha256=move.listing_digest(approved), current=current,
+        ))
+        await waiting_on_locks(live, 1)
+        await deployment.install(board.team_id, scopes, expected_generation=installed["generation"])
+
+    with pytest.raises(move.MoveRefused, match=refusal):
+        await opening
+    assert await move.staged_listing(target(live)) == approved
+    assert await move.live_listing(target(live), destination) == b""
 
 
 async def test_open_refuses_an_installation_that_already_has_rows(
@@ -817,7 +865,7 @@ async def test_open_refuses_an_installation_that_already_has_rows(
     before = await move.live_listing(target(live), destination)
 
     with pytest.raises(move.MoveRefused, match="already has"):
-        await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved))
+        await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved), current=lambda: deployment.destination(board.team_id))
 
     assert await move.live_listing(target(live), destination) == before
     assert await move.staged_listing(target(live)) == approved

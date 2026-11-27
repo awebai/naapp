@@ -101,7 +101,13 @@ async def run(
             print(f"staged {destination.installation_id} generation {destination.generation}"
                   f" in {target.staging_schema}", file=out)
         elif args.command == "open":
-            await move.open_staged(target, destination, listing_sha256=args.listing_sha256)
+            async def current() -> move.Destination:
+                async with destination_of(export.team_id, settings, app_options or {}) as now:
+                    return now
+
+            await move.open_staged(
+                target, destination, listing_sha256=args.listing_sha256, current=current,
+            )
             print(f"opened {destination.installation_id}; {target.staging_schema} dropped", file=out)
     return 0
 

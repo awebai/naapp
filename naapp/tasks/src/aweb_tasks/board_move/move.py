@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -468,7 +468,10 @@ async def read_export(target: Target) -> Export:
         )
     if len(rows) != 1:
         raise MoveRefused(f"{target.staging_schema} holds {len(rows)} exports, not one")
-    return Export(json.loads(rows[0]["document"]), sha256=rows[0]["sha256"])
+    text, recorded = rows[0]["document"], rows[0]["sha256"]
+    if hashlib.sha256(text.encode()).hexdigest() != recorded:
+        raise MoveRefused(f"the loaded export does not match its sha256 {recorded}")
+    return Export(json.loads(text), sha256=recorded)
 
 
 async def stage(target: Target, export: Export, destination: Destination) -> None:
@@ -560,10 +563,19 @@ async def live_listing(target: Target, destination: Destination) -> bytes:
         return listing(await _read(live, destination.installation_id, source=False))
 
 
-async def open_staged(target: Target, destination: Destination, *, listing_sha256: str) -> None:
+async def open_staged(
+    target: Target, destination: Destination, *, listing_sha256: str,
+    current: Callable[[], Awaitable[Destination]],
+) -> None:
     """Copies the staged rows into the live tables and drops the staging schema,
     in one transaction: only the staging contents whose listing the verifier
-    approved, staged for this destination, into an installation with no live rows."""
+    approved, staged for this destination, into an installation with no live rows.
+
+    ``current`` reads the team's grant afresh. It is read again once the
+    staging locks are held, so an installation change made while open waited
+    for them refuses it. A change after that read and before the commit is
+    outside this transaction: the operator makes no installation change while
+    open runs."""
     staging = target.staging_schema
     async with _connected(target.dsn, target.live_schema) as live:
         async with live.transaction() as tx:
@@ -572,6 +584,9 @@ async def open_staged(target: Target, destination: Destination, *, listing_sha25
             # Nothing changes the staged rows between the digest and the copy.
             for table in (*TABLES, SOURCE_TABLE):
                 await tx.execute(f"LOCK TABLE {{{{tables.{staging}.{table}}}}} IN EXCLUSIVE MODE")
+            now = await current()
+            if now != destination:
+                raise MoveRefused(f"the installation changed while open waited: {now}, not {destination}")
             staged = await _staged(tx, schema=staging)
             if listing_digest(listing(staged)) != listing_sha256:
                 raise MoveRefused(f"{staging} does not list as the approved listing {listing_sha256}")

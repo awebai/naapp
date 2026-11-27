@@ -14,6 +14,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import pytest
 from awid.team_ids import team_slug
@@ -116,6 +117,35 @@ async def test_export_stops_on_a_schema_it_was_not_written_for(board: OldBoard, 
     assert result.returncode != 0
     assert "board export: aweb.task_claims has the columns" in result.stderr
     assert not path.exists() or path.read_text(encoding="utf-8") == ""
+
+
+async def test_export_reads_the_schema_under_any_database_collation(board: OldBoard, tmp_path: Path) -> None:
+    """information_schema names sort in the C collation whatever the database's
+    default; a production database's default orders underscores differently."""
+    await board.create("alice", title="Ours")
+    database = f"board_move_collation_{uuid4().hex[:10]}"
+    admin = board.postgres_env("postgres")
+    subprocess.run(
+        ["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-c",
+         f"CREATE DATABASE {database} TEMPLATE template0 LOCALE_PROVIDER icu"
+         " ICU_LOCALE 'en-US-u-ka-shifted' LOCALE 'en_US.UTF-8'"],
+        env=admin, check=True,
+    )
+    try:
+        schema = subprocess.run(
+            ["pg_dump", "--schema-only", "--no-owner", "--no-acl", "--schema=aweb"],
+            env=board.postgres_env(await board.database_name()), capture_output=True, check=True,
+        ).stdout
+        subprocess.run(
+            ["psql", "-X", "-q", "-v", "ON_ERROR_STOP=1"], input=schema,
+            env=board.postgres_env(database), capture_output=True, check=True,
+        )
+
+        result = await board.export(tmp_path / "export.json", database=database)
+
+        assert result.returncode == 0, result.stderr
+    finally:
+        subprocess.run(["psql", "-X", "-q", "-c", f"DROP DATABASE {database}"], env=admin, check=True)
 
 
 async def stop_codes(board: OldBoard, tmp_path: Path) -> dict[str, list[str]]:

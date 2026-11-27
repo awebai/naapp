@@ -36,14 +36,16 @@ DECLARE
     }';
     relation text;
     found text[];
+    wanted text[];
 BEGIN
     FOR relation IN SELECT jsonb_object_keys(expected) LOOP
         SELECT array_agg(column_name::text ORDER BY column_name::text) INTO found
         FROM information_schema.columns
         WHERE table_schema = 'aweb' AND table_name = relation;
-        IF found IS DISTINCT FROM (
-            SELECT array_agg(name ORDER BY name) FROM jsonb_array_elements_text(expected -> relation) AS name
-        ) THEN
+        SELECT array_agg(name) INTO wanted FROM jsonb_array_elements_text(expected -> relation) AS name;
+        -- The same set of names, compared without an order: a database's
+        -- collation orders information_schema's names and these differently.
+        IF found IS NULL OR NOT (found @> wanted AND wanted @> found) THEN
             RAISE EXCEPTION 'board export: aweb.% has the columns %, not those of aweb 1.27.55', relation, found;
         END IF;
     END LOOP;

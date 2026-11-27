@@ -73,15 +73,18 @@ class OldBoard:
     async def database_name(self) -> str:
         return await self.db.fetch_value("SELECT current_database()")
 
-    async def export(self, path: Path) -> subprocess.CompletedProcess[str]:
-        """Runs the operator's export exactly as the board move's README gives it."""
+    def postgres_env(self, database: str) -> dict[str, str]:
         config = self.connection.config
-        env = {
+        return {
             **os.environ,
             "PGHOST": config.host, "PGPORT": str(config.port),
-            "PGUSER": config.user, "PGPASSWORD": config.password,
-            "PGDATABASE": await self.database_name(),
+            "PGUSER": config.user, "PGPASSWORD": config.password, "PGDATABASE": database,
         }
+
+    async def export(self, path: Path, *, database: str | None = None) -> subprocess.CompletedProcess[str]:
+        """Runs the operator's export exactly as the board move's README gives it,
+        against the server's database or another that holds its schema."""
+        env = self.postgres_env(database or await self.database_name())
         return subprocess.run(
             ["psql", "-X", "-q", "-At", "-v", "ON_ERROR_STOP=1", "-v", f"team_id={self.team_id}",
              "-f", str(EXPORT_SQL), "-o", str(path)],

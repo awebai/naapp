@@ -16,12 +16,14 @@ import os
 import subprocess
 import sys
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import httpx
 import pytest
 from aweb.app_manifests import FetchedManifest
 from aweb.installations import install_verified_manifest_on, uninstall_installation_on
@@ -615,6 +617,43 @@ async def test_open_makes_the_approved_staging_the_installation_dataset(
     assert claimed["claim"]["holder_alias"] == "alice"
     # The rollback boundary: after the app's first write the dataset no longer lists as staged.
     assert await move.live_listing(target(live), destination) != move.listing(data, source=False)
+
+
+@asynccontextmanager
+async def tasks_service(deployment: Deployment, coordination: Any) -> AsyncIterator[httpx.AsyncClient]:
+    """One process of the Tasks service, from start to suspension."""
+    app = create_app(deployment.settings, **app_options(coordination))
+    async with app.router.lifespan_context(app):
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=ORIGIN) as client:
+            yield client
+
+
+async def create_task(client: httpx.AsyncClient, member: Any, title: str) -> httpx.Response:
+    body = json.dumps({"title": title}).encode()
+    headers = member.headers(aud=ORIGIN, method="POST", path="/v1/tasks", body=body)
+    return await client.post("/v1/tasks", content=body, headers={**headers, "Content-Type": "application/json"})
+
+
+async def test_a_rolled_back_installation_refuses_every_write_once_resumed(
+    board: OldBoard, live: Any, deployment: Deployment, coordination: Any, installed: dict,
+    tmp_path: Path,
+) -> None:
+    await board.create("alice", title="Old")
+    _, destination, approved = await staged(board, live, deployment, tmp_path)
+    await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved))
+    opened = await deployment.install(
+        board.team_id, ["tasks.read", "tasks.write", "tasks.override"],
+        expected_generation=installed["generation"],
+    )
+    async with tasks_service(deployment, coordination) as service:
+        assert (await create_task(service, board.members["alice"], "Written after opening")).status_code == 200
+
+    # Rollback, while the service is suspended: the grant goes back to tasks.read.
+    await deployment.install(board.team_id, ["tasks.read"], expected_generation=opened["generation"])
+
+    async with tasks_service(deployment, coordination) as resumed:
+        refused = await create_task(resumed, board.members["alice"], "Written after the rollback")
+    assert (refused.status_code, refused.json()["detail"]["code"]) == (403, "scope_denied")
 
 
 async def test_open_refuses_staging_that_changed_after_its_listing_was_approved(

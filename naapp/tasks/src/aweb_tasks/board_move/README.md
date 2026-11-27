@@ -74,12 +74,11 @@ As jobs:
 
     python -m aweb_tasks.board_move list-export
     python -m aweb_tasks.board_move list-staged
-    python -m aweb_tasks.board_move list-export --dataset-only
 
-They store the listings `export`, `staged` and `export-dataset`. The operator fetches each with:
+They store the listings `export` and `staged`. `list-staged` also logs a `dataset` line for the listing's first lines, before its source facts: the rollback baseline. The operator fetches each listing with:
 
     psql "<Tasks database owner URL>" -X -q -At -v ON_ERROR_STOP=1 -v schema=<staging schema> \
-      -v name=<export | staged | export-dataset> -f naapp/tasks/src/aweb_tasks/board_move/fetch_listing.sql \
+      -v name=<export | staged> -f naapp/tasks/src/aweb_tasks/board_move/fetch_listing.sql \
       | base64 --decode > <name>.jsonl
 
 **`export` and `staged` must be identical, byte for byte, and each must match its job's log line.** One line per row, in a fixed order:
@@ -98,11 +97,19 @@ They store the listings `export`, `staged` and `export-dataset`. The operator fe
   - each deleted task
   - each expired lock
 
+**The export fact names the file the operator exported.** Its sha256 must equal both the load's `loaded export sha256` line and `printf %s "$(cat export.json)" | shasum -a 256` on the operator's file. Every job recomputes the sha256 of the loaded text and refuses if it differs from the recorded one.
+
 Read the board's last write time again with a fresh export, as a cross-check.
 
 **What the comparison proves.** The export-side listing goes through the same mapping the import used. So equal listings prove the staged rows are what the mapping produces from this export. They don't prove the mapping is right. The verifier reads the mapping in `move.py` (`dataset`) against the rulings listed in the pull request.
 
-**The verifier approves the staging listing by its sha256.** Step 6 opens only the staging contents with that digest. Keep the `export-dataset` log line: the rollback check compares against it once the staging schema is gone.
+**The verifier approves the staging listing by its sha256.** Step 6 opens only the staging contents with that digest.
+
+**The verifier also derives the rollback baseline from the approved listing.** It is the `staged` listing's first `<lines>` lines, `<lines>` being the count on the `dataset` log line:
+
+    head -n <lines> staged.jsonl | shasum -a 256
+
+It must match the `dataset` line's sha256 and bytes, and every remaining line must be a source fact.
 
 **If verification fails,** discard. The old board stays authoritative, and a retry starts from a new export and load:
 
@@ -114,11 +121,16 @@ Read the board's last write time again with a fresh export, as a cross-check.
 
 It reads the team's grant afresh, then in one transaction:
 - locks the staging tables, so nothing changes them until the transaction ends;
+- reads the grant again once it holds the locks, so an installation change made while it waited refuses it;
 - refuses unless the staging lists with the approved digest, was staged for the installation and generation the grant names now, and the installation has no live rows;
 - copies the staged rows into the live tables;
 - drops the staging schema.
 
-A refusal copies and drops nothing. Then grant `tasks.write` and `tasks.override`; our agents switch to `aw tasks`.
+A refusal copies and drops nothing.
+
+**Operator hold: make no installation change from step 4 until open has finished.** The grant can't be read in the same transaction as the copy, so a change after open's last read and before its commit is outside what open can refuse.
+
+Then grant `tasks.write` and `tasks.override`; our agents switch to `aw tasks`.
 
 ## Rolling back
 
@@ -129,11 +141,22 @@ A refusal copies and drops nothing. Then grant `tasks.write` and `tasks.override
 3. **Stay suspended for at least 60 seconds after step 2.** A process judges scopes against the grant answer it last read, and reuses an answer for at most 60 seconds. That bound is aweb's `get_app_grant_max_age_seconds` (aweb `config.py`): 60 by default, and the server refuses values outside 1..60. The installation fence row holds no scopes.
    - This step does not rely on what Render does on resume.
    - `tests/test_board_move.py::test_a_rolled_back_installation_refuses_every_write_once_resumed` shows that a process reading the read-only grant refuses the write. A process that had already read the write grant kept admitting writes from it.
-4. **Compare, while still suspended.** This step runs only once aweb-adzd.8 has observed that Render runs a one-off job on a suspended service. Until then the rollback can't rely on it.
+4. **Compare, while still suspended.**
 
-       python -m aweb_tasks.board_move list-live --team-id <team id>
+       python -m aweb_tasks.board_move list-live --installation-id <the installation id in the approved listing>
 
-   Its `live` line must equal the `export-dataset` line kept at step 5. If it does, no write committed. The job reads the grant, so it runs after step 2.
+   Its line, `sha256 <hex> bytes <n> lines <m>`, must equal the `dataset` line from step 5. If it does, no write committed.
+   - **It reads no grant and starts no app runtime,** so no drain runs. Its single connection first runs `no_writers.sql`:
+     - it refuses unless the role can see other sessions' transactions (`pg_read_all_stats` or a superuser);
+     - it waits at most 10 s for every transaction holding the dataset tables, then holds them;
+     - it refuses if any other client session of the database is inside a transaction, active or idle. That includes one-off jobs, which Render documents as continuing while their service is suspended.
+   - **The installation id is taken from the approved listing, not from the grant.** Every dataset row of that listing carries it, so another installation's listing can never equal the baseline. A wrong id can only fail the comparison, never pass it.
+   - **Where it runs:** as a job only once aweb-adzd.8 has observed that Render runs a one-off job on a suspended service. Until then, and before cutover, the operator proves `no_writers.sql` on the Tasks database itself:
+
+         PGOPTIONS='-c search_path=<TASKS_DB_SCHEMA>' psql "<Tasks database owner URL>" -X -q -v ON_ERROR_STOP=1 \
+           -c 'BEGIN' -f naapp/tasks/src/aweb_tasks/board_move/no_writers.sql -c 'ROLLBACK'
+
+       It must be shown to refuse with another session in a transaction, and to pass without one.
 5. **Return the agents to the old board,** which is untouched.
 6. **Resume** with `aweb_naapp.ops prod-resume`, which also waits on its own task. Then check:
    - `/live` answers;

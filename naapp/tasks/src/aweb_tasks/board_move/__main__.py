@@ -30,12 +30,8 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m aweb_tasks.board_move")
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("check", help="the export's stops")
-    list_export = commands.add_parser(
+    commands.add_parser(
         "list-export", help="store the export's canonical listing, for its team's installation"
-    )
-    list_export.add_argument(
-        "--dataset-only", action="store_true",
-        help="without the source facts, as the live dataset lists after opening",
     )
     commands.add_parser("stage", help="stage the export, for its team's installation")
     commands.add_parser("list-staged", help="store the staging schema's canonical listing")
@@ -46,8 +42,8 @@ def _parser() -> argparse.ArgumentParser:
         "--listing-sha256", required=True, help="the SHA-256 of the staging listing the verifier approved"
     )
     commands.add_parser(
-        "list-live", help="the digest line of the team's installation's live dataset"
-    ).add_argument("--team-id", required=True, help="the exported team; the staging schema is gone after open")
+        "list-live", help="the digest line of the live dataset, once no other session is writing"
+    ).add_argument("--installation-id", required=True, help="the installation the approved listing names")
     commands.add_parser("discard", help="drop the staging schema, export included")
     return parser
 
@@ -76,11 +72,13 @@ async def run(
         print(f"{target.staging_schema} {'dropped' if existed else 'did not exist'}", file=out)
         return 0
     if args.command == "list-live":
-        async with destination_of(args.team_id, settings, app_options or {}) as destination:
-            print("live " + move.digest_line(await move.live_listing(target, destination)), file=out)
+        print(move.digest_line(await move.live_listing(target, args.installation_id)), file=out)
         return 0
     if args.command == "list-staged":
-        print("staged " + await move.store_listing(target, "staged", await move.staged_listing(target)), file=out)
+        staged = await move.staged_listing(target)
+        print("staged " + await move.store_listing(target, "staged", staged), file=out)
+        # The rollback baseline: the listing's first lines, before its source facts.
+        print("dataset " + move.digest_line(move.dataset_part(staged)), file=out)
         return 0
     export = await move.read_export(target)
     if args.command == "check":
@@ -93,9 +91,8 @@ async def run(
         return 0
     async with destination_of(export.team_id, settings, app_options or {}) as destination:
         if args.command == "list-export":
-            name = "export-dataset" if args.dataset_only else "export"
-            data = move.listing(move.dataset(export, destination), source=not args.dataset_only)
-            print(f"{name} " + await move.store_listing(target, name, data), file=out)
+            data = move.listing(move.dataset(export, destination))
+            print("export " + await move.store_listing(target, "export", data), file=out)
         elif args.command == "stage":
             await move.stage(target, export, destination)
             print(f"staged {destination.installation_id} generation {destination.generation}"

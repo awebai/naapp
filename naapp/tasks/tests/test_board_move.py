@@ -708,7 +708,7 @@ async def test_open_makes_the_approved_staging_the_installation_dataset(
     await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(from_staging), current=lambda: deployment.destination(board.team_id))
 
     data = move.dataset(exported, destination)
-    assert await move.live_listing(target(live), destination) == move.listing(data, source=False)
+    assert await move.live_listing(target(live), destination.installation_id) == move.listing(data, source=False)
     assert not await staging_exists(live)
     # The app itself reads and writes the moved board.
     alice = app_store(live, destination, "alice")
@@ -727,7 +727,7 @@ async def test_open_makes_the_approved_staging_the_installation_dataset(
     claimed = await alice.claim(script)
     assert claimed["claim"]["holder_alias"] == "alice"
     # The rollback boundary: after the app's first write the dataset no longer lists as staged.
-    assert await move.live_listing(target(live), destination) != move.listing(data, source=False)
+    assert await move.live_listing(target(live), destination.installation_id) != move.listing(data, source=False)
 
 
 @asynccontextmanager
@@ -767,6 +767,76 @@ async def test_a_rolled_back_installation_refuses_every_write_once_resumed(
     assert (refused.status_code, refused.json()["detail"]["code"]) == (403, "scope_denied")
 
 
+async def opened(board: OldBoard, live: Any, deployment: Deployment, tmp_path: Path) -> move.Dataset:
+    """Steps 3 to 6: the board moved into the team's installation."""
+    exported, destination, approved = await staged(board, live, deployment, tmp_path)
+    await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved),
+                           current=lambda: deployment.destination(board.team_id))
+    return move.dataset(exported, destination)
+
+
+async def test_the_rollback_compare_lists_the_live_dataset_with_no_writer_left(
+    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
+) -> None:
+    await full_board(board)
+    data = await opened(board, live, deployment, tmp_path)
+
+    compared = await move.live_listing(target(live), installed["installation_id"])
+
+    assert compared == move.listing(data, source=False)
+
+
+async def test_the_rollback_compare_refuses_while_another_session_is_in_a_transaction(
+    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
+) -> None:
+    await board.create("alice", title="Old")
+    await opened(board, live, deployment, tmp_path)
+
+    async with live.transaction() as other:
+        # Inside a transaction that has not touched the dataset tables yet.
+        await other.fetch_value("SELECT 1")
+        with pytest.raises(move.MoveRefused, match="other sessions are inside a transaction"):
+            await move.live_listing(target(live), installed["installation_id"])
+
+
+async def test_the_rollback_compare_refuses_while_a_writer_holds_the_dataset(
+    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
+) -> None:
+    await board.create("alice", title="Old")
+    await opened(board, live, deployment, tmp_path)
+
+    async with live.transaction() as writer:
+        await writer.execute(
+            "UPDATE {{tables.tasks}} SET title = 'Being written' WHERE installation_id = $1",
+            installed["installation_id"],
+        )
+        with pytest.raises(move.MoveRefused, match="lock timeout"):
+            await move.live_listing(target(live), installed["installation_id"])
+
+
+async def test_the_rollback_compare_refuses_a_role_that_cannot_see_other_sessions(
+    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
+) -> None:
+    await board.create("alice", title="Old")
+    await opened(board, live, deployment, tmp_path)
+    role, password = f"board_move_probe_{uuid4().hex[:10]}", uuid4().hex
+    database = await live.fetch_value("SELECT current_database()")
+    await live.execute(f"CREATE ROLE {role} LOGIN PASSWORD '{password}'")
+    try:
+        # pgdbm's connect runs CREATE SCHEMA IF NOT EXISTS, which needs CREATE.
+        await live.execute(f'GRANT CONNECT, CREATE ON DATABASE "{database}" TO {role}')
+        await live.execute(f'GRANT USAGE ON SCHEMA "{live.schema}" TO {role}')
+        await live.execute(f'GRANT SELECT, UPDATE ON ALL TABLES IN SCHEMA "{live.schema}" TO {role}')
+        config = live.config
+        dsn = f"postgresql://{role}:{password}@{config.host}:{config.port}/{database}"
+
+        with pytest.raises(move.MoveRefused, match="cannot see other sessions"):
+            await move.live_listing(move.Target(dsn=dsn, live_schema=live.schema), installed["installation_id"])
+    finally:
+        await live.execute(f"DROP OWNED BY {role}")
+        await live.execute(f"DROP ROLE {role}")
+
+
 async def test_open_refuses_staging_that_changed_after_its_listing_was_approved(
     board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
 ) -> None:
@@ -782,7 +852,7 @@ async def test_open_refuses_staging_that_changed_after_its_listing_was_approved(
         await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved), current=lambda: deployment.destination(board.team_id))
 
     assert await move.staged_listing(target(live)) == changed
-    assert await move.live_listing(target(live), destination) == b""
+    assert await move.live_listing(target(live), destination.installation_id) == b""
 
 
 async def test_open_refuses_a_stage_replaced_after_its_listing_was_approved(
@@ -798,7 +868,7 @@ async def test_open_refuses_a_stage_replaced_after_its_listing_was_approved(
         await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved), current=lambda: deployment.destination(board.team_id))
 
     assert await move.staged_listing(target(live)) == replacement
-    assert await move.live_listing(target(live), destination) == b""
+    assert await move.live_listing(target(live), destination.installation_id) == b""
 
 
 async def test_open_refuses_when_the_installation_changed_after_staging(
@@ -850,7 +920,7 @@ async def test_open_refuses_an_installation_changed_while_it_waited_for_the_stag
     with pytest.raises(move.MoveRefused, match=refusal):
         await opening
     assert await move.staged_listing(target(live)) == approved
-    assert await move.live_listing(target(live), destination) == b""
+    assert await move.live_listing(target(live), destination.installation_id) == b""
 
 
 async def test_open_refuses_an_installation_that_already_has_rows(
@@ -862,12 +932,12 @@ async def test_open_refuses_an_installation_that_already_has_rows(
         title="Written in the app first", body="", type="task", priority=2, labels=[], parent=None,
         assignee=None,
     )
-    before = await move.live_listing(target(live), destination)
+    before = await move.live_listing(target(live), destination.installation_id)
 
     with pytest.raises(move.MoveRefused, match="already has"):
         await move.open_staged(target(live), destination, listing_sha256=move.listing_digest(approved), current=lambda: deployment.destination(board.team_id))
 
-    assert await move.live_listing(target(live), destination) == before
+    assert await move.live_listing(target(live), destination.installation_id) == before
     assert await move.staged_listing(target(live)) == approved
 
 
@@ -913,22 +983,26 @@ async def test_the_operator_moves_the_board_with_the_jobs(
         f"staged {installed['installation_id']} generation {installed['generation']}"
         f" in {target(live).staging_schema}\n"
     )
-    staging_line = await command(deployment, coordination, "list-staged")
-    dataset_line = await command(deployment, coordination, "list-export", "--dataset-only")
+    staging_lines = (await command(deployment, coordination, "list-staged")).splitlines()
 
     # The verifier compares what the operator fetched with the digests in the jobs' logs.
     from_export, from_staging = await fetched(live, "export"), await fetched(live, "staged")
     assert from_export == from_staging
     assert export_line == f"export {move.digest_line(from_export)}\n"
-    assert staging_line == f"staged {move.digest_line(from_staging)}\n"
+    assert staging_lines[0] == f"staged {move.digest_line(from_staging)}"
     assert installed["installation_id"].encode() in from_staging
     assert exported.sha256.encode() in from_staging
+    # The rollback baseline, derived from the approved listing: its first lines.
+    dataset_lines = int(staging_lines[1].rsplit(" ", 1)[1])
+    baseline = b"".join(from_staging.splitlines(keepends=True)[:dataset_lines])
+    assert staging_lines[1] == f"dataset {move.digest_line(baseline)}"
+    assert all(b'"table":"source"' in line for line in from_staging.splitlines()[dataset_lines:])
     digest = hashlib.sha256(from_staging).hexdigest()
 
     await command(deployment, coordination, "open", "--listing-sha256", digest)
 
-    live_line = await command(deployment, coordination, "list-live", "--team-id", board.team_id)
-    assert live_line.removeprefix("live ") == dataset_line.removeprefix("export-dataset ")
+    live_line = await command(deployment, coordination, "list-live", "--installation-id", installed["installation_id"])
+    assert live_line == f"{move.digest_line(baseline)}\n"
 
 
 def run(live: Any, *args: str) -> subprocess.CompletedProcess[bytes]:

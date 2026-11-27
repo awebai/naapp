@@ -16,13 +16,16 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
+import asyncpg
 from aweb_naapp.runtime.authorization import GrantUnavailable
 from aweb_naapp.runtime.team_grants import TeamGrantSource
 from awid.team_ids import team_slug
 from pgdbm import AsyncDatabaseManager, AsyncMigrationManager, DatabaseConfig
 from pgdbm.core import TransactionManager
+from pgdbm.errors import QueryError
 
 from aweb_tasks.app import MIGRATIONS_PATH
 
@@ -354,6 +357,15 @@ def _line(record: dict[str, Any]) -> bytes:
                       default=_plain).encode() + b"\n"
 
 
+def dataset_part(full: bytes) -> bytes:
+    """A full listing's dataset rows: every line before its first source fact."""
+    lines = full.splitlines(keepends=True)
+    first_source = next(
+        (i for i, line in enumerate(lines) if json.loads(line).get("table") == "source"), len(lines)
+    )
+    return b"".join(lines[:first_source])
+
+
 def listing(data: Dataset, *, source: bool = True) -> bytes:
     """One line per row, table by table in a fixed order, then the ref-to-number
     map and, for an export or a staging schema, the source facts."""
@@ -557,10 +569,24 @@ async def discard(target: Target) -> bool:
         return existed
 
 
-async def live_listing(target: Target, destination: Destination) -> bytes:
-    """The installation's live dataset, listed as its staging was."""
+NO_WRITERS_SQL = Path(__file__).with_name("no_writers.sql")
+
+
+async def live_listing(target: Target, installation_id: str) -> bytes:
+    """The installation's live dataset, listed as its staging was, once
+    ``no_writers.sql`` has shown that no other session is writing.
+
+    It reads no grant and starts no app runtime. The installation id comes
+    from the approved listing, whose every dataset row carries it, so another
+    installation's listing can never equal it: a wrong id can only fail the
+    comparison."""
     async with _connected(target.dsn, target.live_schema) as live:
-        return listing(await _read(live, destination.installation_id, source=False))
+        async with live.transaction() as tx:
+            try:
+                await tx.execute(NO_WRITERS_SQL.read_text(encoding="utf-8"))
+            except (QueryError, asyncpg.PostgresError) as failed:
+                raise MoveRefused(str(failed.__cause__ or failed)) from failed
+            return listing(await _read(tx, installation_id, source=False))
 
 
 async def open_staged(

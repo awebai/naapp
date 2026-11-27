@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import httpx
+from aweb_naapp.egress.send import Resolver
 from aweb_naapp.runtime.app import NaappRuntime, mount_manifest_routes
 from aweb_naapp.runtime.authorization import Authorization
 from aweb_naapp.runtime.health import mount_health
 from aweb_naapp.runtime.installation import InstallationRefused, apply_installation_migrations
+from aweb_naapp.runtime.operator_egress import OperatorEgress
 from aweb_naapp.runtime.team_auth import refusal
 from awid.external_authority import TXTOutcomeResolver
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
@@ -123,9 +125,11 @@ def create_app(
     *,
     awid_transport: httpx.AsyncBaseTransport | None = None,
     awid_txt_resolver: TXTOutcomeResolver | None = None,
-    team_server_transport: httpx.AsyncBaseTransport | None = None,
+    resolver: Resolver | None = None,
     clock: Clock = utc_now,
 ) -> FastAPI:
+    """Tasks' app. Hook events and team-server reads leave through the guard
+    the settings configure; ``resolver`` replaces its DNS resolver."""
     resolved = settings or TasksSettings()
     runtime = NaappRuntime(
         resolved,
@@ -135,7 +139,7 @@ def create_app(
         stores=(apply_installation_migrations,),
         awid_transport=awid_transport,
         awid_txt_resolver=awid_txt_resolver,
-        team_server_transport=team_server_transport,
+        egress=OperatorEgress.from_settings(resolved, resolver=resolver),
     )
     app = FastAPI(title="tasks", lifespan=runtime.lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.runtime = runtime

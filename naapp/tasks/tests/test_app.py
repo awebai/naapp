@@ -110,6 +110,8 @@ async def world_fixture(coordination, test_db_factory, tmp_path):
         _env_file=None, database_url=db.config.get_dsn(), db_schema=db.schema,
         app_id=TEST_APP_ID, public_origin=ORIGIN, awid_registry_url=REGISTRY_URL,
         awid_service_token=SERVICE_TOKEN, app_key_files=key_files,
+        # The coordination server is the operator's own, on its network.
+        **coordination.site.settings(),
     )
     server_db = coordination.server.db.get_manager("aweb")
     manifest = served_manifest(key_files, origin=ORIGIN)
@@ -125,7 +127,7 @@ async def world_fixture(coordination, test_db_factory, tmp_path):
     app = create_app(
         settings, awid_transport=coordination.registry.transport,
         awid_txt_resolver=dns_naming(DOMAIN, NAMESPACE_KEY),
-        team_server_transport=coordination.server.transport, clock=clock,
+        resolver=coordination.site.resolver(), clock=clock,
     )
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=ORIGIN) as client:

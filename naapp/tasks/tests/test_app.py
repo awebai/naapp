@@ -24,9 +24,14 @@ from aweb_naapp_testing import Member
 from awid_service.testing import REGISTRY_URL, SERVICE_TOKEN, dns_naming
 from nacl.signing import SigningKey
 
+from aweb_naapp.runtime.event_emit import AppEvents
+from aweb_naapp.runtime.installation import InstallationRefused
+from aweb_naapp.runtime.team_auth import Principal
+
 from aweb_tasks.app import REFUSAL_STATUS, create_app
 from aweb_tasks.config import TasksSettings
 from aweb_tasks.decisions import Code
+from aweb_tasks.store import TaskStore
 
 from .deployment import TEST_APP_ID, served_manifest, write_key_files
 
@@ -50,6 +55,8 @@ class Clock:
 class World:
     coordination: Any
     db: Any
+    settings: TasksSettings
+    runtime: Any
     client: httpx.AsyncClient
     clock: Clock
     teams: dict[str, list[Member]]
@@ -123,7 +130,7 @@ async def world_fixture(coordination, test_db_factory, tmp_path):
     )
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=ORIGIN) as client:
-            yield World(coordination, db, client, clock, {name: members for name, (members, _) in teams.items()})
+            yield World(coordination, db, settings, app.state.runtime, client, clock, {name: members for name, (members, _) in teams.items()})
 
 
 def code(response: httpx.Response) -> str:
@@ -350,7 +357,6 @@ async def test_a_fence_that_refuses_after_admission_answers_and_commits_nothing(
     assert set(refused.json()["detail"]) == {"code", "message"}
     assert await world.db.fetch_value("SELECT count(*) FROM {{tables.tasks}} WHERE installation_id = $1", ours) == 0
     assert await world.db.fetch_value("SELECT count(*) FROM {{tables.events}} WHERE installation_id = $1", ours) == 0
-    assert await world.db.fetch_value("SELECT count(*) FROM {{tables.outbox_events}}") == 0
     # The neighbouring installation is unaffected.
     assert (await world.ok(carol, "POST", "/v1/tasks", {"title": "Theirs"}))["number"] == 1
 
@@ -370,3 +376,45 @@ async def test_a_holders_write_records_the_renewal_it_makes(world: World) -> Non
     shown = await world.ok(alice, "PATCH", "/v1/tasks/1", {})
     assert shown["claim"]["revision"] == 3
     assert len(await world.ok(alice, "GET", "/v1/tasks/1/history")) == before
+
+
+async def test_a_write_the_fence_refuses_enqueues_no_event(world: World) -> None:
+    """The app's events are enqueued in the write's own fenced transaction, so
+    a write the installation fence refuses before commit leaves none behind."""
+    alice, _ = world.teams["ours"]
+    # The deployment's emits, with an events origin; no drain runs for them,
+    # so what they enqueue stays in the outbox to be counted.
+    emitting = AppEvents.from_settings(
+        world.settings.model_copy(update={"app_events_origin": "https://aweb.example.test"}),
+        world.runtime.manifest,
+    )
+    permit = await world.runtime.installation_fence().permit(alice.team_id)
+    tasks = TaskStore(
+        permit.database(), installation_id=permit.admitted.installation_id,
+        principal=Principal(
+            team_id=alice.team_id, did_key=alice.did_key, did_aw=None, address=None, alias=alice.alias,
+            certificate_id=alice.certificate_id, team_did_key=alice.team_did_key,
+        ),
+        events=emitting, app_id=TEST_APP_ID,
+    )
+
+    async def outbox() -> int:
+        return await world.db.fetch_value("SELECT count(*) FROM {{tables.outbox_events}}")
+
+    await tasks.create(title="Kept", body="", type="task", priority=2, labels=[], parent=None, assignee=None)
+    assert await outbox() == 1  # an admitted write does enqueue its event
+    await world.db.execute(f"""
+        CREATE FUNCTION {world.db.schema}.stale_fence() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            UPDATE {world.db.schema}.installation_fences SET fresh_until = NULL
+             WHERE installation_id = NEW.installation_id;
+            RETURN NEW;
+        END $$;
+        CREATE TRIGGER stale_fence AFTER INSERT ON {world.db.schema}.tasks
+            FOR EACH ROW EXECUTE FUNCTION {world.db.schema}.stale_fence();
+    """)
+    with pytest.raises(InstallationRefused) as refused:
+        await tasks.create(title="Lost", body="", type="task", priority=2, labels=[], parent=None, assignee=None)
+    assert refused.value.code == "authority_unavailable"
+    assert await outbox() == 1
+    assert await world.db.fetch_value("SELECT count(*) FROM {{tables.tasks}}") == 1

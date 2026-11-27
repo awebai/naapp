@@ -332,6 +332,21 @@ async def test_a_tool_whose_inputs_are_all_optional_takes_no_body(world: World, 
     await world.ok(alice, "POST", path)
 
 
+async def stale_fence_on_task_insert(db: Any, installation_id: str) -> None:
+    """From now on, inserting a task of ``installation_id`` makes its fence
+    stale inside that write, as a grant going stale mid-request does."""
+    await db.execute(f"""
+        CREATE FUNCTION {db.schema}.stale_fence() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            UPDATE {db.schema}.installation_fences SET fresh_until = NULL
+             WHERE installation_id = NEW.installation_id;
+            RETURN NEW;
+        END $$;
+        CREATE TRIGGER stale_fence AFTER INSERT ON {db.schema}.tasks
+            FOR EACH ROW WHEN (NEW.installation_id = '{installation_id}') EXECUTE FUNCTION {db.schema}.stale_fence();
+    """)
+
+
 async def test_a_fence_that_refuses_after_admission_answers_and_commits_nothing(world: World) -> None:
     alice, _ = world.teams["ours"]
     (carol,) = world.teams["neighbour"]
@@ -341,16 +356,7 @@ async def test_a_fence_that_refuses_after_admission_answers_and_commits_nothing(
     )
     # Our installation's fence goes stale while a write is in flight: the
     # fence's recheck before commit must refuse it.
-    await world.db.execute(f"""
-        CREATE FUNCTION {world.db.schema}.stale_fence() RETURNS trigger LANGUAGE plpgsql AS $$
-        BEGIN
-            UPDATE {world.db.schema}.installation_fences SET fresh_until = NULL
-             WHERE installation_id = NEW.installation_id;
-            RETURN NEW;
-        END $$;
-        CREATE TRIGGER stale_fence AFTER INSERT ON {world.db.schema}.tasks
-            FOR EACH ROW WHEN (NEW.installation_id = '{ours}') EXECUTE FUNCTION {world.db.schema}.stale_fence();
-    """)
+    await stale_fence_on_task_insert(world.db, ours)
     refused = await world.call(alice, "POST", "/v1/tasks", {"title": "Lost"})
     assert (refused.status_code, code(refused)) == (503, "authority_unavailable"), refused.text
     assert set(refused.json()["detail"]) == {"code", "message"}
@@ -402,16 +408,7 @@ async def test_a_write_the_fence_refuses_enqueues_no_event(world: World) -> None
 
     await tasks.create(title="Kept", body="", type="task", priority=2, labels=[], parent=None, assignee=None)
     assert await outbox() == 1  # an admitted write does enqueue its event
-    await world.db.execute(f"""
-        CREATE FUNCTION {world.db.schema}.stale_fence() RETURNS trigger LANGUAGE plpgsql AS $$
-        BEGIN
-            UPDATE {world.db.schema}.installation_fences SET fresh_until = NULL
-             WHERE installation_id = NEW.installation_id;
-            RETURN NEW;
-        END $$;
-        CREATE TRIGGER stale_fence AFTER INSERT ON {world.db.schema}.tasks
-            FOR EACH ROW EXECUTE FUNCTION {world.db.schema}.stale_fence();
-    """)
+    await stale_fence_on_task_insert(world.db, permit.admitted.installation_id)
     with pytest.raises(InstallationRefused) as refused:
         await tasks.create(title="Lost", body="", type="task", priority=2, labels=[], parent=None, assignee=None)
     assert refused.value.code == "authority_unavailable"

@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+import asyncpg
 import httpx
 import pytest
 from aweb.app_manifests import FetchedManifest
@@ -814,27 +815,54 @@ async def test_the_rollback_compare_refuses_while_a_writer_holds_the_dataset(
             await move.live_listing(target(live), installed["installation_id"])
 
 
-async def test_the_rollback_compare_refuses_a_role_that_cannot_see_other_sessions(
-    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
+@pytest.mark.parametrize(("membership", "refusal"), [
+    # No statistics privilege at all.
+    ("", "cannot see other sessions"),
+    # A member that does not inherit the privilege sees other users' xact_start as NULL.
+    ("NOINHERIT", "cannot see other sessions"),
+    # An inheriting member sees the other login's transaction.
+    ("INHERIT", "other sessions are inside a transaction"),
+])
+async def test_the_rollback_compare_refuses_unless_it_sees_another_logins_transaction(
+    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path,
+    membership: str, refusal: str,
 ) -> None:
     await board.create("alice", title="Old")
     await opened(board, live, deployment, tmp_path)
-    role, password = f"board_move_probe_{uuid4().hex[:10]}", uuid4().hex
     database = await live.fetch_value("SELECT current_database()")
-    await live.execute(f"CREATE ROLE {role} LOGIN PASSWORD '{password}'")
-    try:
+    config = live.config
+    roles = []
+
+    async def login(options: str = "") -> str:
+        role, password = f"board_move_probe_{uuid4().hex[:10]}", uuid4().hex
+        await live.execute(f"CREATE ROLE {role} LOGIN {options} PASSWORD '{password}'")
+        roles.append(role)
         # pgdbm's connect runs CREATE SCHEMA IF NOT EXISTS, which needs CREATE.
         await live.execute(f'GRANT CONNECT, CREATE ON DATABASE "{database}" TO {role}')
         await live.execute(f'GRANT USAGE ON SCHEMA "{live.schema}" TO {role}')
         await live.execute(f'GRANT SELECT, UPDATE ON ALL TABLES IN SCHEMA "{live.schema}" TO {role}')
-        config = live.config
-        dsn = f"postgresql://{role}:{password}@{config.host}:{config.port}/{database}"
+        return f"postgresql://{role}:{password}@{config.host}:{config.port}/{database}"
 
-        with pytest.raises(move.MoveRefused, match="cannot see other sessions"):
-            await move.live_listing(move.Target(dsn=dsn, live_schema=live.schema), installed["installation_id"])
+    try:
+        observer = await login(membership)
+        if membership:
+            await live.execute(f"GRANT pg_read_all_stats TO {roles[0]}")
+        other = await asyncpg.connect(await login())
+        try:
+            # Another login, inside a transaction that has not touched the dataset tables.
+            pending = other.transaction()
+            await pending.start()
+            await other.fetchval("SELECT 1")
+
+            with pytest.raises(move.MoveRefused, match=refusal):
+                await move.live_listing(move.Target(dsn=observer, live_schema=live.schema), installed["installation_id"])
+            await pending.rollback()
+        finally:
+            await other.close()
     finally:
-        await live.execute(f"DROP OWNED BY {role}")
-        await live.execute(f"DROP ROLE {role}")
+        for role in roles:
+            await live.execute(f"DROP OWNED BY {role}")
+            await live.execute(f"DROP ROLE {role}")
 
 
 async def test_open_refuses_staging_that_changed_after_its_listing_was_approved(

@@ -14,7 +14,8 @@ SET LOCAL lock_timeout = '10s';
 DO $visible$
 BEGIN
     IF NOT (
-        pg_has_role(current_user, 'pg_read_all_stats', 'MEMBER')
+        -- USAGE: the privilege this session holds now; a NOINHERIT member does not.
+        pg_has_role(current_user, 'pg_read_all_stats', 'USAGE')
         OR (SELECT rolsuper FROM pg_roles WHERE rolname = current_user)
     ) THEN
         RAISE EXCEPTION 'board move: role % cannot see other sessions'' transactions (it needs pg_read_all_stats)', current_user;

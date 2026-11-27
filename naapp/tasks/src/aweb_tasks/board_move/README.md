@@ -151,7 +151,7 @@ Then grant `tasks.write` and `tasks.override`; our agents switch to `aw tasks`.
 
    Its line, `sha256 <hex> bytes <n> lines <m>`, must equal the `dataset` line from step 5. If it does, no write committed.
    - **It reads no grant and starts no app runtime,** so no drain runs. Its single connection first runs `no_writers.sql`:
-     - it refuses unless the role can see other sessions' transactions (`pg_read_all_stats` or a superuser);
+     - it refuses unless the role can see other sessions' transactions: it holds `pg_read_all_stats` in effect (a `NOINHERIT` member does not), or it is a superuser;
      - it waits at most 10 s for every transaction holding the dataset tables, then holds them;
      - it refuses if any other client session of the database is inside a transaction, active or idle. That includes one-off jobs, which Render documents as continuing while their service is suspended.
    - **The installation id is taken from the approved listing, not from the grant.** Every dataset row of that listing carries it, so another installation's listing can never equal the baseline. A wrong id can only fail the comparison, never pass it.

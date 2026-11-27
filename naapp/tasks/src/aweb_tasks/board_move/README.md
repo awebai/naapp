@@ -23,7 +23,9 @@ A job inherits the Tasks service's own environment. Nothing is set by hand:
 
 **The staging schema is `<TASKS_DB_SCHEMA>_board_move`,** for example `public_board_move`. The operator's psql files take it as `-v schema=...`.
 
-**The operator's psql commands reach the Tasks database as `psql "service=tasks"`.** The service is defined in the operator's psql service file (mode 0600), which holds the Tasks database owner URL, so the URL never appears on a command line or in the process list.
+**No database URL is ever on a command line.** The operator's psql commands name services from the operator's psql service file (mode 0600), so no URL appears in the process list:
+- `service=tasks`: the Tasks database, with its owner URL;
+- for the export, a service naming the aweb production database (for example `service=aweb`).
 
 **The destination is never typed in.** Every job that names the installation reads the exported team's live grant with the deployment's grant-read key, as the running app does, and starts the app's runtime to do so.
 - That start is the app's own. It runs the outbox drains, so a job can deliver the app's pending events, even while the service is suspended.
@@ -41,7 +43,7 @@ A job inherits the Tasks service's own environment. Nothing is set by hand:
 
 On the operator's host. The export is read-only and runs in one snapshot, against the aweb server's database:
 
-    psql "<aweb database URL>" -X -q -At -v ON_ERROR_STOP=1 -v team_id=<team id> \
+    psql "service=aweb" -X -q -At -v ON_ERROR_STOP=1 -v team_id=<team id> \
       -f naapp/tasks/src/aweb_tasks/board_move/export.sql -o export.json
 
 The query stops, writing nothing, if any task table has columns other than those of aweb 1.27.55.

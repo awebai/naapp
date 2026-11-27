@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import io
 import json
@@ -35,6 +36,7 @@ def load(name: str, path: str):
 CANDIDATE = load("release_candidate", "scripts/release_candidate.py")
 PUBLISH = load("publish_release", "scripts/publish_release.py")
 VERSIONS = sys.modules["release_versions"]
+FILES = sys.modules["release_files"]
 
 # Every manifest a release tag reads, with the package it names and its version
 # in the fixture repository.
@@ -188,14 +190,113 @@ class PypiLaneContractTest(unittest.TestCase):
         PUBLISH.run, PUBLISH.request_json = run, lambda _url: (200, {})
         return commands
 
-    def test_the_aweb_naapp_lane_publishes_naapp_lib_then_its_testing_package(self):
+    def locked_release(self, tag: str, files: dict[str, bytes]) -> tuple[Path, Path]:
+        """A repository whose annotated ``tag`` locks ``files``, and a release's assets holding them."""
         root = repository(self)
-        commands = self._recording_publisher()
-        PUBLISH.publish_pypi(root, "aweb-naapp-v", "0.1.0")
-        built = [argv[-1] for argv in commands if argv[:2] == ("uv", "build")]
+        locked = {name: hashlib.sha256(data).hexdigest() for name, data in files.items()}
+        command(root, "git", "tag", "-a", tag, "-m", f"naapp {tag}\n\n{FILES.tag_lines(locked)}")
+        assets = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, assets)
+        for name, data in files.items():
+            (assets / name).write_bytes(data)
+        return root, assets
+
+    def _uploading_publisher(self):
+        """Record the publisher's commands; PyPI lacks every staged file."""
+        commands: list[tuple[str, ...]] = []
+
+        def run(_root, *argv, **_kwargs):
+            commands.append(argv)
+            if "plan-publish" in argv:
+                return "\n".join(sorted(os.listdir(argv[argv.index("--dist") + 1])))
+            if argv[:2] == ("uv", "publish"):
+                commands[-1] = ("uv", "publish", *(Path(path).name for path in argv[2:]))
+            return ""
+
+        self.addCleanup(setattr, PUBLISH, "run", PUBLISH.run)
+        self.addCleanup(setattr, PUBLISH, "request_json", PUBLISH.request_json)
+        token = patch.dict(os.environ, {"UV_PUBLISH_TOKEN": "test-token-not-a-secret"})
+        token.start()
+        self.addCleanup(token.stop)
+        PUBLISH.run, PUBLISH.request_json = run, lambda _url: (404, {})
+        return commands
+
+    def test_a_lane_uploads_each_packages_locked_files_in_order_and_builds_nothing(self):
+        root, assets = self.locked_release("aweb-secrets-runner-v0.1.0rc1", {
+            **release_lane("aweb-secrets-values", "0.1.0rc1"), **release_lane("aweb-secrets-runner", "0.1.0rc1")})
+        commands = self._uploading_publisher()
+        installed = []
+        PUBLISH.publish_pypi(root, "aweb-secrets-runner-v0.1.0rc1", assets,
+                             installable=lambda directory, versions: installed.append((directory, versions)))
+        self.assertEqual(installed, [(assets, {"aweb-secrets-runner-v": "0.1.0rc1"})])
+        self.assertEqual([argv for argv in commands if "build" in argv], [])
         inspected = [argv[argv.index("--package") + 1] for argv in commands if "inspect-staged" in argv]
-        self.assertEqual(built, ["naapp-lib", "naapp-lib/testing"])
-        self.assertEqual(inspected, ["aweb-naapp", "aweb-naapp-testing"])
+        self.assertEqual(inspected, ["aweb-secrets-values", "aweb-secrets-runner"])
+        uploads = [argv[2:] for argv in commands if argv[:2] == ("uv", "publish")]
+        self.assertEqual(uploads, [
+            ("aweb_secrets_values-0.1.0rc1-py3-none-any.whl", "aweb_secrets_values-0.1.0rc1.tar.gz"),
+            ("aweb_secrets_runner-0.1.0rc1-py3-none-any.whl", "aweb_secrets_runner-0.1.0rc1.tar.gz"),
+        ])
+
+    def test_assets_that_are_not_the_locked_files_upload_nothing(self):
+        support = release_lane("aweb-naapp-journey-support", "0.1.0")
+        root, assets = self.locked_release("secrets-v0.1.0", support)
+        (assets / "aweb_naapp_journey_support-0.1.0.tar.gz").write_bytes(b"rebuilt")
+        commands = self._uploading_publisher()
+        with self.assertRaisesRegex(PUBLISH.PublishRefusal, "the tag locks"):
+            PUBLISH.publish_pypi(root, "secrets-v0.1.0", assets)
+        self.assertEqual(commands, [])
+
+    def test_locked_files_of_another_lane_upload_nothing(self):
+        files = {**release_lane("aweb-naapp-journey-support", "0.1.0"), **release_lane("aweb-naapp", "0.1.0")}
+        root, assets = self.locked_release("secrets-v0.1.0", files)
+        commands = self._uploading_publisher()
+        with self.assertRaisesRegex(PUBLISH.PublishRefusal, "secrets-v0.1.0 locks files its lane does not ship"):
+            PUBLISH.publish_pypi(root, "secrets-v0.1.0", assets)
+        self.assertEqual(commands, [])
+
+    def test_a_lane_whose_dependencies_pypi_does_not_serve_uploads_nothing(self):
+        project = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, project)
+        (project / "team_journey_support.py").write_text("")
+        (project / "pyproject.toml").write_text(
+            '[project]\nname = "aweb-naapp-journey-support"\nversion = "0.1.0"\n'
+            'requires-python = ">=3.12"\ndependencies = ["aweb-naapp-testing>=999.0"]\n'
+            '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n'
+            '[tool.hatch.build.targets.wheel]\nonly-include = ["team_journey_support.py"]\n'
+        )
+        built = project / "dist"
+        command(project, "uv", "build", "--quiet", "--no-sources", "--sdist", "--wheel", "--out-dir", str(built))
+        files = {path.name: path.read_bytes() for path in built.iterdir() if not path.name.startswith(".")}
+        root, assets = self.locked_release("secrets-v0.1.0", files)
+        commands = self._uploading_publisher()
+        with self.assertRaisesRegex(PUBLISH.PublishRefusal,
+                                    "secrets-v0.1.0 cannot be installed from PyPI with its locked wheels"):
+            PUBLISH.publish_pypi(root, "secrets-v0.1.0", assets)
+        self.assertEqual(commands, [])
+
+    def test_pypi_publication_needs_the_release_assets_and_a_token(self):
+        root, assets = self.locked_release("secrets-v0.1.0", release_lane("aweb-naapp-journey-support", "0.1.0"))
+        with self.assertRaisesRegex(PUBLISH.PublishRefusal, "pass --assets"):
+            PUBLISH.publish(root, "secrets-v0.1.0", only="pypi")
+        with patch.dict(os.environ, {"UV_PUBLISH_TOKEN": ""}), \
+                self.assertRaisesRegex(PUBLISH.PublishRefusal, "UV_PUBLISH_TOKEN is required"):
+            PUBLISH.publish(root, "secrets-v0.1.0", only="pypi", assets=assets)
+
+    def test_the_pypi_workflow_uploads_a_published_releases_assets_and_builds_nothing(self):
+        import yaml
+
+        text = (ROOT / ".github/workflows/pypi-release.yml").read_text()
+        workflow = yaml.load(text, Loader=yaml.BaseLoader)
+        self.assertEqual(workflow["on"], {"release": {"types": ["published"]}})
+        job = workflow["jobs"]["publish"]
+        for prefix in PUBLISH.PYPI_LANES:
+            self.assertIn(f"startsWith(github.event.release.tag_name, '{prefix}')", job["if"])
+        runs = "\n".join(step.get("run", "") for step in job["steps"])
+        self.assertIn('git fetch --force origin "refs/tags/$TAG:refs/tags/$TAG"', runs)
+        self.assertIn('gh release download "$TAG" --dir "$ASSETS"', runs)
+        self.assertIn('python3 scripts/publish_release.py --only pypi --assets "$ASSETS" "$TAG"', runs)
+        self.assertNotIn("uv build", text)
 
     def test_the_journey_support_package_must_version_with_secrets(self):
         root = repository(self)
@@ -284,6 +385,13 @@ class OciLaneContractTest(unittest.TestCase):
                 self.assertIn(f"org.opencontainers.image.revision={'a' * 40}", argv)
                 self.assertIn(f"SOURCE_COMMIT={'a' * 40}", argv)
                 self.assertEqual(argv[-1], ".")
+
+
+def release_lane(package: str, version: str) -> dict[str, bytes]:
+    """The wheel and sdist of one package, as a release build names them."""
+    name = package.replace("-", "_")
+    return {f"{name}-{version}-py3-none-any.whl": f"{name} wheel".encode(),
+            f"{name}-{version}.tar.gz": f"{name} sdist".encode()}
 
 
 def ci_run(sha: str, *, run_id: int = 7, event: str = "push", branch: str = "main",
@@ -426,6 +534,96 @@ class CandidateContractTest(unittest.TestCase):
         self.assertIn("candidate refused:", refused.stderr)
         self.assertIn("no-such-commit", refused.stderr)
         self.assertEqual(command(root, "git", "tag", "--list"), "")
+
+
+    def built_files(self, files: dict[str, bytes]):
+        """A download of a run's release-files artifact, recording the run it read."""
+        downloads = []
+
+        def download(_root: Path, run_id: int, directory: Path) -> None:
+            downloads.append(run_id)
+            for name, data in files.items():
+                (directory / name).write_bytes(data)
+            FILES.write_sums(directory)
+        return downloads, download
+
+    def files_directory(self) -> Path:
+        path = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, path)
+        return path / "release-files"
+
+    def test_a_pypi_tag_locks_its_lanes_files_from_the_qualifying_run(self):
+        root = self.candidate()
+        support = release_lane("aweb-naapp-journey-support", "0.1.0")
+        downloads, download = self.built_files({**support, **release_lane("aweb-naapp", "0.1.0")})
+        files = self.files_directory()
+        printed = io.StringIO()
+        with redirect_stdout(printed):
+            CANDIDATE.create_candidate(root, ["secrets-v0.1.0", "logs-v0.1.0"], files=files,
+                                       runs=lambda _root, sha: [ci_run(sha, run_id=11)], download=download)
+        self.assertEqual(downloads, [11])
+        locked = {name: hashlib.sha256(data).hexdigest() for name, data in support.items()}
+        self.assertEqual(sorted(path.name for path in (files / "secrets-v0.1.0").iterdir()), sorted(support))
+        self.assertFalse((files / "logs-v0.1.0").exists())
+        self.assertEqual(FILES.locked_files(root, "secrets-v0.1.0"), locked)
+        with self.assertRaisesRegex(VERSIONS.VersionRefusal, "lists no release files"):
+            FILES.locked_files(root, "logs-v0.1.0")
+        self.assertIn("gh release create secrets-v0.1.0 --verify-tag --notes-from-tag", printed.getvalue())
+
+    def test_a_pypi_tag_without_a_files_directory_gets_no_tag(self):
+        root = self.candidate()
+        with self.assertRaisesRegex(CANDIDATE.CandidateRefusal, "pass --files"):
+            CANDIDATE.create_candidate(root, ["secrets-v0.1.0"], runs=lambda _root, sha: [ci_run(sha)])
+        self.assertEqual(command(root, "git", "tag", "--list"), "")
+
+    def test_release_files_that_are_not_what_the_run_locked_get_no_tag(self):
+        root = self.candidate()
+        cases = {
+            "has sha256": lambda directory: (
+                directory / "aweb_naapp_journey_support-0.1.0.tar.gz").write_bytes(b"changed"),
+            "aweb_naapp_journey_support-0.1.0": lambda directory: (
+                directory / "aweb_naapp_journey_support-0.1.0.tar.gz").unlink(),
+        }
+        for reason, damage in cases.items():
+            with self.subTest(reason=reason):
+                _downloads, download = self.built_files(release_lane("aweb-naapp-journey-support", "0.1.0"))
+
+                def damaged(root_: Path, run_id: int, directory: Path) -> None:
+                    download(root_, run_id, directory)
+                    damage(directory)
+                    if reason != "has sha256":
+                        FILES.write_sums(directory)
+                with self.assertRaisesRegex(VERSIONS.VersionRefusal, reason):
+                    CANDIDATE.create_candidate(root, ["secrets-v0.1.0"], files=self.files_directory(),
+                                               runs=lambda _root, sha: [ci_run(sha)], download=damaged)
+                self.assertEqual(command(root, "git", "tag", "--list"), "")
+
+    def test_a_release_files_directory_that_exists_for_any_tag_creates_none(self):
+        root = self.candidate()
+        _downloads, download = self.built_files({**release_lane("aweb-naapp-journey-support", "0.1.0"),
+                                                 **release_lane("aweb-secrets-values", "0.1.0rc1"),
+                                                 **release_lane("aweb-secrets-runner", "0.1.0rc1")})
+        files = self.files_directory()
+        (files / "secrets-v0.1.0").mkdir(parents=True)
+        with self.assertRaisesRegex(CANDIDATE.CandidateRefusal, "secrets-v0.1.0 already exists"):
+            CANDIDATE.create_candidate(root, ["aweb-secrets-runner-v0.1.0rc1", "secrets-v0.1.0"], files=files,
+                                       runs=lambda _root, sha: [ci_run(sha)], download=download)
+        self.assertFalse((files / "aweb-secrets-runner-v0.1.0rc1").exists())
+        self.assertEqual(command(root, "git", "tag", "--list"), "")
+
+    def test_the_release_files_are_the_qualifying_runs_artifact(self):
+        stub = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, stub)
+        (stub / "gh").write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, sys\n"
+            "open(sys.argv[0] + '.calls', 'a').write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        )
+        (stub / "gh").chmod(0o755)
+        with patch.dict(os.environ, {"PATH": f"{stub}{os.pathsep}{os.environ['PATH']}"}):
+            CANDIDATE.download_release_files(ROOT, 42, stub / "files")
+        self.assertEqual(json.loads((stub / "gh.calls").read_text()),
+                         ["run", "download", "42", "--name", "release-files", "--dir", str(stub / "files")])
 
 
 class CustomerReleaseContractTest(unittest.TestCase):

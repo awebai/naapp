@@ -13,8 +13,8 @@ from __future__ import annotations
 import json
 import os
 
-# The jobs every run has.
-ALWAYS = ('plan', 'scripts')
+# The jobs every run has, whatever packages it selected.
+ALWAYS = ('plan', 'scripts', 'release-files')
 
 # Each package job, by its job id, with the package it tests.
 JOBS = {

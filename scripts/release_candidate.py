@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
-"""Tag a commit of main that a fully green CI run tested, with the requested local tags."""
+"""Tag a commit of main that a fully green CI run tested, with the requested local tags.
+
+A PyPI tag also locks, in its annotated message, the sha256 of each release file
+that run built, and keeps those files for the tag's GitHub release."""
 
 from __future__ import annotations
 
 import argparse
 import json
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
+from release_files import lane_files, read_sums, tag_lines
 from release_versions import (
+    PYPI_LANES,
     VersionRefusal as CandidateRefusal,
     manifest_version_at,
     require_runner_values,
@@ -59,6 +66,8 @@ def run(
 # The workflow whose runs qualify a commit, and its single required check.
 CI_WORKFLOW = "ci.yml"
 RESULT_JOB = "naapp CI"
+# The artifact in which a CI run keeps the PyPI release files it built.
+RELEASE_FILES_ARTIFACT = "release-files"
 
 
 def validate_tags(root: Path, tags: list[str], source: str = "HEAD") -> tuple[str, dict[str, str]]:
@@ -131,21 +140,64 @@ def qualifying_run(runs: list[dict], source_sha: str) -> dict:
     raise CandidateRefusal(f"no CI run qualifies {source_sha}{detail}")
 
 
+def download_release_files(root: Path, run_id: int, directory: Path) -> None:
+    """Download a CI run's release-files artifact into ``directory``."""
+    run(root, "gh", "run", "download", str(run_id), "--name", RELEASE_FILES_ARTIFACT, "--dir", str(directory))
+
+
+def lock_release_files(
+    root: Path,
+    tags: list[str],
+    run_id: int,
+    files: Path,
+    download: Callable[[Path, int, Path], None],
+) -> dict[str, dict[str, str]]:
+    """Copy each PyPI tag's lane files from the run's artifact into ``files/<tag>``; return their sha256s."""
+    locked: dict[str, dict[str, str]] = {}
+    with tempfile.TemporaryDirectory(prefix="naapp-release-files-") as temporary:
+        downloaded = Path(temporary)
+        download(root, run_id, downloaded)
+        sums = read_sums(downloaded)
+        for tag in tags:
+            prefix, version = tag_parts(tag)
+            names = lane_files(downloaded, prefix, version)
+            locked[tag] = {name: sums[name] for name in names}
+        for tag in locked:
+            if (files / tag).exists():
+                raise CandidateRefusal(f"{files / tag} already exists")
+        for tag, lane in locked.items():
+            target = files / tag
+            target.mkdir(parents=True)
+            for name in lane:
+                shutil.copyfile(downloaded / name, target / name)
+    return locked
+
+
 def create_candidate(
     root: Path,
     tags: list[str],
     source: str = "HEAD",
     runs: Callable[[Path, str], list[dict]] = ci_runs,
+    files: Path | None = None,
+    download: Callable[[Path, int, Path], None] = download_release_files,
 ) -> str:
     run(root, "git", "fetch", "--quiet", "origin", "main", "+refs/tags/*:refs/tags/*")
     source_sha, _versions = validate_tags(root, tags, source)
+    pypi_tags = [tag for tag in tags if tag_parts(tag)[0] in PYPI_LANES]
+    if pypi_tags and files is None:
+        raise CandidateRefusal(
+            f"{', '.join(pypi_tags)} upload the files CI built to PyPI: pass --files <directory> to keep them"
+        )
     on_main = subprocess.run(["git", "merge-base", "--is-ancestor", source_sha, "origin/main"],
                              cwd=root, capture_output=True, check=False)
     if on_main.returncode:
         raise CandidateRefusal(f"{source_sha} is not on origin/main")
     qualified = qualifying_run(runs(root, source_sha), source_sha)
+    locked = lock_release_files(root, pypi_tags, qualified["id"], files, download) if pypi_tags else {}
     for tag in tags:
         message = f"naapp {tag}\n\nCI run {qualified['html_url']} passed every job for {source_sha}."
+        if tag in locked:
+            message += f"\n\nRelease files built by that run:\n{tag_lines(locked[tag])}"
         run(root, "git", "tag", "-a", tag, source_sha, "-m", message)
     print(f"candidate PASSED: {source_sha}")
     for tag in tags:
@@ -153,16 +205,21 @@ def create_candidate(
     print("publish each tag separately:")
     for tag in tags:
         print(f"  git push origin refs/tags/{tag}")
+        if tag in locked:
+            names = " ".join(str(files / tag / name) for name in locked[tag])
+            print(f"  gh release create {tag} --verify-tag --notes-from-tag {names}")
     return source_sha
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--source", default="HEAD", help="the commit of main to tag (default HEAD)")
+    parser.add_argument("--files", type=Path,
+                        help="where to keep each PyPI tag's release files, in <files>/<tag>")
     parser.add_argument("tags", nargs="+")
     arguments = parser.parse_args(argv)
     try:
-        create_candidate(Path.cwd().resolve(), arguments.tags, arguments.source)
+        create_candidate(Path.cwd().resolve(), arguments.tags, arguments.source, files=arguments.files)
     except (
         CandidateRefusal,
         OSError,

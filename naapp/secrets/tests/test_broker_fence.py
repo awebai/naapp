@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import hashlib
+from dataclasses import replace
 from datetime import timedelta
 from uuid import uuid4
 
@@ -12,9 +13,11 @@ from aweb_naapp.egress import Destination, InternalDestinations
 
 from aweb_secrets import records
 from aweb_secrets.admission import AdmissionRefused, UseRequest
+from aweb_secrets.authority_integrity import AuthorityIntegrityKey, AuthorityRecords
 from aweb_secrets.broker_fence import BrokerFence
 from aweb_secrets.destination import DestinationRecord
 from aweb_secrets.operation import OperationTemplate
+from aweb_secrets.secret import SecretRecord
 from aweb_secrets.use_approval import BrokerOpen
 from tests.test_admission import (
     ALICE,
@@ -121,6 +124,102 @@ async def test_s3_prepares_all_authority_before_its_own_locks(db, fence):
         assert ("Idempotency-Key", f"secrets-{dispatch_id}") in prepared.call.rendered.headers
         assert prepared.call.target_path_template == operation.after["url"]["path"]
         assert "ch_original" not in prepared.call.target_path_template
+
+
+async def publish_broker_authority(db, operation, admitted, *, unpublished=None):
+    key = AuthorityIntegrityKey(b"\x01" * 32)
+    evidence = AuthorityRecords(key, admitted.installation)
+    secret_id = SECRET["secret_id"]
+    async with db.transaction() as tx:
+        [grant] = await records.active_grants(
+            tx, INSTALLATION, secret_id, principal_did=ALICE.did_aw, roles=[]
+        )
+        policy = await records.policy(tx, INSTALLATION, grant.policy_digest, team_id=TEAM)
+        [destination] = await records.destinations(tx, INSTALLATION, secret_id)
+        inputs = (
+            ("secret", (secret_id,), SECRET),
+            ("secret_state", (secret_id,), {"state": "active"}),
+            ("secret_version", (secret_id,), {"version": 4}),
+            ("grant", (grant.grant_id,), grant.after),
+            ("policy", (policy.digest,), policy.body),
+            ("operation", (secret_id, operation.operation_id), operation.after),
+            ("destination", (destination.destination_id,), destination.after),
+        )
+        # The fixture's selected record stands in for already approved authority.
+        for kind, identity, body in inputs:
+            if kind != unpublished:
+                await evidence.publish(tx, kind, identity, body, revision=1)
+    return key, destination
+
+
+@pytest.mark.parametrize(
+    "unpublished",
+    [None, "secret", "secret_state", "secret_version", "grant", "policy", "operation", "destination"],
+)
+async def test_broker_requires_published_records_at_each_effect_boundary(db, fence, unpublished):
+    operation, request, admitted = await setup(db, fence)
+    key, _ = await publish_broker_authority(db, operation, admitted, unpublished=unpublished)
+
+    new_request = replace(
+        request, request_id="second-request", request_sha256=hashlib.sha256(b"second").digest()
+    )
+    if unpublished in (None, "destination"):
+        next_admission = await _admit(db, fence, request=new_request, integrity_key=key)
+        assert next_admission.grant_id == admitted.grant_id and not next_admission.replayed
+    else:
+        with pytest.raises(AdmissionRefused) as unavailable:
+            await _admit(db, fence, request=new_request, integrity_key=key)
+        assert (unavailable.value.status, unavailable.value.code) == (
+            503, "authority_integrity_invalid"
+        )
+
+    prepared = authority(fence, admitted, request, uuid4(), integrity_key=key)
+    async with db.transaction() as tx:
+        if unpublished is None:
+            await prepared.prepare(tx)
+            assert prepared.call.secret.version == 4
+        else:
+            with pytest.raises(AdmissionRefused) as unavailable:
+                await prepared.prepare(tx)
+            assert unavailable.value.code == "authority_integrity_invalid"
+
+
+@pytest.mark.parametrize("change", ["secret", "version", "destination", "operation"])
+async def test_release_refuses_a_changed_published_record(db, fence, change):
+    operation, request, admitted = await setup(db, fence)
+    key, destination = await publish_broker_authority(db, operation, admitted)
+    secret_id = SECRET["secret_id"]
+    if change == "version":
+        async with db.transaction() as tx:
+            await records.set_active_version(tx, INSTALLATION, TEAM, secret_id, 5)
+        # Read the changed version at admission, before an intent pins it.
+        new_request = replace(
+            request, request_id="second-request", request_sha256=hashlib.sha256(b"second").digest()
+        )
+        with pytest.raises(AdmissionRefused) as unavailable:
+            await _admit(db, fence, request=new_request, integrity_key=key)
+        assert unavailable.value.code == "authority_integrity_invalid"
+        return
+    async with db.transaction() as tx:
+        if change == "secret":
+            record = SecretRecord.from_after({**SECRET, "description": "Changed record"})
+            await records.update_secret(tx, INSTALLATION, TEAM, record)
+        elif change == "operation":
+            altered = OperationTemplate.from_after({**operation.after, "timeout_s": 1})
+            await records.create_operation(tx, INSTALLATION, TEAM, altered)
+        else:
+            evidence = AuthorityRecords(key, admitted.installation)
+            await evidence.publish(
+                tx,
+                "destination",
+                (destination.destination_id,),
+                {**destination.after, "path": "/**"},
+                revision=1,
+            )
+    async with db.transaction() as tx:
+        with pytest.raises(AdmissionRefused) as unavailable:
+            await authority(fence, admitted, request, uuid4(), integrity_key=key).prepare(tx)
+        assert unavailable.value.code == "authority_integrity_invalid"
 
 
 @pytest.mark.parametrize("destination_limit,expected", [(1024, 1024), (8192, 4096)])

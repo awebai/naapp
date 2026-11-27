@@ -12,19 +12,20 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
+from release_files import check_installs, locked_files, package_files, verify_assets
 from release_versions import (
+    PYPI_LANES,
     VersionRefusal as PublishRefusal,
     final_version,
-    require_open_lane,
+    manifest_version_at,
     require_runner_values,
     tag_parts,
-    valid_version,
 )
 
 MANIFESTS = {
@@ -33,17 +34,8 @@ MANIFESTS = {
     "logs-v": "naapp/logs/pyproject.toml",
     "folio-v": "naapp/folio/pyproject.toml",
     "library-v": "naapp/library/pyproject.toml",
+    "tasks-v": "naapp/tasks/pyproject.toml",
     "aweb-secrets-runner-v": "naapp/secrets/runner/pyproject.toml",
-}
-# Each PyPI lane: the (package, directory) pairs it publishes, in order. A
-# lane's packages share the tag's version.
-PYPI_LANES = {
-    "aweb-naapp-v": (("aweb-naapp", "naapp-lib"), ("aweb-naapp-testing", "naapp-lib/testing")),
-    "aweb-secrets-runner-v": (
-        ("aweb-secrets-values", "naapp/secrets/values"),
-        ("aweb-secrets-runner", "naapp/secrets/runner"),
-    ),
-    "secrets-v": (("aweb-naapp-journey-support", "naapp/secrets/e2e"),),
 }
 
 
@@ -71,17 +63,8 @@ def run(
     return completed.stdout.strip() if capture else ""
 
 
-def manifest_version_at(root: Path, source_sha: str, path: str) -> str:
-    raw = run(root, "git", "show", f"{source_sha}:{path}", timeout=60)
-    value = tomllib.loads(raw)["project"]["version"]
-    if not valid_version(value):
-        raise PublishRefusal(f"{path} at {source_sha} has invalid version {value!r}")
-    return value
-
-
 def tag_identity(root: Path, tag: str) -> tuple[str, str, str]:
     prefix, version = tag_parts(tag)
-    require_open_lane(prefix)
     try:
         source_sha = run(root, "git", "rev-parse", f"{tag}^{{commit}}", timeout=60)
     except PublishRefusal as error:
@@ -120,73 +103,78 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def publish_pypi(root: Path, prefix: str, version: str) -> None:
-    packages = PYPI_LANES[prefix]
-    token = os.environ.get("UV_PUBLISH_TOKEN", "").strip()
-    if not token:
+def installable_from_pypi(assets: Path, versions: dict[str, str]) -> None:
+    """The lane's wheels install together, by path, with every other dependency from PyPI."""
+    check_installs(assets, versions, find_links=False)
+
+
+def publish_pypi(
+    root: Path,
+    tag: str,
+    assets: Path,
+    installable: Callable[[Path, dict[str, str]], None] = installable_from_pypi,
+) -> None:
+    """Upload the release files the annotated tag locks, each package in lane order; never build.
+
+    PyPI files are immutable, so a lane whose dependencies PyPI does not serve
+    yet (another lane's release) uploads nothing; rerun it once they are out."""
+    prefix, version = tag_parts(tag)
+    locked = locked_files(root, tag)
+    verify_assets(assets, locked)
+    lane = {package: package_files(assets, package, version) for package, _ in PYPI_LANES[prefix]}
+    if extra := sorted(set(locked) - {name for files in lane.values() for name in files}):
+        raise PublishRefusal(f"{tag} locks files its lane does not ship: {', '.join(extra)}")
+    if not os.environ.get("UV_PUBLISH_TOKEN", "").strip():
         raise PublishRefusal("UV_PUBLISH_TOKEN is required")
-    for package, directory in packages:
+    try:
+        installable(assets, {prefix: version})
+    except PublishRefusal as error:
+        raise PublishRefusal(
+            f"{tag} cannot be installed from PyPI with its locked wheels; publish the lanes it depends on "
+            f"first: {error}"
+        ) from error
+    exact = ("bash", str(Path(__file__).resolve().parent / "pypi-exact-publish.sh"))
+    for package, files in lane.items():
         with tempfile.TemporaryDirectory(prefix="aweb-pypi-") as temporary:
-            dist = Path(temporary)
-            run(root, "uv", "build", "--sdist", "--wheel", "--out-dir", str(dist), directory)
-            (dist / ".gitignore").unlink(missing_ok=True)
-            run(
-                root,
-                "bash",
-                "scripts/pypi-exact-publish.sh",
-                "inspect-staged",
-                "--dist",
-                str(dist),
-                "--package",
-                package,
-                "--version",
-                version,
-            )
+            dist = Path(temporary) / "dist"
+            dist.mkdir()
+            for name in files:
+                shutil.copyfile(assets / name, dist / name)
+            options = ("--dist", str(dist), "--package", package, "--version", version)
+            run(root, *exact, "inspect-staged", *options)
             status, observed = request_json(f"https://pypi.org/pypi/{package}/{version}/json")
-            observed_path = dist / "observed.json"
+            observed_path = Path(temporary) / "observed.json"
             observed_path.write_text(json.dumps(observed), encoding="utf-8")
-            plan = run(
-                root,
-                "bash",
-                "scripts/pypi-exact-publish.sh",
-                "plan-publish",
-                "--dist",
-                str(dist),
-                "--package",
-                package,
-                "--version",
-                version,
-                "--observed-status",
-                str(status),
-                "--observed-json",
-                str(observed_path),
-            )
-            files = [dist / name for name in plan.splitlines() if name]
-            if files:
-                run(root, "uv", "publish", *(str(path) for path in files), capture=False)
-            run(
-                root,
-                "bash",
-                "scripts/pypi-exact-publish.sh",
-                "verify-published",
-                "--dist",
-                str(dist),
-                "--package",
-                package,
-                "--version",
-                version,
-            )
+            plan = run(root, *exact, "plan-publish", *options,
+                       "--observed-status", str(status), "--observed-json", str(observed_path))
+            uploads = [dist / name for name in plan.splitlines() if name]
+            if uploads:
+                run(root, "uv", "publish", *(str(path) for path in uploads), capture=False)
+            run(root, *exact, "verify-published", *options)
 
-
-OCI_REPOSITORIES = {
-    "secrets-v": "ghcr.io/awebai/secrets",
-    "logs-v": "ghcr.io/awebai/logs",
-    "folio-v": "ghcr.io/awebai/folio",
-    "library-v": "ghcr.io/awebai/library",
+OCI_APPS = {
+    "secrets-v": "secrets",
+    "logs-v": "logs",
+    "folio-v": "folio",
+    "library-v": "library",
+    "tasks-v": "tasks",
 }
+# GHCR path segments: lowercase alphanumerics joined by single separators.
+IMAGE_NAMESPACE = re.compile(r"ghcr\.io(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)+")
+
+
+def image_namespace() -> str:
+    """Where the app images are published: NAAPP_IMAGE_NAMESPACE (the release
+    workflow sets it to its repository owner), else ghcr.io/awebai."""
+    namespace = os.environ.get("NAAPP_IMAGE_NAMESPACE", "ghcr.io/awebai")
+    if IMAGE_NAMESPACE.fullmatch(namespace) is None:
+        raise PublishRefusal(f"NAAPP_IMAGE_NAMESPACE {namespace!r} is not a ghcr.io/<owner>[/<path>] namespace")
+    return namespace
+
+
 def oci_images(prefix: str) -> tuple[str, ...]:
     """The image repositories published by this tag."""
-    return (OCI_REPOSITORIES[prefix],)
+    return (f"{image_namespace()}/{OCI_APPS[prefix]}",)
 
 
 def build_oci_archive(
@@ -330,22 +318,25 @@ def publish_staged_image(
 
 
 def publish(root: Path, tag: str, *, only: str | None = None, recovery: bool = False,
-            first_publication: tuple | list = ()) -> None:
+            first_publication: tuple | list = (), assets: Path | None = None) -> None:
     prefix, version, source_sha = tag_identity(root, tag)
     if only is not None and not (
         (only == "pypi" and prefix in PYPI_LANES)
-        or (only == "oci" and prefix in OCI_REPOSITORIES)
+        or (only == "oci" and prefix in OCI_APPS)
     ):
         raise PublishRefusal(f"{tag} does not publish to {only}")
+    if prefix in PYPI_LANES and only != "oci":
+        if assets is None:
+            raise PublishRefusal(f"{tag} uploads to PyPI only the release files its tag locks: pass --assets")
+        publish_pypi(root, tag, assets)
+    if prefix not in OCI_APPS or only == "pypi":
+        return
     with tempfile.TemporaryDirectory(prefix="aweb-publish-") as temporary:
         checkout = Path(temporary) / "source"
         run(root, "git", "worktree", "add", "--detach", str(checkout), source_sha, timeout=120)
         try:
-            if prefix in PYPI_LANES and only != "oci":
-                publish_pypi(checkout, prefix, version)
-            if prefix in OCI_REPOSITORIES and only != "pypi":
-                publish_oci(checkout, prefix, version, source_sha, recovery=recovery,
-                            first_publication=first_publication)
+            publish_oci(checkout, prefix, version, source_sha, recovery=recovery,
+                        first_publication=first_publication)
         finally:
             run(root, "git", "worktree", "remove", "--force", str(checkout), timeout=120)
 
@@ -358,6 +349,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="publish an existing tag's images again; never moves latest")
     parser.add_argument("--first-publication", action="append", default=[], metavar="REPOSITORY",
                         help="an image repository this publication creates; repeat for each")
+    parser.add_argument("--assets", type=Path,
+                        help="a published release's downloaded files, which PyPI receives unchanged")
     parser.add_argument("tag")
     arguments = parser.parse_args(argv)
     try:
@@ -365,7 +358,7 @@ def main(argv: list[str] | None = None) -> int:
             tag_identity(Path.cwd().resolve(), arguments.tag)
         else:
             publish(Path.cwd().resolve(), arguments.tag, only=arguments.only, recovery=arguments.recovery,
-                    first_publication=arguments.first_publication)
+                    first_publication=arguments.first_publication, assets=arguments.assets)
     except (
         PublishRefusal,
         OSError,

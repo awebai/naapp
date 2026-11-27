@@ -2,8 +2,8 @@
 
 The naapp runtime (`naapp-lib`, the `aweb-naapp` package) and the apps built on
 it: Secrets with its runner and values codec (`naapp/secrets`), Logs
-(`naapp/logs`), Folio (`naapp/folio`) and Library (`naapp/library`). Each app
-keeps its own package, image, version and release.
+(`naapp/logs`), Folio (`naapp/folio`), Library (`naapp/library`) and Tasks
+(`naapp/tasks`). Each app keeps its own package, image, version and release.
 
 The layout is the one these trees had in aweb, so the relative paths between
 them still resolve. The apps' design documents, the vectors their tests read

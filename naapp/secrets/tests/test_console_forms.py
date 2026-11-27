@@ -6,8 +6,10 @@ import json
 import logging
 import os
 import re
+from dataclasses import replace
 from datetime import datetime
 from urllib.parse import quote, urlencode
+from uuid import uuid4
 
 import pytest
 import uvicorn
@@ -18,6 +20,7 @@ from aweb_naapp.ratelimit import apply_ratelimit_migrations
 from aweb_naapp.runtime.approvals import ApprovalState
 from aweb_naapp.runtime.passkeys import RelyingParty
 from aweb_naapp_testing.owner_acts import INSTALLATION_ID
+from aweb_secrets_values import OAUTH2_CERTIFICATE
 from playwright.async_api import TimeoutError as BrowserTimeout
 from playwright.async_api import expect
 
@@ -27,8 +30,8 @@ from aweb_secrets.custody.opening import UseSecretOpener
 from aweb_secrets.destination import DestinationRecord
 from aweb_secrets.owners import owner_scope
 from tests.console_network import passkey_origin as passkey_origin
-from tests.harness import running_upstream
-from tests.test_admission import _install
+from tests.harness import CertificateTokenEndpoint, oauth_certificate, running_upstream
+from tests.test_admission import BOB, _install
 from tests.test_broker_audit import envelopes
 from tests.test_broker_service import broker_for, submission
 from tests.test_change_records import ITEMS
@@ -185,7 +188,7 @@ async def wait_for_review(page, review):
         raise AssertionError("approval sign-in did not load its frozen review") from None
 
 
-@pytest.mark.parametrize("kind", ["bearer", "basic"])
+@pytest.mark.parametrize("kind", ["bearer", "basic", OAUTH2_CERTIFICATE])
 async def test_native_browser_draft_dispatch_and_replacement(
     world, browser, service, tmp_path, caplog, native_http_responses, kind
 ):
@@ -201,6 +204,19 @@ async def test_native_browser_draft_dispatch_and_replacement(
         credential_opener=world.custody.backend_credential_opener,
     )
 
+    def assert_value_free(values, surface, *items):
+        # The PEM text has line breaks. A JSON response or stored request
+        # represents those as backslash escapes.
+        markers = {
+            spelling.encode()
+            for value in values
+            for spelling in (value, json.dumps(value, ensure_ascii=False)[1:-1])
+        }
+        for item in items:
+            data = item.encode() if isinstance(item, str) else item
+            if any(marker in data for marker in markers):
+                pytest.fail(f"native input leaked into {surface}")
+
     async def approve_latest(page):
         _, locator = world.inbox.links["alice@acme.com"][-1]
         await page.goto(service + "/approvals#token=" + quote(locator, safe=""))
@@ -212,33 +228,55 @@ async def test_native_browser_draft_dispatch_and_replacement(
     async def save(page, path, value, version):
         fields = [page.locator(f'#native-secret [data-kind="{kind}"] [data-value="{key}"]')
                   for key in value]
-        for field, text in zip(fields, value.values(), strict=True):
-            assert await field.get_attribute("type") == "password"
-            await field.fill(text)
+        for (name, text), field in zip(value.items(), fields, strict=True):
+            if name == "private_key_pem":
+                assert await field.get_attribute("type") == "file"
+                await field.set_input_files(
+                    {"name": "key.pem", "mimeType": "application/x-pem-file", "buffer": text.encode()}
+                )
+            elif name == "certificate_pem":
+                assert await field.evaluate("(field) => field.tagName") == "TEXTAREA"
+                await field.fill(text)
+            else:
+                assert await field.get_attribute("type") == "password"
+                await field.fill(text)
         async with page.expect_response(service + path) as receipt:
             await page.get_by_role("button", name="Save a native value draft").click()
         response = await receipt.value
         assert response.status == 201
+        assert_value_free(value.values(), "the sealing response", await response.body())
         body = await response.json()
         assert set(body) == {"version", "created_at"} and body["version"] == version
-        assert datetime.fromisoformat(body["created_at"]) == await world.db.fetch_value(
-            "SELECT created_at FROM {{tables.sealed_versions}} WHERE version=$1", version
+        sealed = await world.db.fetch_one(
+            "SELECT created_at, ciphertext FROM {{tables.sealed_versions}} WHERE version=$1",
+            version,
         )
+        assert datetime.fromisoformat(body["created_at"]) == sealed["created_at"]
+        assert_value_free(value.values(), "the sealed version", sealed["ciphertext"])
         for field in fields:
             await expect(field).to_have_value("")
         await expect(page.locator("#native-status")).to_contain_text(f"Version {version}")
         state = await page.evaluate("() => JSON.stringify({...sessionStorage, ...localStorage})")
-        page_evidence = (await page.content(), state)
-        if any(text in item for text in value.values() for item in page_evidence):
-            pytest.fail("browser retained the submitted value after sealing")
+        assert_value_free(value.values(), "browser state after sealing", await page.content(), state)
 
-    async with running_upstream(tmp_path) as upstream, await browser.new_context() as context:
-        entered = (
-            {"value": upstream.creds.bearer} if kind == "bearer" else
-            {"username": upstream.creds.basic_username, "password": upstream.creds.basic_password}
-        )
-        replacement = {key: os.urandom(24).hex() for key in entered}
-        upstream_path = f"/{kind}/echo"
+    endpoint = None
+    if kind == OAUTH2_CERTIFICATE:
+        client_id = str(uuid4())
+        first_certificate, entered = oauth_certificate(client_id)
+        next_certificate, replacement = oauth_certificate(client_id)
+        endpoint = CertificateTokenEndpoint(client_id, (first_certificate, next_certificate))
+    async with (
+        running_upstream(tmp_path, certificate_endpoint=endpoint) as upstream,
+        await browser.new_context() as context,
+    ):
+        if endpoint is None:
+            entered = (
+                {"value": upstream.creds.bearer} if kind == "bearer" else
+                {"username": upstream.creds.basic_username, "password": upstream.creds.basic_password}
+            )
+            replacement = {key: os.urandom(24).hex() for key in entered}
+        scheme = "oauth2" if endpoint is not None else kind
+        upstream_path = f"/{scheme}/echo"
         broker = broker_for(world.db, world.fence, world.custody, upstream)
         request = submission(
             upstream, installation=INSTALLATION_ID, generation=world.admitted.generation,
@@ -272,6 +310,36 @@ async def test_native_browser_draft_dispatch_and_replacement(
         assert await world.db.fetch_value("SELECT count(*) FROM {{tables.change_sets}}") == 0
 
         await form.get_by_label("Authentication kind").select_option(kind)
+        if endpoint is not None:
+            token_url = upstream.url("/oauth2/token")
+            certificate_fields = form.locator(f'[data-kind="{kind}"]')
+            await certificate_fields.get_by_label("Token endpoint URL").fill(token_url)
+            await certificate_fields.get_by_label("Assertion audience URL").fill(token_url)
+            await certificate_fields.get_by_label("OAuth scopes").fill(endpoint.scope)
+            await certificate_fields.get_by_label("Assertion signing algorithm").select_option("PS256")
+            refused_status = await page.evaluate(
+                """async ({path, kind, params, value}) => {
+                  const fields = document.querySelector("#native-secret").elements;
+                  const secret = {
+                    v: 1, secret_id: fields.secret_id.value, ref: fields.ref.value,
+                    description: "", kind, kind_params: params, sensitivity: "standard",
+                    approve_only: false, backend: "native",
+                  };
+                  try {
+                    await window.awebConsole.post(path, {secret, value, reason: "Check key pair"});
+                    return 201;
+                  } catch (error) { return error.status; }
+                }""",
+                {
+                    "path": root, "kind": kind,
+                    "params": {"token_endpoint": token_url, "scope": endpoint.scope,
+                               "audience": token_url, "signing_alg": "PS256"},
+                    "value": {**entered, "private_key_pem": replacement["private_key_pem"]},
+                },
+            )
+            assert refused_status == 400
+            assert await world.db.fetch_value("SELECT count(*) FROM {{tables.sealed_versions}}") == 0
+            assert await world.db.fetch_value("SELECT count(*) FROM {{tables.change_sets}}") == 0
         await save(page, root, entered, 1)
         [staged] = await world.db.fetch_all(
             "SELECT secret_id, version FROM {{tables.change_set_sealed}}"
@@ -293,21 +361,42 @@ async def test_native_browser_draft_dispatch_and_replacement(
                     {
                         "v": 1, "destination_id": "dst_native000", "secret_id": first.secret_id,
                         "scheme": "https", "host": "upstream.secrets.test", "port": upstream.port,
-                        "path": f"/{kind}/**", "methods": ["POST"], "query_rules": {},
+                        "path": f"/{scheme}/echo", "methods": ["POST"], "query_rules": {},
                         "header_allow": [], "network": "internal", "cidr": f"{upstream.host}/32",
                     },
                     internal_destinations=InternalDestinations.ALLOWED,
                 ),
             )
+            if endpoint is not None:
+                await records.create_destination(
+                    tx, INSTALLATION_ID, TEAM,
+                    DestinationRecord.from_after(
+                        {
+                            "v": 1, "destination_id": "dst_nativeoauth",
+                            "secret_id": first.secret_id, "scheme": "https",
+                            "host": "upstream.secrets.test", "port": upstream.port,
+                            "path": "/oauth2/token", "methods": ["POST"], "query_rules": {},
+                            "header_allow": [], "network": "internal", "cidr": f"{upstream.host}/32",
+                        },
+                        internal_destinations=InternalDestinations.ALLOWED,
+                    ),
+                )
         # Attach a test destination and grant to the record created by the browser.
         await _install(
             world.db, installation_id=INSTALLATION_ID,
             secret=dict(stored.record.after), active_version=None,
         )
+        if endpoint is not None:
+            neighbor = replace(request, authorization=replace(request.authorization, principal=BOB))
+            refused = await broker.submit(secret=ref, submission=neighbor)
+            assert (refused.status, refused.body["code"]) == (403, "grant_missing")
+            assert upstream.paths == []
         result = await broker.submit(secret=ref, submission=request)
         assert (result.status, result.body["state"]) == (200, "completed")
         assert result.body["result"]["status"] == 200
-        assert upstream.paths == [upstream_path]
+        broker_replies = [result.body]
+        expected_paths = ["/oauth2/token", upstream_path] if endpoint is not None else [upstream_path]
+        assert upstream.paths == expected_paths
 
         await page.goto(service + "/secrets/replace?ref=" + ref)
         await save(page, root + "/" + ref, replacement, 2)
@@ -324,6 +413,20 @@ async def test_native_browser_draft_dispatch_and_replacement(
             pytest.fail("replacement did not open to the submitted value")
         with pytest.raises(CustodyUnavailable):
             await opener.open(first)
+        if endpoint is not None:
+            endpoint.certificates = (next_certificate,)
+            rotated = await broker.submit(
+                secret=ref,
+                submission=submission(
+                    upstream, installation=INSTALLATION_ID, generation=world.admitted.generation,
+                    url=upstream.url(upstream_path), request_id="rotated-use",
+                ),
+            )
+            assert rotated.status == 200
+            assert rotated.body["result"]["status"] == 200
+            broker_replies.append(rotated.body)
+            assert upstream.paths == expected_paths * 2
+            assert len(endpoint.used) == 2
 
         events = await envelopes(world.db)
         acts = [
@@ -334,14 +437,20 @@ async def test_native_browser_draft_dispatch_and_replacement(
         ]
         assert sorted(acts) == ["resource.created", "resource.version_added", "resource.version_added"]
         retained = await page.evaluate("() => JSON.stringify({...sessionStorage, ...localStorage})")
-        evidence = "\n".join(
-            browser_logs + [page.url, await page.content(), retained, caplog.text,
-                            json.dumps(events), json.dumps(result.body)]
-        ).encode()
-        wire = b"\n".join(native_http_responses)
         markers = (*entered.values(), *replacement.values(), malformed)
-        if any(value.encode() in evidence or value.encode() in wire for value in markers):
-            pytest.fail("native input leaked into a response, browser state, audit or log")
+        assert_value_free(markers, "the browser", page.url, await page.content(), retained)
+        assert_value_free(markers, "logs", *browser_logs, caplog.text)
+        assert_value_free(markers, "HTTP responses", *native_http_responses)
+        assert_value_free(markers, "audit envelopes", json.dumps(events))
+        assert_value_free(
+            markers, "broker replies", *(json.dumps(reply) for reply in broker_replies)
+        )
+        metadata = await world.db.fetch_all(
+            "SELECT record::text AS body FROM {{tables.secrets}}"
+            " UNION ALL SELECT request::text FROM {{tables.change_sets}}"
+            " UNION ALL SELECT result::text FROM {{tables.dispatch_observations}} WHERE result IS NOT NULL"
+        )
+        assert_value_free(markers, "stored metadata", *(row["body"] for row in metadata))
 
 
 @pytest.mark.parametrize(

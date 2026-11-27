@@ -12,13 +12,19 @@ SEMVER = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
 PYTHON_VERSION = rf"{SEMVER}(?:rc[1-9][0-9]*)?"
 TAG_PATTERN = re.compile(
     rf"^(?:(aweb-naapp-v|aweb-secrets-runner-v)({PYTHON_VERSION})"
-    rf"|(secrets-v|logs-v|folio-v|library-v)({SEMVER}))$"
+    rf"|(secrets-v|logs-v|folio-v|library-v|tasks-v)({SEMVER}))$"
 )
-# Lanes that exist but publish nothing yet, with the reason.
-CLOSED_LANES = {
-    "aweb-naapp-v": "aweb publishes aweb-naapp and aweb-naapp-testing until the cutover",
-}
 
+# Each PyPI lane: the (package, directory) pairs it publishes, in order. A
+# lane's packages share the tag's version.
+PYPI_LANES = {
+    "aweb-naapp-v": (("aweb-naapp", "naapp-lib"), ("aweb-naapp-testing", "naapp-lib/testing")),
+    "aweb-secrets-runner-v": (
+        ("aweb-secrets-values", "naapp/secrets/values"),
+        ("aweb-secrets-runner", "naapp/secrets/runner"),
+    ),
+    "secrets-v": (("aweb-naapp-journey-support", "naapp/secrets/e2e"),),
+}
 
 class VersionRefusal(RuntimeError):
     pass
@@ -41,11 +47,6 @@ def tag_parts(tag: str) -> tuple[str, str]:
     return next((groups[i], groups[i + 1]) for i in (0, 2) if groups[i])
 
 
-def require_open_lane(prefix: str) -> None:
-    if prefix in CLOSED_LANES:
-        raise VersionRefusal(f"the {prefix} lane is closed: {CLOSED_LANES[prefix]}")
-
-
 def final_version(version: str) -> str | None:
     matched = re.fullmatch(rf"({SEMVER})rc[1-9][0-9]*", version)
     return matched.group(1) if matched else None
@@ -65,6 +66,13 @@ def _git(root: Path, *args: str) -> str:
 def _read(root: Path, revision: str, path: str) -> dict:
     raw = _git(root, "show", f"{revision}:{path}")
     return tomllib.loads(raw)
+
+
+def manifest_version_at(root: Path, revision: str, path: str) -> str:
+    value = _read(root, revision, path)["project"]["version"]
+    if not valid_version(value):
+        raise VersionRefusal(f"{path} at {revision} has invalid version {value!r}")
+    return value
 
 
 def require_runner_values(root: Path, revision: str) -> None:

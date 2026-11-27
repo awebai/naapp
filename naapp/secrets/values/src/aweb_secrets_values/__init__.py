@@ -10,6 +10,8 @@ import json
 from collections.abc import Mapping
 from typing import Any
 
+OAUTH2_CERTIFICATE = "oauth2-certificate-credentials"
+
 # The structured value fields of each kind, which a derived secret captures (§6.2).
 CAPTURE_FIELDS: Mapping[str, tuple[frozenset[str], frozenset[str]]] = {
     "bearer": (frozenset({"value"}), frozenset()),
@@ -18,6 +20,15 @@ CAPTURE_FIELDS: Mapping[str, tuple[frozenset[str], frozenset[str]]] = {
     "basic": (frozenset({"username", "password"}), frozenset()),
     "oauth2-client-credentials": (frozenset({"client_id", "client_secret"}), frozenset()),
     "aws-sigv4": (frozenset({"access_key_id", "secret_access_key"}), frozenset({"session_token"})),
+}
+# Native certificate credentials are broker-only. They cannot be captured
+# from an upstream response, selected from a vault, or released to a runner.
+VALUE_FIELDS: Mapping[str, tuple[frozenset[str], frozenset[str]]] = {
+    **CAPTURE_FIELDS,
+    OAUTH2_CERTIFICATE: (
+        frozenset({"client_id", "certificate_pem", "private_key_pem"}),
+        frozenset({"key_id"}),
+    ),
 }
 
 
@@ -30,9 +41,9 @@ def _invalid() -> ValueInvalid:
 
 
 def _validate(kind: str, value: Any) -> dict[str, str]:
-    if kind not in CAPTURE_FIELDS or not isinstance(value, Mapping):
+    if kind not in VALUE_FIELDS or not isinstance(value, Mapping):
         raise _invalid()
-    required, optional = CAPTURE_FIELDS[kind]
+    required, optional = VALUE_FIELDS[kind]
     if not required <= value.keys() or not value.keys() <= required | optional:
         raise _invalid()
     if any(not isinstance(v, str) or (not v and k != "username") for k, v in value.items()):

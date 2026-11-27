@@ -14,18 +14,22 @@ from dataclasses import dataclass
 from typing import Any
 
 from aweb_naapp.egress import EgressRefused, canonical_url
+from aweb_secrets_values import OAUTH2_CERTIFICATE
 
+OAUTH2_SECRET = "oauth2-client-credentials"
+OAUTH2_KINDS = (OAUTH2_SECRET, OAUTH2_CERTIFICATE)
 KINDS = (
     "bearer",
     "basic",
     "header",
     "query",
-    "oauth2-client-credentials",
+    *OAUTH2_KINDS,
     "aws-sigv4",
 )
 SENSITIVITIES = ("standard", "sensitive")
 BACKENDS = ("native", "onepassword")
 CLIENT_AUTHS = ("client_secret_basic", "client_secret_post")
+ASSERTION_ALGORITHMS = ("PS256", "RS256")
 FIELDS = frozenset(
     {
         "v",
@@ -85,18 +89,20 @@ def _matches(pattern: re.Pattern[str], value: Any) -> bool:
     return isinstance(value, str) and pattern.fullmatch(value) is not None
 
 
-def _is_token_endpoint(value: Any) -> bool:
-    """Whether ``value`` is a named https URL already in the egress guard's canonical form.
-
-    The token exchange is a step of the dispatch and passes the same guard.
-    """
+def _is_named_https_url(value: Any, *, allow_empty_path: bool = False) -> bool:
+    """Whether a configured URL has a hostname and the egress canonical form."""
     if not isinstance(value, str):
         return False
     try:
         url = canonical_url(value)
     except EgressRefused:
         return False
-    return url.ip is None and str(url) == value
+    canonical = str(url)
+    # An issuer identifier uses exact string comparison and may omit its
+    # root slash. The token endpoint still has to match the egress URL.
+    return url.ip is None and (
+        canonical == value or (allow_empty_path and canonical == value + "/")
+    )
 
 
 def validate_kind_params(kind: str, params: Any) -> None:
@@ -118,18 +124,24 @@ def validate_kind_params(kind: str, params: Any) -> None:
         _require(_matches(_AWS_NAME, params["region"]), "the region is a lowercase AWS name")
         _require(_matches(_AWS_NAME, params["service"]), "the service is a lowercase AWS name")
     else:
+        fields = {"token_endpoint", "scope"}
+        if kind == OAUTH2_CERTIFICATE:
+            fields |= {"audience", "signing_alg"}
+        else:
+            fields.add("client_auth")
+        _require(set(params) == fields, f"{kind} takes {sorted(fields)}")
         _require(
-            set(params) == {"token_endpoint", "client_auth", "scope"},
-            "oauth2-client-credentials takes token_endpoint, client_auth and scope",
-        )
-        _require(
-            _is_token_endpoint(params["token_endpoint"]),
+            _is_named_https_url(params["token_endpoint"]),
             "the token endpoint is a canonical https URL",
         )
-        _require(
-            params["client_auth"] in CLIENT_AUTHS,
-            "client_auth is client_secret_basic or client_secret_post",
-        )
+        if kind == OAUTH2_CERTIFICATE:
+            _require(
+                _is_named_https_url(params["audience"], allow_empty_path=True),
+                "the audience is a canonical https URL",
+            )
+            _require(params["signing_alg"] in ASSERTION_ALGORITHMS, "signing_alg is PS256 or RS256")
+        else:
+            _require(params["client_auth"] in CLIENT_AUTHS, "invalid client authentication method")
         _require(_matches(_SCOPE, params["scope"]), "the scope is space-separated scope tokens")
 
 
@@ -156,6 +168,10 @@ def _check(after: Any) -> None:
         "approve_only implies sensitive",
     )
     _require(after["backend"] in BACKENDS, "backend is native or onepassword")
+    _require(
+        after["kind"] != OAUTH2_CERTIFICATE or after["backend"] == "native",
+        "OAuth certificate credentials require native custody",
+    )
 
 
 @dataclass(frozen=True)
@@ -198,7 +214,7 @@ def widened_fields(current: SecretRecord, after: SecretRecord) -> frozenset[str]
         widened.add("sensitivity")
     if current.approve_only and not after.approve_only:
         widened.add("approve_only")
-    if after.kind == "oauth2-client-credentials" and (
+    if after.kind in OAUTH2_KINDS and (
         set(after.kind_params["scope"].split()) - set(current.kind_params.get("scope", "").split())
     ):
         widened.add("kind_params.scope")
@@ -208,7 +224,7 @@ def widened_fields(current: SecretRecord, after: SecretRecord) -> frozenset[str]
 def sealed_shape(record: SecretRecord) -> dict[str, Any]:
     """The non-secret interpretation and placement fixed after the first seal."""
     params = dict(record.kind_params)
-    if record.kind == "oauth2-client-credentials":
+    if record.kind in OAUTH2_KINDS:
         params.pop("scope")
     return {"kind": record.kind, "backend": record.backend, "kind_params": params}
 

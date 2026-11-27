@@ -44,6 +44,11 @@ from aweb_naapp.runtime.team_auth import Principal
 from pgdbm.core import TransactionManager
 
 from aweb_secrets import derived_lineage, records
+from aweb_secrets.authority_integrity import (
+    AuthorityEvidenceInvalid,
+    AuthorityIntegrityKey,
+    AuthorityRecords,
+)
 from aweb_secrets.containment_state import ContainmentRefused, require_enabled
 from aweb_secrets.derived_capture import DEFAULT_MAX_TTL_S
 from aweb_secrets.grant import GrantRecord, is_secrets_role
@@ -178,6 +183,8 @@ async def _replayed(
     roles: list[str],
     clock: Callable[[], datetime],
     derived_max_ttl_s: int,
+    authority: AuthorityRecords | None,
+    secret_ref: str,
 ) -> Admission:
     row = await tx.fetch_one(
         """
@@ -197,6 +204,10 @@ async def _replayed(
     nodes = await derived_lineage.lock_ancestry(
         tx, installation.installation_id, installation.team_id, row["secret_id"]
     )
+    if authority is not None:
+        if len(nodes) != 1:
+            raise AuthorityEvidenceInvalid()
+        await records.require_secret_authority(tx, authority, nodes[0].secret, ref=secret_ref)
     still_granted = await records.active_grants(
         tx,
         installation.installation_id,
@@ -204,6 +215,7 @@ async def _replayed(
         principal_did=principal_did,
         roles=roles,
         lock=False,
+        authority=authority,
     )
     alive = await _check_lineage(
         tx, nodes, clock, derived_max_ttl_s, [g.grant_id for g in still_granted]
@@ -233,6 +245,7 @@ async def admit_use(
     now: datetime,
     derived_max_ttl_s: int = DEFAULT_MAX_TTL_S,
     clock: Callable[[], datetime] = derived_lineage.utc_now,
+    integrity_key: AuthorityIntegrityKey | None = None,
 ) -> Admission:
     """Admit ``request`` in the caller's transaction, or raise :class:`AdmissionRefused`.
 
@@ -258,19 +271,24 @@ async def admit_use(
         for role in await roles_of(tx, key)
         if is_secrets_role(role) and await hold_role(tx, key, role)
     ]
-    async with tx.transaction() as attempt:
-        return await _admit_once(
-            attempt,
-            installation,
-            key,
-            roles,
-            principal,
-            request,
-            attestation,
-            now,
-            derived_max_ttl_s,
-            clock,
-        )
+    authority = None if integrity_key is None else AuthorityRecords(integrity_key, installation)
+    try:
+        async with tx.transaction() as attempt:
+            return await _admit_once(
+                attempt,
+                installation,
+                key,
+                roles,
+                principal,
+                request,
+                attestation,
+                now,
+                derived_max_ttl_s,
+                clock,
+                authority,
+            )
+    except AuthorityEvidenceInvalid as refused:
+        raise AdmissionRefused(refused.code, 503) from None
 
 
 async def _check_lineage(
@@ -324,6 +342,7 @@ async def _admit_once(
     now: datetime,
     derived_max_ttl_s: int,
     clock: Callable[[], datetime],
+    authority: AuthorityRecords | None,
 ) -> Admission:
     intent_id = mint_intent_id()
     try:
@@ -347,6 +366,8 @@ async def _admit_once(
             roles,
             clock,
             derived_max_ttl_s,
+            authority,
+            request.secret_ref,
         )
 
     stored = await records.secret_by_ref(
@@ -374,6 +395,7 @@ async def _admit_once(
             principal_did=key.principal_did,
             roles=roles,
             lock=False,
+            authority=authority,
         )
     )
     candidates = sorted(
@@ -390,17 +412,28 @@ async def _admit_once(
         raise AdmissionRefused("grant_missing")
     if stored.state != "active" or stored.active_version is None:
         raise AdmissionRefused("secret_disabled")
+    if authority is not None:
+        # Derived authority has additional parent and issuing-grant dependencies.
+        if len(nodes) != 1:
+            raise AuthorityEvidenceInvalid()
+        await records.require_secret_authority(tx, authority, stored, ref=request.secret_ref)
     operation = (
         None
         if request.operation_id is None
-        else await derived_lineage.current_operation(tx, nodes, request.operation_id)
+        else await derived_lineage.current_operation(
+            tx, nodes, request.operation_id, authority=authority
+        )
     )
     inherited = await _ancestor_charges(tx, installation, nodes)
 
     policies: list[Policy] = []
     for candidate in candidates:
         policy = await records.policy(
-            tx, installation.installation_id, candidate.policy_digest, team_id=installation.team_id
+            tx,
+            installation.installation_id,
+            candidate.policy_digest,
+            team_id=installation.team_id,
+            authority=authority,
         )
         if policy is None:
             raise RuntimeError("a grant references a policy that cannot be read")

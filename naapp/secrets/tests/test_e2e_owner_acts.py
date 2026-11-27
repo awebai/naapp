@@ -30,6 +30,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import subprocess
 import time
 from collections.abc import Iterator
@@ -114,6 +115,13 @@ LOGS_COMPOSE_ENV = {
     "LOGS_EMAIL_FROM": "logs@svc.test",
     "LOGS_EMAIL_CA_FILE": CA_PATH,
     "LOGS_EGRESS_DENIED_NETWORKS": "[]",
+    # The team's coordination server behind the lane's TLS front, on the
+    # lane's network: the operator's own, trusted through the lane's CA. Logs
+    # lists no hook receiver of its own.
+    "LOGS_HOOK_INTERNAL_DESTINATIONS": "allowed",
+    "LOGS_HOOK_INTERNAL_CIDR": LANE_SUBNET,
+    "LOGS_TEAM_SERVER_INTERNAL_ORIGINS": json.dumps([AWEB]),
+    "LOGS_HOOK_CA_FILE": "/runtime/tls/ca.pem",
 }
 # What the TLS front serves, and the service behind each host.
 UPSTREAMS = {
@@ -137,7 +145,6 @@ def secrets_env() -> dict[str, str]:
     lane's Logs, inside the lane's network."""
     return {
         "APP_ENV": "development",
-        "SSL_CERT_FILE": "/run/secrets-keys/hook-ca.pem",
         "SECRETS_DATABASE_URL": "postgresql://secrets:disposable@postgres:5432/secrets",
         "SECRETS_DB_SCHEMA": SECRETS_SCHEMA,
         "SECRETS_APP_ID": APP_ID,
@@ -172,6 +179,9 @@ def secrets_env() -> dict[str, str]:
         "SECRETS_HOOK_INTERNAL_DESTINATIONS": "allowed",
         "SECRETS_HOOK_INTERNAL_CIDR": LANE_SUBNET,
         "SECRETS_HOOK_CA_FILE": "/run/secrets-keys/hook-ca.pem",
+        # The team's coordination server behind the lane's TLS front, on the
+        # lane's network: the operator's own, trusted through the hook CA.
+        "SECRETS_TEAM_SERVER_INTERNAL_ORIGINS": json.dumps([AWEB]),
     }
 
 
@@ -331,7 +341,7 @@ def write_service_member(lane: ComposeLane, controller: str) -> None:
     lane.redact(pem)
     (keys / "member.pem").write_text(pem)
     shutil.copyfile(certificate, keys / "member-cert.json")
-    for name in ("custody", "request", "params", "response", "runner", "smtp", "manifest", "event", "delivery", "grant", "resolve"):
+    for name in ("request", "params", "response", "runner", "smtp", "manifest", "event", "delivery", "grant", "resolve"):
         # The app's shared key-file format: 64 hex characters, each independent.
         value = secrets.token_hex(32)
         lane.redact(value)
@@ -375,10 +385,32 @@ def create_logs_databases(lane: ComposeLane) -> None:
         assert created.returncode == 0, created.stdout + created.stderr
 
 
+def initialize_disposable_custody(lane: ComposeLane) -> None:
+    keys = lane.runtime / "keys"
+    path = keys / "custody"
+    assert not path.exists()
+    lane.checked(lane.compose("build", "secrets"), "build the custody initializer image")
+    result = _docker(
+        "run", "--rm", "--network", "none", "--read-only", "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges:true", "--user", f"{os.getuid()}:{os.getgid()}",
+        "-v", f"{keys}:/run/secrets-keys:rw", "--entrypoint", "/app/.venv/bin/python",
+        f"{lane.project}-secrets", "-m", "aweb_secrets.key_init", "--path", "/run/secrets-keys/custody",
+    )
+    lane.checked(result, "initialize the disposable custody key")
+    if result.stdout or result.stderr:
+        raise AssertionError("the image initializer printed output")
+    assert stat.S_IMODE(path.stat().st_mode) == 0o400
+    lane.redact(path.read_text().strip())
+    # The disposable bind mount is also read by the image's service UID and
+    # by the test runner's backup. Production keeps its service-owned 0400.
+    path.chmod(0o644)
+
+
 def start_apps(lane: ComposeLane, controller: str) -> None:
     """The lane's Secrets and Logs, with their members, files and databases,
     behind the TLS front."""
     write_service_member(lane, controller)
+    initialize_disposable_custody(lane)
     write_logs_files(lane, controller)
     create_logs_databases(lane)
     lane.up("secrets", "logs")

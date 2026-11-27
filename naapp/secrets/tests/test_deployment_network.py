@@ -35,6 +35,8 @@ async def test_hook_origin_addresses_are_checked_before_service_startup(
                 ca = tmp_path / "bad-hook-ca"
                 if answer == "malformed_ca":
                     ca.write_text("not a certificate")
+                # The deployment reads it from the environment, as the denials below.
+                configured.pop("hook_ca_file")
                 monkeypatch.setenv("SECRETS_HOOK_CA_FILE", str(ca))
                 with pytest.raises(OSError):
                     create_deployment(DeploymentSettings(_env_file=None, **configured))

@@ -76,6 +76,12 @@ from pgdbm.core import TransactionManager
 
 from aweb_secrets import records, runners
 from aweb_secrets.approvers import approver_exists, record_approver
+from aweb_secrets.authority_integrity import (
+    AuthorityEvidenceInvalid,
+    AuthorityIntegrityKey,
+    AuthorityRecords,
+    invalidate_authority,
+)
 from aweb_secrets.change import (
     MAX_LIFETIME,
     ChangeRefused,
@@ -295,6 +301,7 @@ class ChangeSets:
         credential_audit: CredentialAudit,
         draft_limit: DraftLimit,
         internal_destinations: InternalDestinations,
+        integrity_key: AuthorityIntegrityKey | None = None,
     ) -> None:
         self._db = db
         self._approvals = approvals
@@ -305,6 +312,7 @@ class ChangeSets:
         self._credential_audit = credential_audit
         self._draft_limit = draft_limit
         self._internal_destinations = internal_destinations
+        self._integrity_key = integrity_key
 
     async def draft(
         self,
@@ -615,6 +623,9 @@ class ChangeSets:
                 team_id,
                 dependent["secret_id"],
             )
+            await invalidate_authority(
+                tx, installation_id, team_id, "secret_version", (dependent["secret_id"],)
+            )
             await self._custody.destroy(
                 tx,
                 SealContext(
@@ -640,6 +651,7 @@ class ChangeSets:
         change: Mapping[str, Any],
         after: Mapping[str, Any],
         confirmed_by: str,
+        authority: AuthorityRecords | None,
     ) -> tuple[str, ...]:
         installation_id, team_id = change["installation_id"], change["team_id"]
         context = SealContext(installation_id, team_id, after["secret_id"], after["version"])
@@ -653,6 +665,12 @@ class ChangeSets:
         if row is None:
             raise ChangeRefused("secret unavailable", code="secret_unknown")
         record = SecretRecord.from_after(_request(row["record"]))
+        if authority is not None:
+            await authority.require(tx, "secret", (context.secret_id,), record.after)
+            if row["active_version"] is not None:
+                await authority.require(
+                    tx, "secret_version", (context.secret_id,), {"version": row["active_version"]}
+                )
         if (
             after["credential_version"] != await self._active_backend_token(tx, change)
             or context.version <= (row["active_version"] or 0)
@@ -679,6 +697,11 @@ class ChangeSets:
         await records.set_active_version(
             tx, installation_id, team_id, context.secret_id, context.version
         )
+        if authority is not None:
+            await authority.publish(
+                tx, "secret_version", (context.secret_id,), {"version": context.version},
+                revision=change["base_revision"] + 1,
+            )
         return tuple(sorted(affected))
 
     async def _backend_audit(
@@ -748,13 +771,13 @@ class ChangeSets:
                         "job credential source unavailable", code="job_source_unknown"
                     )
                 record = stored.record
-            required, optional = CAPTURE_FIELDS[record.kind]
+            fields = CAPTURE_FIELDS.get(record.kind)
             selected = {
                 entry["field"]
                 for entry in item["after"]["env"].values()
                 if isinstance(entry, dict) and entry.get("$credential") == ref
             }
-            if not selected <= required | optional:
+            if fields is None or not selected <= fields[0] | fields[1]:
                 raise ChangeRefused(
                     "job credential fields differ from source kind", code="job_source_invalid"
                 )
@@ -989,6 +1012,9 @@ class ChangeSets:
         revision = await claim_config_revision(
             tx, installation_id, change["base_revision"], team_id=admitted.team_id
         )
+        authority = (
+            None if self._integrity_key is None else AuthorityRecords(self._integrity_key, admitted)
+        )
         designations: list[Designation] = []
         contact_changes: list[ContactChange] = []
         runner_registrations: list[RunnerRegistration] = []
@@ -1006,7 +1032,12 @@ class ChangeSets:
             for item in change["changes"]:
                 if item["kind"] == "backend_credential":
                     continue
-                applied = await self._apply(tx, change, item, evidence, confirmer.principal_did)
+                try:
+                    applied = await self._apply(
+                        tx, change, item, evidence, confirmer.principal_did, authority
+                    )
+                except AuthorityEvidenceInvalid as refused:
+                    raise ChangeRefused(str(refused), code=refused.code) from None
                 if isinstance(applied, RunnerRegistration):
                     runner_registrations.append(applied)
                 elif isinstance(applied, tuple):
@@ -1149,11 +1180,12 @@ class ChangeSets:
         item: Mapping[str, Any],
         evidence: OwnerApproval,
         confirmed_by: str,
+        authority: AuthorityRecords | None = None,
     ) -> list[Designation] | ContactChange | RunnerRegistration | tuple[str, ...]:
         installation_id, team_id = change["installation_id"], change["team_id"]
         after = item["after"]
         if item["kind"] == "onepassword_binding":
-            return await self._apply_onepassword_binding(tx, change, after, confirmed_by)
+            return await self._apply_onepassword_binding(tx, change, after, confirmed_by, authority)
         if item["kind"] == "job":
             await self._validate_job_sources(tx, change, item)
             await apply_job_change(tx, installation_id=installation_id, team_id=team_id, item=item)
@@ -1162,12 +1194,12 @@ class ChangeSets:
             return await self._apply_runner(tx, change, item)
         if item["kind"] == "secret_value":
             try:
-                return await self._replace_value(tx, change, after, confirmed_by)
+                return await self._replace_value(tx, change, after, confirmed_by, authority)
             except records.RecordMissing as missing:
                 raise ChangeRefused(str(missing), code="record_missing") from None
         if item["kind"] == "reenable":
             try:
-                await self._containment.reenable(
+                enabled = await self._containment.reenable(
                     tx,
                     installation_id=installation_id,
                     team_id=team_id,
@@ -1176,9 +1208,20 @@ class ChangeSets:
                 )
             except ContainmentRefused as refused:
                 raise ChangeRefused("reenable refused", code=refused.code) from None
-            if after["target_kind"] == "secret":
-                return (await self._reenable_id(tx, installation_id, team_id, after["target_ref"]),)
-            return ()
+            if enabled is None:
+                return ()
+            if authority is not None:
+                await records.require_secret_definition(
+                    tx, authority, enabled, ref=after["target_ref"]
+                )
+                await authority.publish(
+                    tx,
+                    "secret_state",
+                    (enabled.record.secret_id,),
+                    {"state": enabled.state},
+                    revision=change["base_revision"] + 1,
+                )
+            return (enabled.record.secret_id,)
         if item["kind"] == "role":
             await assign(
                 tx, PrincipalKey(team_id=team_id, principal_did=after["principal"]), after["role"]
@@ -1237,7 +1280,7 @@ class ChangeSets:
             await relax_four_eyes(tx, installation_id=installation_id, team_id=team_id)
             return []
         if item["kind"] in RECORD_KINDS:
-            await self._apply_record(tx, change, item)
+            await self._apply_record(tx, change, item, authority)
             return []
         raise ChangeRefused(f"{item['kind']} cannot be applied", code="change_kind_not_applicable")
 
@@ -1275,10 +1318,15 @@ class ChangeSets:
             raise ChangeRefused("runner change refused", code=refused.code) from None
 
     async def _apply_record(
-        self, tx: TransactionManager, change: Mapping[str, Any], item: Mapping[str, Any]
+        self,
+        tx: TransactionManager,
+        change: Mapping[str, Any],
+        item: Mapping[str, Any],
+        authority: AuthorityRecords | None,
     ) -> None:
         installation_id, team_id = change["installation_id"], change["team_id"]
         kind, op, after = item["kind"], item["op"], item["after"]
+        published: tuple[tuple[str, ...], Mapping[str, object]] | None = None
         try:
             if kind == "secret":
                 record = SecretRecord.from_after(after)
@@ -1292,6 +1340,14 @@ class ChangeSets:
                         raise ChangeRefused(
                             "the sealed secret's shape is fixed", code="sealed_secret_fixed"
                         )
+                    if authority is not None:
+                        await authority.publish(
+                            tx,
+                            "secret_state",
+                            (record.secret_id,),
+                            {"state": "active"},
+                            revision=change["base_revision"] + 1,
+                        )
                 else:
                     if await tx.fetch_value(
                         "SELECT 1 FROM {{tables.secrets}}"
@@ -1303,6 +1359,7 @@ class ChangeSets:
                         raise _exists(kind, record.ref)
                     await self._check_sealed_shape(tx, installation_id, team_id, record, lock=True)
                     await records.update_secret(tx, installation_id, team_id, record)
+                published = ((record.secret_id,), record.after)
             elif kind == "destination":
                 destination = self._destination(after, "destination")
                 await _require_secret(tx, installation_id, team_id, destination.secret_id)
@@ -1312,15 +1369,19 @@ class ChangeSets:
                 ):
                     raise _exists(kind, destination.destination_id)
                 await records.create_destination(tx, installation_id, team_id, destination)
+                published = ((destination.destination_id,), destination.after)
             elif kind == "operation":
                 operation = OperationTemplate.from_after(after)
                 await _require_secret(tx, installation_id, team_id, operation.secret_id)
                 await records.create_operation(tx, installation_id, team_id, operation)
+                published = ((operation.secret_id, operation.operation_id), operation.after)
             elif kind == "grant":
                 grant = GrantRecord.from_after(after)
                 await _require_secret(tx, installation_id, team_id, grant.secret_id)
                 if (
-                    await records.policy(tx, installation_id, grant.policy_digest, team_id=team_id)
+                    await records.policy(
+                        tx, installation_id, grant.policy_digest, team_id=team_id, authority=authority
+                    )
                     is None
                 ):
                     raise records.RecordMissing(f"no policy {grant.policy_digest}")
@@ -1329,6 +1390,7 @@ class ChangeSets:
                 ):
                     raise _exists(kind, grant.grant_id)
                 await records.create_grant(tx, installation_id, team_id, grant)
+                published = ((grant.grant_id,), grant.after)
             elif kind == "grant_template":
                 template = GrantTemplate.from_after(after)
                 stored = await records.grant_template(
@@ -1340,12 +1402,11 @@ class ChangeSets:
                     raise records.RecordMissing(f"no grant template {template.grant_template_id}")
                 await records.set_grant_template(tx, installation_id, template, team_id=team_id)
             else:
-                await records.create_policy(
-                    tx,
-                    installation_id,
-                    Policy.from_body({k: v for k, v in after.items() if k != "v"}),
-                    team_id=team_id,
-                )
+                policy = Policy.from_body({k: v for k, v in after.items() if k != "v"})
+                await records.create_policy(tx, installation_id, policy, team_id=team_id)
+                published = ((policy.digest,), policy.body)
+            if authority is not None and published is not None:
+                await authority.publish(tx, kind, *published, revision=change["base_revision"] + 1)
         except records.RecordRefused as refused:
             raise ChangeRefused(str(refused), code=refused.code) from None
         except records.RecordMissing as missing:
@@ -1394,6 +1455,7 @@ class ChangeSets:
         change: Mapping[str, Any],
         after: Mapping[str, Any],
         confirmed_by: str,
+        authority: AuthorityRecords | None,
     ) -> tuple[str, ...]:
         """Make the item's sealed version, bound to it at draft time, the secret's
         active one, and destroy the version it replaces."""
@@ -1402,6 +1464,12 @@ class ChangeSets:
         if stored is None:
             raise records.RecordMissing(f"no secret {after['secret_ref']}")
         secret_id = stored.record.secret_id
+        if authority is not None:
+            await records.require_secret_definition(tx, authority, stored, ref=after["secret_ref"])
+            if stored.active_version is not None:
+                await authority.require(
+                    tx, "secret_version", (secret_id,), {"version": stored.active_version}
+                )
         context = SealContext(
             installation_id=installation_id,
             team_id=team_id,
@@ -1424,6 +1492,11 @@ class ChangeSets:
             except ContainmentRefused as refused:
                 raise ChangeRefused("replacement refused", code=refused.code) from None
         await records.set_active_version(tx, installation_id, team_id, secret_id, after["version"])
+        if authority is not None:
+            await authority.publish(
+                tx, "secret_version", (secret_id,), {"version": after["version"]},
+                revision=change["base_revision"] + 1,
+            )
         if stored.active_version is not None and stored.active_version != after["version"]:
             await self._custody.destroy(
                 tx,

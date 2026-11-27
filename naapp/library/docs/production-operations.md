@@ -96,7 +96,7 @@ in the image as it does in a checkout.
 
 | Setting | Value |
 | --- | --- |
-| Repository | `https://github.com/awebai/aweb`, branch `main` |
+| Repository | `https://github.com/awebai/naapp`, branch `main` |
 | Root directory | the repository root (empty) |
 | Dockerfile path | `./naapp/library/Dockerfile` |
 | Docker build context | `.` (the repository root) |
@@ -168,19 +168,23 @@ installation needs Juan's explicit go for that action.
 
 Before requesting production approval, record all of the following:
 
-- exact full lowercase 40-character candidate SHA, already at `origin/main`;
+- exact full lowercase 40-character candidate SHA, already on `main` of the remote;
 - exact current live rollback deploy ID and full commit SHA;
 - explicit expected shelf profile ref, version and `sha256:` digest (no default ref);
 - expected rendered behavior for Claude Code and Pi;
 - the independent review verdict;
 - the human approval for this service, including any candidate constraints it imposes.
 
-`prod-deploy` fetches origin and refuses unless `PROD_COMMIT` is exactly the fetched
-`origin/main` tip. Arrange the deploy immediately after the reviewed train lands. If
-main moves first, stop and reconcile the new candidate with the coordinator and reviewer;
-do not substitute a different SHA, force a ref, or bypass the comparison.
-Use a clean clone from `https://github.com/awebai/aweb`; a local SSH host alias such as
-`github-aweb` is not the pinned repository identity. `prod-verify` checks its clean
+`prod-deploy` and `prod-move-build` read `main` from the remote itself and refuse unless
+`PROD_COMMIT` is on it (the tip or behind it) and strictly ahead of the live commit: a
+deploy never moves production backwards, which is `prod-rollback`'s job, with a built
+artifact. When main has moved past the approved candidate, deploy that candidate; do not
+substitute a different SHA. A first deploy after the service moved repositories names the
+repository it moved from with `FROM_REPOSITORY` and repeats it in
+`CONFIRM_FROM_REPOSITORY`; the live commit must then be on that repository's `main` and
+not on the configured one.
+Use a clean clone from `https://github.com/awebai/naapp`; a local SSH host alias is not
+the pinned repository identity. `prod-verify` checks its clean
 executing source and exact deployed artifact; it does not fetch or demand a later main tip.
 
 Never deploy a tag, short SHA, local `HEAD`, or an unmerged commit. Never infer the
@@ -198,7 +202,7 @@ rollback artifact after starting the deploy.
 | `make prod-health-client-proof ...` | Makes exactly two bounded canonical health requests: the known-blocked baseline UA must return 403 and the honest gate UA must return the exact 200 payload; persists both artifacts. |
 | `make prod-gate-current-incumbent ...` | Read-only semantic probe of the exact pinned pre-aasb incumbent: authenticated generated-origin then mandatory public materialization for both runtimes, validating only the pinned legacy response shape. It does not prove the asserted deploy is live or emit AATK receipts. |
 | `make prod-move-build ... APPLY=1` | Performs only the pinned incumbent-to-repository-root build-settings transition; verifies the live artifact remains unchanged. |
-| `make prod-deploy ... APPLY=1` | Validates topology and rollback pin, fetches and verifies exact `origin/main`, starts a clear-cache deploy, waits for `live`, then waits boundedly for exact origin and public health readiness. |
+| `make prod-deploy ... APPLY=1` | Validates topology and rollback pin, verifies the candidate is on the remote `main` and ahead of the live commit, starts a clear-cache deploy, waits for `live`, then waits boundedly for exact origin and public health readiness. |
 | `make prod-wait ...` | Restartable read-only wait for one exact deploy ID and commit. |
 | `make prod-verify ...` | Requires the exact deploy to be the sole live artifact, checks origin/public health, then runs generated-origin raw, public raw, released-client, and real-harness gates. |
 | `make prod-rollback ... APPLY=1` | Pins the exact current live deployment, validates a distinct known-good rollback deploy ID/commit/state, rolls back, waits, re-checks the sole live artifact, and checks both health surfaces against the approved rollback commit. A pre-build-identity artifact additionally requires an explicit per-run `ALLOW_LEGACY_MISSING_BUILD_FOR` equal to that rollback commit. |

@@ -57,6 +57,23 @@ class Workflow(unittest.TestCase):
                 self.assertEqual(uploads[0]['if'], 'always()')
                 self.assertEqual(uploads[0]['with']['path'], 'junit/')
 
+    def test_the_scripts_job_lints_the_scripts(self):
+        steps = [step.get('run', '') for step in workflow()['jobs']['scripts']['steps']]
+        self.assertIn('make lint-scripts', steps)
+        makefile = (WORKFLOWS.parents[1] / 'Makefile').read_text()
+        recipe = makefile.split('\nlint-scripts:', 1)[1].split('\n\n', 1)[0]
+        self.assertIn('ruff check --select F,E9 scripts', recipe)
+
+    def test_every_run_builds_locks_and_keeps_the_pypi_release_files(self):
+        self.assertIn('release-files', ALWAYS)
+        job = workflow()['jobs']['release-files']
+        self.assertNotIn('if', job)
+        runs = [step.get('run', '') for step in job['steps']]
+        self.assertIn('python3 scripts/release_files.py build --out release-files', runs)
+        (upload,) = [step for step in job['steps'] if step.get('uses', '').startswith('actions/upload-artifact@')]
+        self.assertEqual(upload['with'], {'name': 'release-files', 'path': 'release-files/',
+                                          'if-no-files-found': 'error'})
+
     def test_no_trigger_filters_by_path(self):
         for path in sorted(WORKFLOWS.glob('*.yml')):
             triggers = yaml.load(path.read_text(), Loader=yaml.BaseLoader)['on']

@@ -205,7 +205,7 @@ wheels = [
 
 [[package]]
 name = "aweb-naapp"
-version = "0.5.2"
+version = "0.6.0"
 source = { editable = "../../naapp-lib" }
 
 [package.optional-dependencies]
@@ -292,7 +292,7 @@ dev = [
 
 [[package]]
 name = "aweb-naapp-testing"
-version = "0.5.2"
+version = "0.6.0"
 source = { editable = "../../naapp-lib/testing" }
 dependencies = [
     { name = "aiosmtpd" },

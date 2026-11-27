@@ -3,7 +3,7 @@
   "service_name": "library",
   "service_slug": "library-02jf",
   "region": "virginia",
-  "repo": "https://github.com/awebai/aweb",
+  "repo": "https://github.com/awebai/naapp",
   "root_dir": "",
   "dockerfile_path": "./naapp/library/Dockerfile",
   "docker_context": ".",

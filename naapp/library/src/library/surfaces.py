@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from html import escape
+from importlib.metadata import metadata
 from pathlib import Path
 from typing import Any
 
@@ -270,9 +271,20 @@ def _site(*, public_origin: str, title: str, description: str) -> SiteConfig:
         footer_columns=_FOOTER_COLUMNS,
         footer_bottom=_FOOTER_BOTTOM,
         header_actions=(),
-        source_url="https://github.com/awebai/aweb/tree/main/naapp/library",
+        source_url=_SOURCE_URL,
         og_image="/brand/field-v1/library-card.png",
     )
+
+
+def _source_url() -> str:
+    """Library's source, as its package metadata names it (pyproject's Homepage)."""
+    urls = dict(entry.split(", ", 1) for entry in metadata("library").get_all("Project-URL") or ())
+    return urls["Homepage"]
+
+
+_SOURCE_URL = _source_url()
+# "github.com/awebai/naapp (naapp/library)": the repository, then the path in it.
+_SOURCE_LABEL = "{} ({})".format(*_SOURCE_URL.removeprefix("https://").split("/tree/main/", 1))
 
 
 def _catalog_teaser(blueprints: Any) -> str:
@@ -472,7 +484,7 @@ def render_landing_page(*, public_origin: str, blueprints: Any = None) -> str:
           <a class="btn primary btn--lg" href="#use">Get started</a>
           <a class="btn secondary btn--lg" href="/llms.txt">Read llms.txt</a>
         </div>
-        <p style="margin-top:var(--s3);font-size:var(--step-0);color:var(--muted)">Open source, MIT-licensed — <a href="https://github.com/awebai/aweb/tree/main/naapp/library" style="color:var(--accent);font-weight:550">github.com/awebai/aweb (naapp/library)</a></p>
+        <p style="margin-top:var(--s3);font-size:var(--step-0);color:var(--muted)">Open source, MIT-licensed — <a href="{escape(_SOURCE_URL, quote=True)}" style="color:var(--accent);font-weight:550">{escape(_SOURCE_LABEL)}</a></p>
       </div>
     </section>
 

@@ -2,7 +2,7 @@
 # calls only these targets. PACKAGES narrows a run to the packages a change
 # affects (scripts/affected_packages.py); by default it is every package.
 
-ALL_PACKAGES := naapp-lib naapp/folio naapp/library naapp/logs naapp/secrets naapp/secrets/runner naapp/secrets/values
+ALL_PACKAGES := naapp-lib naapp/folio naapp/library naapp/logs naapp/secrets naapp/secrets/runner naapp/secrets/values naapp/tasks
 PACKAGES ?= $(ALL_PACKAGES)
 
 # The suites run behind the egress guard, which refuses network access beyond
@@ -16,11 +16,11 @@ PRODUCTION_AWID_PROJECT := scripts/test-egress/production-awid
 # The aw release the e2e journeys run, installed by scripts/install-aw.sh.
 AW_DIR ?= $(abspath .tools/bin)
 
-SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_served_manifest_digests \
+SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_release_files test_served_manifest_digests \
 	test_secrets_shards test_shipping
 
-.PHONY: affected sync lint test test-scripts production-awid-sync browsers renderer-deps test-renderer image-smoke-folio image-smoke-library check-library-dev aw \
-	check-library-aatk check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets release-checks \
+.PHONY: affected sync lint lint-scripts test test-scripts production-awid-sync browsers renderer-deps test-renderer image-smoke-folio image-smoke-library image-smoke-tasks check-library-dev aw \
+	check-library-aatk check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets e2e-tasks release-checks \
 	release-candidate release-publish
 
 # The packages the change from BASE to HEAD affects, as a JSON list.
@@ -73,6 +73,10 @@ test: production-awid-sync $(SECRETS_AW_TOOLS)
 # The repository's own scripts: package selection, manifest digests, shards
 # and the test infrastructure, in the runtime's locked environment, which has
 # the pytest the shard check runs.
+# Pyflakes and syntax errors in the repository's scripts, which no package lints.
+lint-scripts:
+	uv run --frozen --project naapp-lib ruff check --select F,E9 scripts
+
 test-scripts:
 	cd scripts && uv run --frozen --project ../naapp-lib python -m unittest -q $(SCRIPT_TESTS)
 	cd scripts/test-egress && python3 -m unittest -q test_native test_pgdg_key
@@ -103,6 +107,10 @@ image-smoke-folio:
 image-smoke-library:
 	bash scripts/image-smoke.sh library
 
+# Tasks' service image, built as the release builds it, starts and serves /live.
+image-smoke-tasks:
+	bash scripts/image-smoke.sh tasks
+
 # Library's developer targets work from a naapp clone: compile, then the dev
 # server started by make run answers /live.
 check-library-dev:
@@ -127,17 +135,20 @@ e2e-library:
 e2e-secrets:
 	NAAPP_AW_BINARY="$${NAAPP_AW_BINARY:-$(AW_DIR)/aw}" $(MAKE) -C naapp/secrets e2e
 
+e2e-tasks:
+	NAAPP_AW_BINARY="$${NAAPP_AW_BINARY:-$(AW_DIR)/aw}" $(MAKE) -C naapp/tasks e2e
+
 # Each Secrets test module is in exactly one shard of candidate-gate/secrets-shards.json.
 check-secrets-shards:
 	uv sync --frozen --project naapp/secrets
 	$(MAKE) -C naapp/secrets check-shards
 
-# Everything CI runs, for every package: scripts/release_candidate.py tags a
-# commit only after this passes. It needs PostgreSQL and Redis for the suites
-# and Docker for the journeys, as the CI jobs have them.
+# Everything CI runs, for every package, on one host. It needs PostgreSQL and
+# Redis for the suites and Docker for the journeys, as the CI jobs have them.
 release-checks:
 	$(MAKE) sync PACKAGES="$(ALL_PACKAGES)"
 	$(MAKE) lint PACKAGES="$(ALL_PACKAGES)"
+	$(MAKE) lint-scripts
 	$(MAKE) test-scripts
 	$(MAKE) check-library-aatk
 	$(MAKE) check-secrets-shards
@@ -146,11 +157,13 @@ release-checks:
 	$(MAKE) e2e-folio
 	$(MAKE) e2e-library
 	$(MAKE) e2e-secrets
+	$(MAKE) e2e-tasks
 
-# Runs release-checks on a clean commit of origin/main, then tags it (docs/release.md).
+# Tags SOURCE (default HEAD), a commit of origin/main that a fully green CI run
+# tested (docs/release.md).
 release-candidate:
 	@test -n "$(TAGS)" || { echo "TAGS is required" >&2; exit 2; }
-	python3 scripts/release_candidate.py $(TAGS)
+	python3 scripts/release_candidate.py $(if $(SOURCE),--source $(SOURCE)) $(if $(FILES),--files $(FILES)) $(TAGS)
 
 release-publish:
 	@test -n "$(TAG)" || { echo "TAG is required" >&2; exit 2; }

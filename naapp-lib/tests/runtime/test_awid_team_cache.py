@@ -17,6 +17,7 @@ import httpx
 import pytest
 from aweb_naapp_testing import Member
 from awid.pagination import decode_cursor, encode_cursor
+from awid.registry import RegistryClient
 from awid_service.testing import REGISTRY_URL, SERVICE_TOKEN
 from fastapi import HTTPException
 
@@ -137,53 +138,71 @@ async def test_history_facts_are_reused_for_at_most_a_minute(registry, team):
     assert 0 < cache._cache[TEAM_ID].expires_at - time.monotonic_ns() <= seconds_to_ns(60)
 
 
-async def test_history_page_bound_never_authorizes_from_partial_or_expired_facts(
-    registry, team_past_first_page, history_clock, caplog
-):
-    await add_filler_certificates(registry, team_past_first_page, 201, 19999)
-    complete = history_cache(registry)
-    async with relying_app(registry, public_origin=ORIGIN, cache=complete) as (client, _):
-        assert (await client.get("/v1/items", headers=get_items(team_past_first_page))).status_code == 200
-    assert TEAM_ID in complete._cache
-    assert len(certificate_pages(registry)) == 100
+async def set_visibility(registry, member: Member, visibility: str) -> None:
+    """Change the team's visibility through AWID's team-controller route."""
+    name, domain = member.team_id.split(":", 1)
+    client = RegistryClient(REGISTRY_URL, transport=registry.transport)
+    try:
+        await client.set_team_visibility(domain, name, visibility, bytes(member.team_key))
+    finally:
+        await client.aclose()
+    stored = await registry.db.fetch_one("SELECT visibility FROM {{tables.teams}}")
+    assert stored["visibility"] == visibility
+    registry.transport.calls.clear()
+
+
+async def test_history_page_bound_never_authorizes_from_partial_or_expired_facts(registry, history_clock, caplog):
+    """One 20,000-certificate history, read as a public and as a private team."""
+    member = await registered_target(registry, visibility="public", preceding=200)
+    await add_filler_certificates(registry, member, 201, 19999)
+    visibilities = ("public", "private")
+    complete = {}
+    for visibility in visibilities:
+        await set_visibility(registry, member, visibility)
+        complete[visibility] = history_cache(registry)
+        async with relying_app(registry, public_origin=ORIGIN, cache=complete[visibility]) as (client, _):
+            assert (await client.get("/v1/items", headers=get_items(member))).status_code == 200
+        assert TEAM_ID in complete[visibility]._cache, visibility
+        assert len(certificate_pages(registry)) == 100, visibility
 
     # One more genuinely registered certificate requires a 101st page.
-    await add_filler_certificates(registry, team_past_first_page, 20000, 20000)
-    registry.transport.calls.clear()
-    incomplete = history_cache(registry)
-    async with relying_app(registry, public_origin=ORIGIN, cache=incomplete) as (client, _):
-        assert refused(await client.get("/v1/items", headers=get_items(team_past_first_page))) == (
-            503,
-            "registry_pagination_failed",
-        )
-        assert not incomplete._cache
-        assert len(certificate_pages(registry)) == 100
-        assert refused(await client.get("/v1/items", headers=get_items(team_past_first_page))) == (
-            503,
-            "registry_pagination_failed",
-        )
-        assert len(certificate_pages(registry)) == 100
-        history_clock[0] += seconds_to_ns(5)
-        assert refused(await client.get("/v1/items", headers=get_items(team_past_first_page))) == (
-            503,
-            "registry_pagination_failed",
-        )
-    assert not incomplete._cache
-    assert len(certificate_pages(registry)) == 200
+    await add_filler_certificates(registry, member, 20000, 20000)
+    for visibility in visibilities:
+        await set_visibility(registry, member, visibility)
+        incomplete = history_cache(registry)
+        async with relying_app(registry, public_origin=ORIGIN, cache=incomplete) as (client, _):
+            assert refused(await client.get("/v1/items", headers=get_items(member))) == (
+                503,
+                "registry_pagination_failed",
+            ), visibility
+            assert not incomplete._cache, visibility
+            assert len(certificate_pages(registry)) == 100, visibility
+            assert refused(await client.get("/v1/items", headers=get_items(member))) == (
+                503,
+                "registry_pagination_failed",
+            ), visibility
+            assert len(certificate_pages(registry)) == 100, visibility
+            history_clock[0] += seconds_to_ns(5)
+            assert refused(await client.get("/v1/items", headers=get_items(member))) == (
+                503,
+                "registry_pagination_failed",
+            ), visibility
+        assert not incomplete._cache, visibility
+        assert len(certificate_pages(registry)) == 200, visibility
 
-    # A cache that held the whole history does not fall back to it once expired.
-    expired = replace(complete._cache[TEAM_ID], expires_at=-1)
-    complete._cache[TEAM_ID] = expired
-    caplog.clear()
-    registry.transport.calls.clear()
-    async with relying_app(registry, public_origin=ORIGIN, cache=complete) as (client, _):
-        assert refused(await client.get("/v1/items", headers=get_items(team_past_first_page))) == (
-            503,
-            "registry_pagination_failed",
-        )
-    assert len(certificate_pages(registry)) == 100
-    assert complete._cache[TEAM_ID] is expired
-    assert "AWID team facts refresh failed" in caplog.text
+        # A cache that held the whole history does not fall back to it once expired.
+        expired = replace(complete[visibility]._cache[TEAM_ID], expires_at=-1)
+        complete[visibility]._cache[TEAM_ID] = expired
+        caplog.clear()
+        registry.transport.calls.clear()
+        async with relying_app(registry, public_origin=ORIGIN, cache=complete[visibility]) as (client, _):
+            assert refused(await client.get("/v1/items", headers=get_items(member))) == (
+                503,
+                "registry_pagination_failed",
+            ), visibility
+        assert len(certificate_pages(registry)) == 100, visibility
+        assert complete[visibility]._cache[TEAM_ID] is expired, visibility
+        assert "AWID team facts refresh failed" in caplog.text, visibility
 
 
 def later_page_fault(kind: str, first_cursor: dict):

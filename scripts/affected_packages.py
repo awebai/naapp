@@ -29,6 +29,7 @@ PACKAGES = (
     'naapp/secrets',
     'naapp/secrets/runner',
     'naapp/secrets/values',
+    'naapp/tasks',
 )
 
 

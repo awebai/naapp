@@ -39,10 +39,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from aweb_secrets_values import OAUTH2_CERTIFICATE
 from pgdbm import AsyncDatabaseManager, AsyncMigrationManager
 from pgdbm.core import TransactionManager
 
 from aweb_secrets import run_pin_store
+from aweb_secrets.client_assertion import CertificateCredential
 from aweb_secrets.secret import SecretRecord, sealed_shape
 
 from .providers import AwsKmsProvider, LocalKeyFileProvider
@@ -121,7 +123,9 @@ class SecretSealer:
             raise CustodyUnavailable("no secret record or initial-create candidate")
         if record.backend != "native":
             raise CustodyUnavailable("the secret does not use native custody")
-        decode_value(record.kind, value)
+        fields = decode_value(record.kind, value)
+        if record.kind == OAUTH2_CERTIFICATE:
+            await asyncio.to_thread(CertificateCredential.load, fields)
         return await self._store_validated(
             tx,
             installation_id=installation_id,

@@ -16,14 +16,13 @@ from aweb.installations import install_verified_manifest_on
 from aweb.routes.app_hooks import router as hooks_router
 from aweb.routes.apps import router as apps_router
 from aweb_naapp.manifest import canonical_bytes, load_manifest
+from aweb_naapp_testing.team_server_site import TeamServerSite
 from awid.db_config import build_database_config
 from awid.signing import sign_message
 from awid.team_server_record import record_signing_bytes
-from awid_service.testing import REGISTRY_URL, ServiceTransport
+from awid_service.testing import REGISTRY_URL
 from fastapi import FastAPI
 from pgdbm import AsyncDatabaseManager
-
-SERVER = "https://aweb.example"
 
 
 async def no_dns_override(domain):
@@ -53,7 +52,9 @@ async def migrate_authority(database):
 
 
 @asynccontextmanager
-async def authority(database, registry, member, *, visibility="public"):
+async def authority(database, registry, member, site: TeamServerSite, *, visibility="public"):
+    """The team's aweb, serving its app-authority routes at ``site``: the team's
+    published server, which Secrets reaches only through its egress guard."""
     async with authority_infra(database, run_migrations=False) as infra:
         db = infra.get_manager()
         assert await db.fetch_value("SELECT current_database()") == await database.fetch_value(
@@ -74,7 +75,7 @@ async def authority(database, registry, member, *, visibility="public"):
             "type": "aweb.team-server",
             "team_id": member.team_id,
             "team_did_key": member.team_did_key,
-            "server_url": SERVER,
+            "server_url": site.origin,
             "issued_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         async with httpx.AsyncClient(transport=registry.transport) as client:
@@ -87,7 +88,7 @@ async def authority(database, registry, member, *, visibility="public"):
             )
         assert published.status_code == 200
         app = FastAPI()
-        app.state.db, app.state.public_origin = infra, SERVER
+        app.state.db, app.state.public_origin = infra, site.origin
         app.include_router(apps_router)
         app.include_router(hooks_router)
 
@@ -98,7 +99,8 @@ async def authority(database, registry, member, *, visibility="public"):
             request.state.body_sha256 = hashlib.sha256(body).hexdigest()
             return await call_next(request)
 
-        yield db, ServiceTransport(app)
+        site.serve(app)
+        yield db
 
 
 async def install(db, member, data, scopes):

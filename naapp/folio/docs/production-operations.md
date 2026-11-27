@@ -6,13 +6,13 @@ needs; it grants no authority to act.
 
 ## Build
 
-Folio depends on the awid and naapp-lib of the aweb checkout it lives in
-(`[tool.uv.sources]` in `pyproject.toml` names `../../awid` and
-`../../naapp-lib`). The Docker build therefore needs the **repository root** as
-its context; a context of `naapp/folio` cannot see those directories.
+Folio depends on the naapp-lib of the naapp checkout it lives in
+(`[tool.uv.sources]` in `pyproject.toml` names `../../naapp-lib`); awid comes
+from PyPI. The Docker build therefore needs the **repository root** as its
+context; a context of `naapp/folio` cannot see that directory.
 
 ```sh
-docker build -f naapp/folio/Dockerfile .    # from the aweb repository root
+docker build -f naapp/folio/Dockerfile .    # from the naapp repository root
 ```
 
 The Dockerfile copies only the paths the service needs (`awid/`,
@@ -31,7 +31,7 @@ A web service that builds Folio with Docker needs:
 
 | Setting | Value |
 | --- | --- |
-| Repository | `github.com/awebai/aweb`, branch `main` |
+| Repository | `github.com/awebai/naapp`, branch `main` |
 | Root directory | the repository root (empty) |
 | Dockerfile path | `naapp/folio/Dockerfile` |
 | Docker build context | `.` (the repository root) |
@@ -88,7 +88,7 @@ setting that differs, so the move is visible before it is made.
 All production operations go through Make and the shared `aweb_naapp.ops`
 tool. Each one first checks the live service against the manifest and refuses
 on any difference. It also refuses unless the service is not suspended and its
-auto-deploy is off: the service builds from `main` of the aweb repository, so
+auto-deploy is off: the service builds from `main` of the naapp repository, so
 with auto-deploy on every push to `main` would redeploy Folio outside these
 targets. The tool requires both for every service; they are not manifest
 settings.
@@ -96,7 +96,7 @@ settings.
 | Target | Effect | Inputs |
 | --- | --- | --- |
 | `make prod-status` | read only: the pinned service and its live deploy | `RENDER_ENV_FILE` |
-| `make prod-deploy` | deploys one commit, which must be the tip of `main` on the remote, while the named deploy is live | `PROD_COMMIT`, `ROLLBACK_DEPLOY_ID`, `ROLLBACK_COMMIT`, `APPLY=1`, `CONFIRM_SERVICE_ID` |
+| `make prod-deploy` | deploys one approved commit, which must be on `main` as the remote has it now (the tip or behind it) and strictly ahead of the live commit, while the named deploy is live; a first deploy after the service moved repositories names the repository it moved from | `PROD_COMMIT`, `ROLLBACK_DEPLOY_ID`, `ROLLBACK_COMMIT`, `APPLY=1`, `CONFIRM_SERVICE_ID`; for a repository move also `FROM_REPOSITORY` and `CONFIRM_FROM_REPOSITORY` |
 | `make prod-wait` | waits for a deploy to go live | `PROD_DEPLOY_ID`, `PROD_COMMIT` |
 | `make prod-verify` | read only: the deploy is live with that commit and health answers on both URLs | `PROD_DEPLOY_ID`, `PROD_COMMIT` |
 | `make prod-rollback` | redeploys an earlier deploy's built artifact | `ROLLBACK_DEPLOY_ID`, `ROLLBACK_COMMIT`, `CURRENT_DEPLOY_ID`, `CURRENT_COMMIT`, `APPLY=1`, `CONFIRM_SERVICE_ID` |

@@ -77,8 +77,38 @@ jobs:
           python-version: "3.12"
           enable-cache: true
 
+      - name: Lint the scripts
+        run: make lint-scripts
+
       - name: Test the selection, digests, shards and test infrastructure
         run: make test-scripts
+
+  # The files a PyPI release uploads, built twice and identical, each lane's
+  # wheels installed by path and imported, kept as this run's artifact. A
+  # release tag locks their sha256 (scripts/release_files.py, docs/release.md).
+  release-files:
+    name: PyPI release files
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+
+      - name: Build, lock and install-check the release files
+        run: python3 scripts/release_files.py build --out release-files
+
+      - name: Keep the release files
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: release-files/
+          if-no-files-found: error
 
   # Two shards that together are the whole suite: tests/runtime, and every
   # other test. Either shard failing fails the job.
@@ -806,12 +836,157 @@ jobs:
           path: junit/
           if-no-files-found: warn
 
+  tasks:
+    name: Tasks lint and tests
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.packages), 'naapp/tasks')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      JUNIT_DIR: ${{ github.workspace }}/junit
+      PACKAGES: naapp/tasks
+      REDIS_URL: redis://localhost:6379/0
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      # The production AWID the fixture starts does not start without Redis.
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: naapp/tasks/uv.lock
+
+      - name: Install locked dependencies
+        run: make sync
+
+      - name: Lint and type-check
+        run: make lint
+
+      - name: Install the PostgreSQL client of the server's major version
+        run: |
+          sudo bash scripts/test-egress/install-postgres-client.sh
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+
+      - name: Run unit and contract tests
+        run: make test
+
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
+  tasks-e2e:
+    name: Tasks journey with the real aw
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.packages), 'naapp/tasks')
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    env:
+      PYTEST_ADDOPTS: --junitxml=${{ github.workspace }}/junit/tasks-e2e.xml
+      PACKAGES: naapp/tasks
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: "3.12"
+          enable-cache: true
+          cache-dependency-glob: naapp/tasks/uv.lock
+
+      - name: Install locked dependencies
+        run: make sync
+
+      - name: Install the pinned aw release
+        run: |
+          make aw
+          .tools/bin/aw version
+
+      # The real aw against AWID, aweb and this app's image, all in
+      # naapp/tasks/docker-compose.e2e.yml.
+      - name: Run the Tasks journey
+        env:
+          NAAPP_AW_BINARY: ${{ github.workspace }}/.tools/bin/aw
+        run: make e2e-tasks
+
+      - name: Keep the per-test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
+          path: junit/
+          if-no-files-found: warn
+
+  tasks-image:
+    name: Tasks image starts and serves
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.packages), 'naapp/tasks')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PACKAGES: naapp/tasks
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Built from the repository root as the release builds it, started with a
+      # minimal configuration; /live must name Tasks and this build's commit.
+      - name: Build the Tasks image and check it serves
+        env:
+          IMAGE_SMOKE_SHA: ${{ github.sha }}
+          IMAGE_SMOKE_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: make image-smoke-tasks
+
   result:
     name: naapp CI
     if: always()
     needs:
       - plan
       - scripts
+      - release-files
       - naapp-lib
       - folio
       - folio-e2e
@@ -824,6 +999,9 @@ jobs:
       - secrets-e2e
       - secrets-runner
       - secrets-values
+      - tasks
+      - tasks-e2e
+      - tasks-image
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

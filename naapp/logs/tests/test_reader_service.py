@@ -14,6 +14,7 @@ import asyncio
 import base64
 import hashlib
 import json
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -38,6 +39,7 @@ from aweb_naapp_testing import Member
 from aweb_naapp_testing.human_members import HumanMember, HumanNamespace, human_namespace
 from aweb_naapp_testing.owner_acts import AUDIENCE, TeamOwner
 from aweb_naapp_testing.smtp import SmtpServer
+from aweb_naapp_testing.team_server_site import TeamServerSite
 from aweb_naapp_testing.webauthn import SoftAuthenticator
 from awid_service.testing import REGISTRY_URL, SERVICE_TOKEN
 
@@ -54,12 +56,16 @@ CONSOLE = "https://console.app.example.com"
 
 
 class Unresolved:
-    """The hook drain's resolver: no host resolves, and every attempt is kept."""
+    """Logs' resolver: only the team's coordination server resolves; no
+    other host does, and every attempt at one is kept."""
 
-    def __init__(self) -> None:
+    def __init__(self, site: TeamServerSite) -> None:
         self.hosts: list[str] = []
+        self._site = site
 
     async def resolve(self, host: str) -> list[Any]:
+        if host == self._site.name:
+            return await self._site.resolver().resolve(host)
         self.hosts.append(host)
         raise EgressNotSent(f"{host} is not resolved in this test")
 
@@ -191,6 +197,7 @@ async def deployment(
         awid_registry_url=REGISTRY_URL,
         awid_service_token=SERVICE_TOKEN,
         app_key_files=key_files,
+        **coordination.site.settings(),
         **getattr(request, "param", {}),
     )
     with blocked_dns() as looked_up, SmtpServer(tmp_path / "smtp") as smtp:
@@ -203,8 +210,7 @@ async def deployment(
                 settings,
                 email=email_settings(smtp, tmp_path),
                 awid_transport=coordination.registry.transport,
-                team_server_transport=coordination.server.transport,
-                resolver=Unresolved(),
+                resolver=Unresolved(coordination.site),
                 awid_domain_verifier=humans.authority,
             )
             # Installed at the version 3 logs publishes, as an owner who
@@ -327,6 +333,50 @@ async def log_in(deployment: Deployment, scope: str) -> httpx.Response:
     return await deployment.console.post(
         "/login", json={"scope": scope, "assertion": deployment.devices[scope].get(options.json())}
     )
+
+
+async def test_customer_gate_reports_the_setup_reader_and_its_live_session(
+    deployment: Deployment,
+    tmp_path: Path,
+):
+    reader = await human(deployment, "setup")
+    designated = await designate(deployment, reader)
+    assert designated.status_code == 200, designated.text
+    team_id = deployment.member.team_id
+    scope = holding_scope(deployment.installation_id, team_id, READER_ROLE, reader.principal)
+    assert (await log_in(deployment, scope)).status_code == 200
+
+    dsn = deployment.db.config.get_dsn()
+    credentials = tmp_path / "logs-database-url"
+    credentials.write_text(dsn, encoding="utf-8")
+    credentials.chmod(0o400)
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "aweb_logs.gate_observe",
+        "--database-url-file",
+        str(credentials),
+        "--schema",
+        deployment.db.schema or "public",
+        "--team-id",
+        team_id,
+        "--setup-principal",
+        reader.principal,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=20)
+    assert process.returncode == 0
+    assert not stderr, stderr.decode()
+    assert dsn.encode() not in stdout
+    report = json.loads(stdout)
+    assert not report["passed"] and report["readable"]
+    assert {(item["code"], item["subject"]) for item in report["findings"]} == {
+        ("role_assignment", reader.principal),
+        ("active_session", reader.principal),
+        ("setup_role_retained", reader.principal),
+        ("setup_session_retained", reader.principal),
+    }
 
 
 async def test_an_owner_designated_reader_logs_in_with_its_bound_passkey_and_reads(

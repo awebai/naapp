@@ -2,37 +2,49 @@
 
 import asyncio
 import json
-from ipaddress import ip_network
+from ipaddress import ip_address, ip_network
 from uuid import uuid4
 
+import httpcore
 import pytest
-from aweb_naapp.egress import InternalDestinations
+from aweb_naapp.egress import AddressPolicy, EgressRefused, InternalDestinations
+from aweb_naapp.egress.send import _PinnedBackend
 from aweb_naapp_testing.network import local_address
+from aweb_naapp_testing.smtp import SmtpServer
+from aweb_naapp_testing.team_server_site import team_server_site
 from pydantic import ValidationError
 
 from aweb_secrets import records
+from aweb_secrets.composition import create_service
 from aweb_secrets.config import ServiceSettings
 from aweb_secrets.destination import DestinationRecord
 from aweb_secrets.grant import GrantRecord
 from aweb_secrets.policy import Policy
+from tests.test_composition import settings
 from tests.test_production_bootstrap import approval_request
 from tests.test_production_bootstrap import root as root
 from tests.test_use_approvals import POLICY_BODY, SECRET
+
+# The denied destination: an internal destination the owner confirmed with
+# exactly this CIDR, under internal destinations allowed, so the guard would
+# reach it and only the operator's denial refuses it. A documentation address,
+# never this host's, so the denial cannot also cover the team server the app
+# reads at this host's address.
+DENIED_DESTINATION = "192.0.2.10"
 
 
 @pytest.fixture(autouse=True)
 def deployment_environment(monkeypatch, request):
     """Set the operator input before the existing production-root fixture starts."""
-    host = local_address()
     mode = getattr(request, "param", "address")
     entries = {
-        "address": [host],
-        "cidr": [str(ip_network(host + "/24", strict=False))],
+        "address": [DENIED_DESTINATION],
+        "cidr": [str(ip_network(DENIED_DESTINATION + "/24", strict=False))],
         "empty": [],
     }[mode]
     monkeypatch.setenv("SECRETS_INTERNAL_DESTINATIONS", "allowed")
     monkeypatch.setenv("SECRETS_EGRESS_DENIED_NETWORKS", json.dumps(entries))
-    return host, entries
+    return entries
 
 
 async def scoped_request(root, url, host, port):
@@ -105,11 +117,46 @@ async def scoped_request(root, url, host, port):
     return response
 
 
-@pytest.mark.parametrize("deployment_environment", ["address", "cidr", "empty"], indirect=True)
+@pytest.mark.parametrize("deployment_environment", ["address", "cidr"], indirect=True)
 async def test_operator_denials_stop_the_real_broker_before_tcp_connect(
-    root, deployment_environment
+    root, deployment_environment, monkeypatch
 ):
-    host, entries = deployment_environment
+    check = AddressPolicy.check
+    connect = _PinnedBackend.connect_tcp
+    refused: list[EgressRefused] = []
+    connects: list[str] = []
+
+    def observed_check(self, addresses, *, internal=None):
+        addresses = list(addresses)
+        try:
+            check(self, addresses, internal=internal)
+        except EgressRefused as exc:
+            if ip_address(DENIED_DESTINATION) in addresses:
+                refused.append(exc)
+            raise
+
+    async def no_connect(self, host, port, *args, **kwargs):
+        # The guard's only way to the network; a denied destination never gets
+        # here. Any other connection, the team server's included, is real.
+        if str(self._address) != DENIED_DESTINATION:
+            return await connect(self, host, port, *args, **kwargs)
+        connects.append(str(self._address))
+        raise httpcore.ConnectError("the test answers no connect to the denied destination")
+
+    monkeypatch.setattr(AddressPolicy, "check", observed_check)
+    monkeypatch.setattr(_PinnedBackend, "connect_tcp", no_connect)
+    response = await scoped_request(
+        root, f"https://{DENIED_DESTINATION}:443/probe", DENIED_DESTINATION, 443
+    )
+    # The receipt is the same for any unsent request; the guard's refusal,
+    # before any connect, is what shows the operator's denial stopped it.
+    assert ([exc.code for exc in refused], connects) == (["destination_address_denied"], [])
+    assert response.status_code == 503 and response.json()["state"] == "not_sent"
+
+
+@pytest.mark.parametrize("deployment_environment", ["empty"], indirect=True)
+async def test_without_operator_denials_the_real_broker_reaches_the_destination(root):
+    host = local_address()
     connections = []
 
     async def accepted(reader, writer):
@@ -118,17 +165,40 @@ async def test_operator_denials_stop_the_real_broker_before_tcp_connect(
         await writer.wait_closed()
 
     # Count real TCP accepts, before TLS or HTTP. The endpoint deliberately
-    # closes: the allowed control proves the broker actually reaches it,
-    # without exchanging a credential or weakening TLS verification.
+    # closes: the control proves the broker actually reaches it, without
+    # exchanging a credential or weakening TLS verification.
     listener = await asyncio.start_server(accepted, host, 0)
     async with listener:
         port = listener.sockets[0].getsockname()[1]
         response = await scoped_request(root, f"https://{host}:{port}/probe", host, port)
         assert response.status_code == 503 and response.json()["state"] == "not_sent"
-        if entries:
-            assert connections == []
-        else:
-            assert connections
+        assert connections
+
+
+async def test_a_deployment_denying_its_own_team_server_refuses_to_start(
+    test_db_factory, registry, tmp_path
+):
+    database = await test_db_factory.create_db(suffix="secrets_denies_own_team_server")
+    async with team_server_site(tmp_path / "aweb") as site:
+        with SmtpServer(tmp_path / "smtp") as smtp:
+            configured = settings(database, tmp_path, smtp).model_copy(
+                update={
+                    **site.settings(),
+                    "egress_denied_networks": (ip_network(f"{site.host}/32"),),
+                }
+            )
+            service = create_service(
+                configured, awid_transport=registry.transport, egress=site.egress(configured)
+            )
+            with pytest.raises(EgressRefused) as refused:
+                async with service.api_app.router.lifespan_context(service.api_app):
+                    pytest.fail("startup accepted a team server its own denials cover")
+    assert (refused.value.code, refused.value.args[0].split(": ")[-1]) == (
+        "destination_address_denied",
+        site.host,
+    )
+    assert service.runtime.connected_db() is None
+    assert site.tls.seen == []
 
 
 def configuration(tmp_path):

@@ -57,6 +57,7 @@ from pgdbm.core import TransactionManager
 
 from aweb_secrets import derived_lineage, tool_results
 from aweb_secrets.admission import Admission, AdmissionRefused, admit_use
+from aweb_secrets.authority_integrity import AuthorityIntegrityKey
 from aweb_secrets.broker import BrokerInspectionCancelled, broker_operation
 from aweb_secrets.broker_audit import (
     BrokerAudit,
@@ -268,6 +269,7 @@ class BrokerRequests:
         use_audit: UseApprovalAudit | None = None,
         reconciler: BackendReconciler | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        integrity_key: AuthorityIntegrityKey | None = None,
     ) -> None:
         if not isinstance(response_key, ResponseKey):
             raise ValueError("broker requests require the independent response key")
@@ -306,6 +308,7 @@ class BrokerRequests:
         )
         self._status = UseStatus(db, fence=fence, approvals=approvals)
         self._use_audit = use_audit
+        self._integrity_key = integrity_key
 
     def _approval_services(
         self,
@@ -344,6 +347,7 @@ class BrokerRequests:
             internal_destinations=self._internal_destinations,
             open_call=inputs.open_call,
             backend_version_check=backend_version_check,
+            integrity_key=self._integrity_key,
         )
 
     async def submit(self, *, secret: str, submission: MemberSubmission) -> ToolReply:
@@ -474,6 +478,7 @@ class BrokerRequests:
                         now=self._clock(),
                         clock=self._clock,
                         derived_max_ttl_s=self._derived_max_ttl_s,
+                        integrity_key=self._integrity_key,
                     )
                     existing = await attempt.fetch_one(
                         "SELECT c.dispatch_id,d.state FROM {{tables.use_contexts}} c"

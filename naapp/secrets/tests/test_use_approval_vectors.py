@@ -29,6 +29,8 @@ from aweb_naapp.runtime.approvals import (
 from aweb_naapp.runtime.approvals.request import DOMAIN_PREFIX, parse_request_json
 from pgdbm.core import TransactionManager
 
+from aweb_secrets.secret import KINDS
+
 VECTOR = json.loads((Path(__file__).parents[1] / "vectors" / "use-approval-v1.json").read_text())
 POSITIVE = VECTOR["positive_cases"]
 NEGATIVE = VECTOR["negative_cases"]
@@ -55,14 +57,7 @@ def test_the_vector_uses_b2s_single_prefix():
 
 def test_secret_kinds_are_the_auth_schemes():
     assert VECTOR["secret_kinds"] == sorted(_auth_schemes())
-    assert set(VECTOR["secret_kinds"]) == {
-        "bearer",
-        "basic",
-        "header",
-        "query",
-        "oauth2-client-credentials",
-        "aws-sigv4",
-    }
+    assert set(VECTOR["secret_kinds"]) == set(KINDS)
     assert {case["request"]["secret"]["kind"] for case in POSITIVE} <= set(VECTOR["secret_kinds"])
 
 

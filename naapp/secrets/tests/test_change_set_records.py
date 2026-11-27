@@ -20,9 +20,16 @@ from aweb_naapp.egress import InternalDestinations
 from aweb_naapp_testing.owner_acts import INSTALLATION_ID
 
 from aweb_secrets import records
+from aweb_secrets.authority_integrity import (
+    AuthorityEvidenceInvalid,
+    AuthorityIntegrityKey,
+    AuthorityRecords,
+)
 from aweb_secrets.change import ChangeRefused
 from aweb_secrets.change_sets import ChangeSets, DraftLimit
+from aweb_secrets.containment import disable_secret_tree
 from aweb_secrets.custody import CustodyUnavailable, ValueInvalid, encode_value
+from aweb_secrets.derived_containment import revoke_grant_tree
 from aweb_secrets.operation import OperationTemplate
 from aweb_secrets.policy import Policy
 from aweb_secrets.secret import SecretRecord
@@ -202,6 +209,125 @@ async def test_a_destination_grant_and_policy_are_stored(world: World, maximum) 
             tx, INSTALLATION_ID, SECRET_ID, principal_did=CAROL.principal_did, roles=[]
         )
     assert [g.grant_id for g in grants] == ["grt_77c1aa"]
+
+
+@pytest.fixture
+async def published_authority(world: World):
+    key = AuthorityIntegrityKey(b"\x01" * 32)
+    world = replace(
+        world,
+        change_sets=ChangeSets(
+            world.db,
+            approvals=world.approvals,
+            passkeys=world.passkeys,
+            directory=world.directory,
+            custody=world.custody,
+            containment=world.containment,
+            credential_audit=world.credential_audit,
+            draft_limit=DraftLimit(count=2, window=timedelta(hours=1)),
+            internal_destinations=InternalDestinations.DISABLED,
+            integrity_key=key,
+        ),
+    )
+    await enrol_owner(world, ALICE, "alice@acme.com")
+    first = await sealed_value(world)
+    policy = Policy.from_body(POLICY_BODY)
+    await confirmed(
+        world,
+        [
+            item("secret", "create", "payments-live", SECRET),
+            secret_value(first.version),
+            item("destination", "create", "dst_charges01", DESTINATION),
+            item("operation", "create", "refund", REFUND),
+            item("policy", "create", policy.digest, {"v": 1, **POLICY_BODY}),
+            item("grant", "create", "grt_77c1aa", grant_after()),
+        ],
+        [first],
+    )
+    authority = AuthorityRecords(key, world.admitted)
+    stored = await stored_secret(world)
+    assert stored is not None and stored.active_version == first.version
+    return world, authority, stored, policy
+
+
+async def test_confirmed_authority_is_authenticated_in_the_publication_transaction(
+    published_authority,
+):
+    world, authority, stored, policy = published_authority
+    async with world.db.transaction() as tx:
+        await records.require_secret_authority(tx, authority, stored, ref=stored.record.ref)
+        assert await records.policy(tx, INSTALLATION_ID, policy.digest, team_id=TEAM, authority=authority)
+        assert await records.current_operation(tx, INSTALLATION_ID, SECRET_ID, "refund", authority=authority)
+        assert len(await records.destinations(tx, INSTALLATION_ID, SECRET_ID, authority=authority)) == 1
+        assert len(await records.active_grants(
+            tx, INSTALLATION_ID, SECRET_ID, principal_did=CAROL.principal_did, roles=[],
+            authority=authority,
+        )) == 1
+
+
+@pytest.mark.parametrize("narrowing", ["remove-destination", "revoke-grant", "disable-secret"])
+async def test_narrowing_withdraws_previously_published_authority(published_authority, narrowing):
+    world, authority, _, _ = published_authority
+    grant = grant_after()
+    check = {
+        "remove-destination": ("destination", (DESTINATION["destination_id"],), DESTINATION),
+        "revoke-grant": ("grant", (grant["grant_id"],), grant),
+        "disable-secret": ("secret_state", (SECRET_ID,), {"state": "active"}),
+    }[narrowing]
+    async with world.db.transaction() as tx:
+        await authority.require(tx, *check)
+        if narrowing == "remove-destination":
+            await records.remove_destination(tx, INSTALLATION_ID, DESTINATION["destination_id"])
+        elif narrowing == "revoke-grant":
+            await revoke_grant_tree(
+                tx,
+                world.approvals,
+                world.custody,
+                installation_id=INSTALLATION_ID,
+                team_id=TEAM,
+                grant_id=grant["grant_id"],
+                revoked_by=ALICE.principal_did,
+            )
+        else:
+            await disable_secret_tree(
+                tx,
+                world.approvals,
+                world.custody,
+                installation_id=INSTALLATION_ID,
+                team_id=TEAM,
+                secret_id=SECRET_ID,
+                revoked_by=ALICE.principal_did,
+            )
+    async with world.db.transaction() as tx:
+        with pytest.raises(AuthorityEvidenceInvalid):
+            await authority.require(tx, *check)
+
+
+async def test_secret_reenable_publishes_new_active_state(published_authority):
+    world, authority, stored, _ = published_authority
+    identity = (SECRET_ID,)
+    body = {"state": "active"}
+    async with world.db.transaction() as tx:
+        await authority.require(tx, "secret_state", identity, body)
+        await disable_secret_tree(
+            tx,
+            world.approvals,
+            world.custody,
+            installation_id=INSTALLATION_ID,
+            team_id=TEAM,
+            secret_id=SECRET_ID,
+            revoked_by=ALICE.principal_did,
+        )
+        with pytest.raises(AuthorityEvidenceInvalid):
+            await authority.require(tx, "secret_state", identity, body)
+    ref = stored.record.ref
+    await confirmed(
+        world,
+        [item("reenable", "enable", ref, {"v": 1, "target_kind": "secret", "target_ref": ref})],
+        base=2,
+    )
+    async with world.db.transaction() as tx:
+        await authority.require(tx, "secret_state", identity, body)
 
 
 INTERNAL = {

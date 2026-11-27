@@ -6,6 +6,7 @@ import re
 from subprocess import CompletedProcess
 from urllib.parse import urlsplit
 
+import dns.asyncresolver
 import pytest
 import yaml
 from aweb_naapp_testing.compose_lane import (
@@ -15,7 +16,11 @@ from aweb_naapp_testing.compose_lane import (
     identity_folder,
     machine_dir,
 )
+from aweb_naapp_testing.network import DnsServer
+from awid.did import did_from_public_key
+from awid.dns_verify import discover_registry_override
 from cryptography import x509
+from nacl.signing import SigningKey
 
 from tests.test_e2e_owner_acts import (
     API,
@@ -37,6 +42,10 @@ LANE = yaml.safe_load((APP_DIR / "docker-compose.e2e.yml").read_text())
 COMMON = yaml.safe_load(BASE_COMPOSE.read_text())
 LOGS_BASE = (APP_DIR.parent / "logs" / "compose.logs.yaml").read_text()
 REQUIRED = re.compile(r"\$\{([A-Z0-9_]+):\?")
+# Settings only the lane's Logs has, which never belong in the deployment
+# base: the lane's http registry is accepted only in development. Every other
+# setting comes through the base.
+LANE_ONLY_LOGS_SETTINGS = frozenset({"APP_ENV"})
 
 
 def test_every_setting_the_logs_base_requires_is_in_the_lanes_compose_environment():
@@ -52,11 +61,8 @@ def test_the_lanes_logs_is_the_deployments_base_with_its_files_read_only():
     assert logs["extends"] == {"file": "../logs/compose.logs.yaml", "service": "logs"}
     assert logs["profiles"] == ["logs"]
     assert "${NAAPP_E2E_RUNTIME:?}/logs:/run/secrets/logs:ro" in logs["volumes"]
-    # Only the disposable registry and private CA differ from the base service.
-    assert logs["environment"] == {
-        "APP_ENV": "development",
-        "SSL_CERT_FILE": "/runtime/tls/ca.pem",
-    }
+    # Every deployment setting reaches it through the base, as in a deployment.
+    assert set(logs.get("environment", {})) == LANE_ONLY_LOGS_SETTINGS
     assert "env_file" not in logs
     assert logs["depends_on"]["postgres"] == {"condition": "service_healthy"}
     assert "logs" in LANE["services"]["smtp-tls"]["profiles"]
@@ -76,7 +82,8 @@ def test_secrets_approval_mail_uses_the_authenticated_tls_mailbox():
     env = secrets_env()
     mail = LANE["services"]["smtp-tls"]
     assert env["SECRETS_EMAIL_SMTP_HOST"] in mail["networks"]["default"]["aliases"]
-    assert env["SECRETS_EMAIL_CA_FILE"] == env["SSL_CERT_FILE"]
+    # The mailbox presents the lane's certificate: the lane's CA, as hooks trust.
+    assert env["SECRETS_EMAIL_CA_FILE"] == env["SECRETS_HOOK_CA_FILE"]
     assert "smtp-tls" in LANE["services"]["secrets"]["depends_on"]
     assert mail["environment"]["MP_SMTP_REQUIRE_STARTTLS"] == "true"
     assert mail["environment"]["MP_SMTP_AUTH_ACCEPT_ANY"] == "true"
@@ -134,7 +141,10 @@ def test_the_team_server_origin_resolves_only_to_the_lanes_tls_front(prepared_la
     ).read_text()
     assert set(front["depends_on"]) == {"aweb"}
     assert COMMON["services"]["cli"]["environment"]["SSL_CERT_FILE"] == "/runtime/tls/ca.pem"
-    assert secrets_env()["SSL_CERT_FILE"] == secrets_env()["SECRETS_HOOK_CA_FILE"]
+    # Secrets reads the team's server through its guard, which trusts the
+    # hook CA; the process trust store does not hold the lane's CA.
+    assert json.loads(secrets_env()["SECRETS_TEAM_SERVER_INTERNAL_ORIGINS"]) == [AWEB]
+    assert "SSL_CERT_FILE" not in secrets_env()
 
 
 def test_the_front_routes_each_host_to_its_service_with_the_lanes_certificate():
@@ -214,3 +224,34 @@ def test_lane_command_failure_redacts_configured_tokens_and_keys(prepared_lane):
         "start registry: registry token: [redacted]\n"
         "separate key line: [redacted]\n[redacted]\n"
     )
+
+
+@pytest.mark.parametrize(
+    "app_env",
+    [secrets_env, lambda: LANE["services"]["logs"]["environment"]],
+    ids=["secrets", "logs"],
+)
+async def test_the_lanes_apps_accept_the_registry_the_lanes_dns_names(
+    app_env, prepared_lane, monkeypatch
+):
+    # The app asks which registry the team's domain names before it reads the
+    # team's server; the lane's DNS names its http registry, as every lane
+    # service runs it.
+    controller = did_from_public_key(bytes(SigningKey.generate().verify_key))
+    prepared_lane.publish_awid_txt(DOMAIN, controller)
+    zone = (prepared_lane.runtime / "dns" / f"{DOMAIN}.zone").read_text()
+    record = re.search(r'TXT (".*")', zone).group(1)
+    server = DnsServer(records={(f"_awid.{DOMAIN}", "TXT"): [record]})
+    await server.start()
+    try:
+        resolver = dns.asyncresolver.Resolver(configure=False)
+        resolver.nameservers = ["127.0.0.1"]
+        resolver.port = server.port
+        monkeypatch.setattr(dns.asyncresolver, "default_resolver", resolver)
+        for name in ("APP_ENV", "ENVIRONMENT"):
+            monkeypatch.delenv(name, raising=False)
+        for name, value in app_env().items():
+            monkeypatch.setenv(name, value)
+        assert await discover_registry_override(DOMAIN) == REGISTRY
+    finally:
+        server.close()

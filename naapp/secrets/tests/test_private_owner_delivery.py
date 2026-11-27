@@ -40,7 +40,7 @@ async def test_tokenless_private_team_first_owner_uses_the_service_members_signe
 
 
 async def test_tokenless_unknown_team_returns_key_unavailable_before_any_app_effect(root, registry):
-    service, client, settings, member, installed, _, coordination, _ = root
+    service, client, settings, member, installed, _, site, _ = root
     body, _, _ = await delivery(root, registry)
     fields = json.loads(base64.b64decode(body["signing"]).split(b"\n", 1)[1])
     fields["team_id"] = "unknown:example.com"
@@ -50,11 +50,11 @@ async def test_tokenless_unknown_team_returns_key_unavailable_before_any_app_eff
         base64.b64encode(member.team_key.sign(signing).signature).decode().rstrip("=")
     )
     before = await effects(service, installed["installation_id"], member.team_id)
-    before_app_reads = len(coordination.calls)
+    before_app_reads = len(site.tls.seen)
     response = await client.post(settings.console_origin + PATH, json=body)
     assert (response.status_code, response.json()["detail"]) == (503, "team_key_unavailable")
     assert await effects(service, installed["installation_id"], member.team_id) == before
-    assert len(coordination.calls) == before_app_reads
+    assert len(site.tls.seen) == before_app_reads
     # A missing team must reach real AWID, rather than failing locally because
     # a tokenless client incorrectly insists on a caller certificate ID.
     assert any(

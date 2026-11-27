@@ -40,6 +40,11 @@ case "$app" in
     printf '%064d' 2 | tr 0 2 > "$keys/grant.hex"
     key_files='{"library:grant-read-1": "/keys/grant.hex"}'
     ;;
+  tasks)
+    printf '%064d' 1 | tr 0 1 > "$keys/emit.hex"
+    printf '%064d' 2 | tr 0 2 > "$keys/grant.hex"
+    key_files='{"tasks:emit-1": "/keys/emit.hex", "tasks:grant-read-1": "/keys/grant.hex"}'
+    ;;
   *)
     echo "image-smoke.sh: no smoke configuration for $app" >&2
     exit 2

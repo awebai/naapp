@@ -117,6 +117,15 @@ class Task:
 
 
 @dataclass(frozen=True)
+class SeenClaim:
+    """A claim as the store read it before its lock wait: its revision, and its
+    live holder at that read (None when it was free)."""
+
+    revision: int
+    holder: Holder | None
+
+
+@dataclass(frozen=True)
 class ClaimEnded:
     """A claim a close released, with the holder it was taken from."""
 
@@ -342,25 +351,34 @@ def close_claimed(
     now: datetime,
     *,
     presented_revision: int | None,
-    seen_revisions: Mapping[int, int],
+    seen_claims: Mapping[int, SeenClaim],
     with_children: bool = False,
 ) -> Closing | Refusal:
     """The override close: it ends every live claim it closes, recording both holders.
 
-    ``presented_revision`` is the task's claim revision as the caller saw it, None
-    when the caller saw it unheld. ``seen_revisions`` holds each descendant's claim
-    revision as the store read it before its lock wait; a descendant whose claim
-    moved, or that was not there, is ``lease_changed``.
+    ``presented_revision`` comes from the caller: the revision of the task's claim
+    it saw live, or None when it saw the task unheld. A presented claim must still
+    be live at that revision; a task seen unheld must still be free or the
+    caller's own. ``seen_claims`` comes from the store: each descendant's claim as
+    read before its lock wait. A descendant whose revision or live holder differs,
+    or that was not there, is ``lease_changed``. The installation boundary and
+    the task's status are judged before any lease.
     """
-    if task is not None and task.installation_id == installation_id:
-        if presented_revision is None:
-            if task.claim.live_holder(now) not in (None, caller):
-                return _refuse(Code.LEASE_CHANGED)
-        elif task.claim.revision != presented_revision:
+    if refused := _outside(installation_id, task, *descendants):
+        return refused
+    assert task is not None
+    if task.status is TaskStatus.CLOSED:
+        return _refuse(Code.TASK_CLOSED)
+    live = task.claim.live_holder(now)
+    if presented_revision is None:
+        if live not in (None, caller):
             return _refuse(Code.LEASE_CHANGED)
+    elif live is None or task.claim.revision != presented_revision:
+        return _refuse(Code.LEASE_CHANGED)
     if with_children:
         for d in descendants:
-            if d.installation_id == installation_id and seen_revisions.get(d.number) != d.claim.revision:
+            seen = seen_claims.get(d.number)
+            if seen != SeenClaim(revision=d.claim.revision, holder=d.claim.live_holder(now)):
                 return _refuse(Code.LEASE_CHANGED)
     return _close(
         installation_id, task, descendants, caller, now, with_children=with_children, overrides=True

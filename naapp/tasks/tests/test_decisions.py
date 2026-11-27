@@ -20,6 +20,7 @@ from aweb_tasks.decisions import (
     Lease,
     LeaseKind,
     Refusal,
+    SeenClaim,
     Task,
     TaskStatus,
     add_dependency,
@@ -419,6 +420,10 @@ def test_close(
     assert (code_of(verdict) or verdict) == expected
 
 
+def saw(revision: int, holder: Holder | None = None) -> SeenClaim:
+    return SeenClaim(revision=revision, holder=holder)
+
+
 @pytest.mark.parametrize(
     ("subject", "presented", "descendants", "seen", "with_children", "expected"),
     [
@@ -427,40 +432,65 @@ def test_close(
         # Unheld or own: the same as close.
         (task(1), None, [], {}, False, Closing((1,), ())),
         (task(1, claim=held(ALICE, 2)), 2, [], {}, False, Closing((1,), (ended(1, held(ALICE, 2)),))),
-        (task(1, claim=expired(BOB, 2)), 2, [], {}, False, Closing((1,), ())),
+        # Seen live at revision 2, expired since at the same revision: the claim the
+        # caller meant to override is gone, as for takeover.
+        (task(1, claim=expired(BOB, 2)), 2, [], {}, False, Code.LEASE_CHANGED),
+        # Seen free: an ordinary close of a free task.
+        (task(1, claim=expired(BOB, 2)), None, [], {}, False, Closing((1,), ())),
         # The root's claim changed since the caller saw it.
         (task(1, claim=held(BOB, 3)), 2, [], {}, False, Code.LEASE_CHANGED),
         (task(1, claim=held(BOB, 1)), None, [], {}, False, Code.LEASE_CHANGED),
         (task(1, status=TaskStatus.CLOSED), None, [], {}, False, Code.TASK_CLOSED),
-        (task(1), None, [task(2)], {2: 0}, False, Code.HAS_OPEN_CHILDREN),
+        # A closed task answers that, not the lease its close ended.
+        (task(1, status=TaskStatus.CLOSED, claim=Lease(None, 3, None)), 2, [], {}, False, Code.TASK_CLOSED),
+        (task(1), None, [task(2)], {2: saw(0)}, False, Code.HAS_OPEN_CHILDREN),
         (
             task(1, claim=held(BOB, 2)), 2, [task(2, claim=held(BOB_NEIGHBOUR, 4)), task(3)],
-            {2: 4, 3: 0}, True,
+            {2: saw(4, BOB_NEIGHBOUR), 3: saw(0)}, True,
             Closing((1, 2, 3), (ended(1, held(BOB, 2)), ended(2, held(BOB_NEIGHBOUR, 4)))),
         ),
         # A descendant's claim moved during the lock wait.
-        (task(1), None, [task(2, claim=held(BOB, 5))], {2: 4}, True, Code.LEASE_CHANGED),
+        (task(1), None, [task(2, claim=held(BOB, 5))], {2: saw(4, BOB)}, True, Code.LEASE_CHANGED),
+        # A descendant seen live expired during the wait, at the same revision.
+        (task(1), None, [task(2, claim=expired(BOB, 4))], {2: saw(4, BOB)}, True, Code.LEASE_CHANGED),
+        # A descendant seen free and still free closes with nothing to end.
+        (task(1), None, [task(2, claim=expired(BOB, 4))], {2: saw(4)}, True, Closing((1, 2), ())),
         # A descendant that appeared during the lock wait.
         (task(1), None, [task(2)], {}, True, Code.LEASE_CHANGED),
-        (task(1), None, [task(2, status=TaskStatus.CLOSED)], {2: 0}, True, Closing((1,), ())),
+        (task(1), None, [task(2, status=TaskStatus.CLOSED)], {2: saw(0)}, True, Closing((1,), ())),
         (task(1, installation_id=NEIGHBOUR_INSTALLATION), None, [], {}, False, Code.NOT_FOUND),
-        (task(1), None, [task(2, installation_id=NEIGHBOUR_INSTALLATION)], {2: 0}, True, Code.NOT_FOUND),
+        (task(1), None, [task(2, installation_id=NEIGHBOUR_INSTALLATION)], {2: saw(0)}, True, Code.NOT_FOUND),
         (None, None, [], {}, False, Code.NOT_FOUND),
+        # The installation boundary is judged before any lease: a lease mismatch never
+        # hides a missing or foreign task.
+        (None, None, [task(2)], {}, True, Code.NOT_FOUND),
+        (task(1, claim=held(BOB, 3), installation_id=NEIGHBOUR_INSTALLATION), 2, [], {}, False, Code.NOT_FOUND),
+        (
+            task(1, claim=held(BOB, 3)), 2, [task(2, installation_id=NEIGHBOUR_INSTALLATION)],
+            {2: saw(0)}, True, Code.NOT_FOUND,
+        ),
+        (
+            task(1), None, [task(2, claim=held(BOB, 5), installation_id=NEIGHBOUR_INSTALLATION)],
+            {2: saw(4, BOB)}, True, Code.NOT_FOUND,
+        ),
     ],
     ids=[
-        "other-holder", "unheld", "own", "expired", "root-changed", "root-claimed-during-wait",
-        "already-closed", "open-child", "with-children-overrides-all", "descendant-changed",
+        "other-holder", "unheld", "own", "expired-since-seen", "seen-free", "root-changed",
+        "root-claimed-during-wait", "already-closed", "closed-stale-revision", "open-child", "with-children-overrides-all",
+        "descendant-changed", "descendant-expired-during-wait", "descendant-still-free",
         "descendant-appeared", "closed-descendant-skipped", "other-installation",
-        "descendant-other-installation", "missing",
+        "descendant-other-installation", "missing", "missing-root-unseen-descendant",
+        "foreign-root-stale-revision", "stale-root-foreign-descendant",
+        "foreign-descendant-changed",
     ],
 )
 def test_close_claimed(
-    subject: Task | None, presented: int | None, descendants: list[Task], seen: dict[int, int],
-    with_children: bool, expected: Closing | Code,
+    subject: Task | None, presented: int | None, descendants: list[Task],
+    seen: dict[int, SeenClaim], with_children: bool, expected: Closing | Code,
 ) -> None:
     verdict = close_claimed(
         INSTALLATION, subject, descendants, ALICE, T0,
-        presented_revision=presented, seen_revisions=seen, with_children=with_children,
+        presented_revision=presented, seen_claims=seen, with_children=with_children,
     )
     assert (code_of(verdict) or verdict) == expected
 

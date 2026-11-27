@@ -1,4 +1,4 @@
-"""aweb server/tests/test_team_auth_deps.py at 2788969b6fce509437eab53637927bb97cf18b58, the definitions the server-compatibility suite uses.
+"""aweb server/tests/test_team_auth_deps.py at server-v1.27.53, the definitions the server-compatibility suite uses.
 
 Copied verbatim by scripts/server_test_support.py and checked against COPIED by
 tests/server_compat/test_aweb_server_tests.py. Do not edit them here; rerun the
@@ -11,9 +11,7 @@ from datetime import datetime, timedelta, timezone
 import base64
 import json
 
-# Copied from an aweb commit, not a release: replaced by the re-copy
-# from the first server tag that carries this change.
-AWEB_REF = '2788969b6fce509437eab53637927bb97cf18b58'
+AWEB_REF = 'server-v1.27.53'
 AWEB_PATH = 'server/tests/test_team_auth_deps.py'
 AWEB_BLOB = '90ed05a566e2619b43abf9f990945bbfe6e05639'
 COPIED = {

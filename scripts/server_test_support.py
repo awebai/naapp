@@ -32,11 +32,12 @@ PACKAGE = ROOT / "naapp-lib/tests/server_compat/aweb_server_tests"
 IMPORT_PREFIX = "tests.server_compat.aweb_server_tests"
 TESTS = "server/tests"
 
-# The definitions the suite's test files import or take as fixtures, by aweb module.
+# The definitions the suite's test files and its real_stack import or take as
+# fixtures, by aweb module.
 ROOTS = {
     "conftest": ("shared_test_pool", "aweb_cloud_db"),
     "installation_fixtures": ("seed_hook_installation", "install_fixture_app"),
-    "real_stack": ("REGISTRY_URL", "RealStack", "real_stack"),
+    "test_app_events_http": ("_build_events_app", "_seed_team_and_agent"),
     "test_team_auth_deps": ("_make_certificate", "_encode_certificate"),
     "test_app_task_requests": ("_app_http", "_body", "_sign", "_stage", "app_request_context"),
     "test_dashboard_privacy": ("TEAM", "privacy_app"),
@@ -138,7 +139,7 @@ def collect(checkout: Path, tag: str):
     # Fixtures a copied definition can take by parameter: those of the modules it
     # comes from and of conftest, which pytest offers to every test.
     fixtures = {}
-    for name in (*ROOTS, "conftest", "real_stack"):
+    for name in (*ROOTS, "conftest"):
         for definition, node in module(name).definitions.items():
             if any("fixture" in ast.unparse(d) for d in getattr(node, "decorator_list", [])):
                 fixtures.setdefault(definition, name)

@@ -1,5 +1,4 @@
-"""The copied aweb server test helpers are exactly the release this repository pins,
-or the reviewed aweb commit named below while no release carries its change."""
+"""The copied aweb server test helpers are exactly the release this repository pins."""
 
 import ast
 import hashlib
@@ -12,12 +11,6 @@ import pytest
 PACKAGE = Path(__file__).resolve().parent / "aweb_server_tests"
 LOCK = Path(__file__).resolve().parents[2] / "uv.lock"
 MODULES = sorted(path.stem for path in PACKAGE.glob("*.py") if path.stem != "__init__")
-# The reviewed aweb commit the copies come from while no server release carries
-# its server/tests change. The re-copy from the first server tag that does
-# replaces them, and this commit goes (aweb-adxe).
-PENDING_AWEB_COMMIT = "2788969b6fce509437eab53637927bb97cf18b58"
-
-
 def _definitions(path: Path) -> dict[str, str]:
     """Each top-level definition's source text, from its first decorator to its end."""
     source = path.read_text()
@@ -43,7 +36,7 @@ def test_the_copies_come_from_the_pinned_aweb_server_release() -> None:
     (aweb,) = [package for package in lock["package"] if package["name"] == "aweb"]
     for name in MODULES:
         module = importlib.import_module(f"tests.server_compat.aweb_server_tests.{name}")
-        assert module.AWEB_REF in (f"server-v{aweb['version']}", PENDING_AWEB_COMMIT), (
+        assert module.AWEB_REF == f"server-v{aweb['version']}", (
             f"{name} was copied from {module.AWEB_REF} but naapp-lib pins aweb {aweb['version']}: "
             "rerun scripts/server_test_support.py from that tag"
         )

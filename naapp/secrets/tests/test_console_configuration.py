@@ -10,6 +10,7 @@ import pytest
 from aweb_naapp.hooks.envelope import verify
 from aweb_naapp.runtime.approvals import ApprovalState
 from aweb_naapp_testing.owner_acts import INSTALLATION_ID
+from aweb_secrets_values import OAUTH2_CERTIFICATE
 
 from aweb_secrets.custody import CustodyUnavailable
 from aweb_secrets.custody.opening import active_binding
@@ -246,16 +247,25 @@ async def test_job_and_runner_creation_use_shared_confirmation_and_protected_res
     assert registration["registration_code"] not in str(events)
 
 
-async def test_job_definition_refuses_fields_from_another_credential_family_before_draft(world):
+@pytest.mark.parametrize("kind", ["basic", OAUTH2_CERTIFICATE])
+async def test_job_definition_refuses_ineligible_credential_sources_before_draft(world, kind):
     from tests.test_jobs import after as job_after
 
     w = world
     scope = await enrol_owner(w, ALICE, "alice@acme.com")
     secret = deepcopy(ITEMS["secret"])
-    secret["after"]["kind"] = "basic"
+    secret["after"]["kind"] = kind
     body = job_after()
     body["credentials"][0]["secret_ref"] = secret["ref"]
     body["env"]["DB_ADMIN"]["$credential"] = secret["ref"]
+    if kind == OAUTH2_CERTIFICATE:
+        secret["after"]["kind_params"] = {
+            "token_endpoint": "https://auth.example.com/oauth/token",
+            "audience": "https://auth.example.com",
+            "scope": "service:read",
+            "signing_alg": "PS256",
+        }
+        body["env"]["DB_ADMIN"]["field"] = "client_id"
     async with clients(w) as (human, _):
         headers = await sign_in(w, human, scope)
         refused = await human.post(

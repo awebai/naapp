@@ -7,18 +7,21 @@ from __future__ import annotations
 import base64
 import json
 import secrets
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import quote_plus
+from uuid import uuid4
 
 import pytest
 from aweb_naapp.egress import EgressRefused
 
 from aweb_secrets.broker import SecretVersion, TokenExchangeFailed, broker
+from aweb_secrets.custody import ValueInvalid
 from aweb_secrets.response_audit import ResponseKey
 from aweb_secrets.tokens import ProcessTokenCache, TokenKey
 
-from .harness import OTHER, Upstream, running_upstream
+from .harness import OTHER, CertificateTokenEndpoint, Upstream, oauth_certificate, running_upstream
 
 VERSION_1 = SecretVersion(
     installation_id="inst-1", team_id="backend:example.com", secret_id="sec-oauth", version=1
@@ -36,7 +39,9 @@ def _key(upstream: Upstream, secret: SecretVersion = VERSION_1) -> TokenKey:
     )
 
 
-def _kind_params(upstream: Upstream, client_auth: str = "client_secret_basic", **change: str) -> dict:
+def _kind_params(
+    upstream: Upstream, client_auth: str = "client_secret_basic", **change: str
+) -> dict:
     return {
         "token_endpoint": upstream.url("/oauth2/token"),
         "client_auth": client_auth,
@@ -53,8 +58,9 @@ async def _call(upstream: Upstream, tokens: ProcessTokenCache, *, secret: str | 
         destination=upstream.destination(),
         headers=[],
         body=b"",
-        kind="oauth2-client-credentials",
-        value={
+        kind=kw.pop("kind", "oauth2-client-credentials"),
+        value=kw.pop("value", None)
+        or {
             "client_id": upstream.creds.oauth_client_id,
             "client_secret": secret or upstream.creds.oauth_client_secret,
         },
@@ -72,11 +78,111 @@ async def _call(upstream: Upstream, tokens: ProcessTokenCache, *, secret: str | 
 
 
 @pytest.mark.parametrize("client_auth", ["client_secret_basic", "client_secret_post"])
-async def test_the_exchanged_token_verifies_at_the_upstream(tmp_path: Path, client_auth: str) -> None:
+async def test_the_exchanged_token_verifies_at_the_upstream(
+    tmp_path: Path, client_auth: str
+) -> None:
     async with running_upstream(tmp_path) as upstream:
-        call = await _call(upstream, ProcessTokenCache(), kind_params=_kind_params(upstream, client_auth))
+        call = await _call(
+            upstream, ProcessTokenCache(), kind_params=_kind_params(upstream, client_auth)
+        )
         assert call.result.status == 200, call.result.body
         assert json.loads(call.result.body)["scheme"] == "oauth2-client-credentials"
+
+
+@pytest.mark.parametrize("algorithm", ["PS256", "RS256"])
+async def test_certificate_exchange_signs_a_fresh_assertion_for_its_authorization_server(
+    tmp_path: Path, algorithm: str
+) -> None:
+    client_id = str(uuid4())
+    cert, value = oauth_certificate(client_id)
+    # The Graph example uses the token URL as audience. An RFC 10070
+    # authorization server uses its issuer identifier and may register a kid.
+    graph = algorithm == "PS256"
+    endpoint = CertificateTokenEndpoint(
+        client_id,
+        (cert,),
+        audience=None if graph else "https://authorization.example.test/issuer",
+        algorithm=algorithm,
+        key_id=None if graph else "signing-key-2",
+        scope="https://graph.microsoft.com/.default" if graph else "",
+    )
+    if endpoint.key_id is not None:
+        value["key_id"] = endpoint.key_id
+    async with running_upstream(tmp_path, certificate_endpoint=endpoint) as upstream:
+        url = upstream.url("/oauth2/token")
+        params = {
+            "token_endpoint": url,
+            "scope": endpoint.scope,
+            "audience": endpoint.audience or url,
+            "signing_alg": algorithm,
+        }
+        tokens = ProcessTokenCache()
+        for version in (VERSION_1, VERSION_1, replace(VERSION_1, version=2)):
+            call = await _call(
+                upstream,
+                tokens,
+                kind="oauth2-certificate-credentials",
+                value=value,
+                kind_params=params,
+                secret_version=version,
+            )
+            assert call.result.status == 200
+            assert json.loads(call.result.body)["scheme"] == "oauth2-client-credentials"
+        assert upstream.issued() == 2
+        assert len(endpoint.used) == 2
+        assert upstream.paths == [
+            "/oauth2/token",
+            "/oauth2/echo",
+            "/oauth2/echo",
+            "/oauth2/token",
+            "/oauth2/echo",
+        ]
+
+
+async def test_another_oauth_client_cannot_reuse_the_certs_registration(tmp_path: Path) -> None:
+    client_id = str(uuid4())
+    cert, value = oauth_certificate(client_id)
+    endpoint = CertificateTokenEndpoint(client_id, (cert,))
+    async with running_upstream(tmp_path, certificate_endpoint=endpoint) as upstream:
+        url = upstream.url("/oauth2/token")
+        with pytest.raises(TokenExchangeFailed):
+            await _call(
+                upstream,
+                ProcessTokenCache(),
+                kind="oauth2-certificate-credentials",
+                value={**value, "client_id": str(uuid4())},
+                kind_params={
+                    "token_endpoint": url,
+                    "scope": endpoint.scope,
+                    "audience": url,
+                    "signing_alg": "PS256",
+                },
+            )
+        assert upstream.paths == ["/oauth2/token"]
+        assert upstream.issued() == 0
+
+
+async def test_a_mismatched_certificate_and_key_never_reach_the_network(tmp_path: Path) -> None:
+    client_id = str(uuid4())
+    cert, value = oauth_certificate(client_id)
+    _, wrong_key = oauth_certificate(client_id)
+    endpoint = CertificateTokenEndpoint(client_id, (cert,))
+    async with running_upstream(tmp_path, certificate_endpoint=endpoint) as upstream:
+        url = upstream.url("/oauth2/token")
+        with pytest.raises(ValueInvalid):
+            await _call(
+                upstream,
+                ProcessTokenCache(),
+                kind="oauth2-certificate-credentials",
+                value={**value, "private_key_pem": wrong_key["private_key_pem"]},
+                kind_params={
+                    "token_endpoint": url,
+                    "scope": endpoint.scope,
+                    "audience": url,
+                    "signing_alg": "PS256",
+                },
+            )
+        assert upstream.paths == []
 
 
 async def test_the_token_is_cached_and_not_exchanged_again(tmp_path: Path) -> None:
@@ -152,13 +258,14 @@ async def test_the_token_and_the_client_secret_are_known_values(tmp_path: Path) 
 
 
 @pytest.mark.parametrize("missing", ["token_endpoint", "client_auth", "scope"])
-async def test_a_secret_without_its_owner_set_parameter_is_refused(tmp_path: Path, missing: str) -> None:
+async def test_a_secret_without_its_owner_set_parameter_is_refused(
+    tmp_path: Path, missing: str
+) -> None:
     async with running_upstream(tmp_path) as upstream:
         params = {k: v for k, v in _kind_params(upstream).items() if k != missing}
         with pytest.raises(ValueError):
             await _call(upstream, ProcessTokenCache(), kind_params=params)
         assert upstream.paths == []
-
 
 
 async def test_the_form_encoded_client_pair_is_a_known_value(tmp_path: Path) -> None:

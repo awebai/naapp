@@ -264,6 +264,21 @@ def test_well_formed_store_as_secret_stays_unavailable_until_derived_paths_exist
     "store",
     [
         {**STORE_AS_SECRET, "derived_kind": "api_key"},
+        {
+            **OAUTH_TOKEN_STORE,
+            "derived_kind": "oauth2-certificate-credentials",
+            "kind_params": {
+                "token_endpoint": "https://auth.example.com/oauth/token",
+                "audience": "https://auth.example.com",
+                "scope": "service:read",
+                "signing_alg": "PS256",
+            },
+            "capture": {
+                "client_id": "/client_id",
+                "certificate_pem": "/certificate_pem",
+                "private_key_pem": "/private_key_pem",
+            },
+        },
         {**STORE_AS_SECRET, "capture": {"password": "/Credentials/AccessKeyId"}},
         {**STORE_AS_SECRET, "expires_at": "Credentials/Expiration"},
         {**STORE_AS_SECRET, "grant_template": "sts-derived"},

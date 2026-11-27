@@ -8,10 +8,10 @@ all before any byte is sent. So a request for any other host never carries
 the credential. The injected headers go out only as the guard's injected
 headers, and every injected value is redacted from what comes back.
 
-An ``oauth2-client-credentials`` secret is first exchanged at its owner-set
-token endpoint, through the guard to that endpoint's own destination, with
-the client authenticated by ``client_secret_basic`` or ``client_secret_post``
-and the owner-set scope. The access token is cached for its lifetime less
+OAuth client credentials are exchanged at the owner-set token endpoint
+through the guard to that endpoint's own destination. The client uses a
+shared secret or a freshly signed assertion, with the owner-set scope.
+The access token is cached for its lifetime less
 60 s under a key secrets derives (:class:`aweb_secrets.tokens.TokenKey`),
 never returned, and injected as a bearer. The client secret and the
 token are both known values. If the exchange fails, the target was never
@@ -42,8 +42,10 @@ from aweb_naapp.egress import (
     EgressRefused,
     HeaderRules,
 )
+from aweb_secrets_values import OAUTH2_CERTIFICATE
 from aweb_secrets_values.credential_shapes import CredentialScan, CredentialScanUnavailable
 
+from aweb_secrets.client_assertion import ASSERTION_TYPE, sign_client_assertion
 from aweb_secrets.credential_shapes import is_credential_shaped_value
 from aweb_secrets.injection import Injection, inject
 from aweb_secrets.operation_request import OperationRequest
@@ -51,9 +53,9 @@ from aweb_secrets.redaction import KnownValues
 from aweb_secrets.response_audit import ResponseAudit, ResponseKey, ResponseKeyInvalid
 from aweb_secrets.response_capacity import ResponseReservation
 from aweb_secrets.responses import BrokeredResult, handle_response
+from aweb_secrets.secret import OAUTH2_KINDS
 from aweb_secrets.tokens import TokenCache, TokenKey
 
-OAUTH2 = "oauth2-client-credentials"
 # A cached access token is dropped this long before the upstream says it expires.
 TOKEN_EXPIRY_MARGIN = timedelta(seconds=60)
 
@@ -108,25 +110,16 @@ def _required(values: Mapping[str, str], name: str) -> str:
 async def _exchange(
     egress: Egress,
     *,
-    client_id: str,
-    client_secret: str,
-    kind_params: Mapping[str, str],
+    form: Mapping[str, str],
+    injected: list[tuple[str, str]],
+    endpoint: str,
     destination: Destination,
 ) -> tuple[str, int | None]:
     """An access token and its lifetime in seconds, from the token endpoint."""
-    form = {"grant_type": "client_credentials", "scope": kind_params["scope"]}
-    injected: list[tuple[str, str]] = []
-    if kind_params["client_auth"] == "client_secret_basic":
-        pair = f"{quote_plus(client_id)}:{quote_plus(client_secret)}"
-        injected.append(("Authorization", "Basic " + base64.b64encode(pair.encode()).decode()))
-    elif kind_params["client_auth"] == "client_secret_post":
-        form |= {"client_id": client_id, "client_secret": client_secret}
-    else:
-        raise ValueError("client_auth must be client_secret_basic or client_secret_post")
     try:
         response = await egress.send(
             "POST",
-            kind_params["token_endpoint"],
+            endpoint,
             destination,
             header_rules=HeaderRules(
                 injected=[name for name, _ in injected],
@@ -160,6 +153,7 @@ async def _exchange(
 async def _oauth2_injection(
     egress: Egress,
     *,
+    kind: str,
     value: Mapping[str, str],
     kind_params: Mapping[str, str],
     secret_ref: str,
@@ -169,9 +163,30 @@ async def _oauth2_injection(
     secret: SecretVersion | None,
 ) -> Injection:
     client_id = _required(value, "client_id")
-    client_secret = _required(value, "client_secret")
-    for name in ("token_endpoint", "client_auth", "scope"):
-        _required(kind_params, name)
+    endpoint = _required(kind_params, "token_endpoint")
+    certificate = kind == OAUTH2_CERTIFICATE
+    scope = kind_params.get("scope") if certificate else _required(kind_params, "scope")
+    if not isinstance(scope, str):
+        raise ValueError("the secret has no scope")
+    form = {"grant_type": "client_credentials"}
+    if scope:
+        form["scope"] = scope
+    injected: list[tuple[str, str]] = []
+    if certificate:
+        audience = _required(kind_params, "audience")
+        algorithm = _required(kind_params, "signing_alg")
+        _required(value, "certificate_pem")
+        _required(value, "private_key_pem")
+    else:
+        client_secret = _required(value, "client_secret")
+        client_auth = _required(kind_params, "client_auth")
+        pair = f"{quote_plus(client_id)}:{quote_plus(client_secret)}"
+        if client_auth == "client_secret_basic":
+            injected.append(("Authorization", "Basic " + base64.b64encode(pair.encode()).decode()))
+        elif client_auth == "client_secret_post":
+            form |= {"client_id": client_id, "client_secret": client_secret}
+        else:
+            raise ValueError("invalid client authentication method")
     if destination is None or tokens is None or secret is None:
         raise ValueError("an OAuth2 secret needs its token destination, token cache and version")
     key = TokenKey(
@@ -179,25 +194,42 @@ async def _oauth2_injection(
         team_id=secret.team_id,
         secret_id=secret.secret_id,
         version=secret.version,
-        token_endpoint=kind_params["token_endpoint"],
-        scope=kind_params["scope"],
+        token_endpoint=endpoint,
+        scope=scope,
     )
+    assertion = None
     token = await tokens.get(key)
     if token is None:
+        if certificate:
+            assertion = await asyncio.to_thread(
+                sign_client_assertion,
+                value,
+                client_id=client_id,
+                audience=audience,
+                algorithm=algorithm,
+            )
+            form |= {
+                "client_id": client_id,
+                "client_assertion_type": ASSERTION_TYPE,
+                "client_assertion": assertion,
+            }
         token, lifetime = await _exchange(
             egress,
-            client_id=client_id,
-            client_secret=client_secret,
-            kind_params=kind_params,
+            form=form,
+            injected=injected,
+            endpoint=endpoint,
             destination=destination,
         )
         if lifetime is not None and lifetime > TOKEN_EXPIRY_MARGIN.total_seconds():
             expires_at = datetime.now(UTC) + timedelta(seconds=lifetime) - TOKEN_EXPIRY_MARGIN
             await tokens.put(key, token, expires_at)
     injection = inject("bearer", {"value": token}, {}, secret_ref=secret_ref, url=url)
-    injection.known.add_basic(secret_ref, client_id, client_secret)
-    # client_secret_basic form-encodes the pair before base64 (RFC 6749 §2.3.1).
-    injection.known.add(secret_ref, f"{quote_plus(client_id)}:{quote_plus(client_secret)}")
+    if assertion is not None:
+        injection.known.add(secret_ref, assertion)
+    if not certificate:
+        injection.known.add_basic(secret_ref, client_id, client_secret)
+        # client_secret_basic form-encodes the pair before base64 (RFC 6749 §2.3.1).
+        injection.known.add(secret_ref, pair)
     return injection
 
 
@@ -236,9 +268,10 @@ async def broker(
     """
     if not isinstance(response_key, ResponseKey):
         raise ResponseKeyInvalid("a brokered response requires its configured response key")
-    if kind == OAUTH2:
+    if kind in OAUTH2_KINDS:
         injection = await _oauth2_injection(
             egress,
+            kind=kind,
             value=value,
             kind_params=kind_params,
             secret_ref=secret_ref,

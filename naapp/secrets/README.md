@@ -163,7 +163,7 @@ The tests need PostgreSQL, as pgdbm's test fixtures configure it.
 
 Custody ingests structured values using `encode_value(kind, fields)`; the broker
 uses `decode_value(kind, opened.reveal())`. Both live in `aweb_secrets.custody`
-and share the fields in `operation.CAPTURE_FIELDS`. Decode failures carry no
+and share the fields in `aweb_secrets_values.VALUE_FIELDS`. Decode failures carry no
 value bytes. The stored payload is UTF-8 JSON; callers never log it.
 
 Apply the app's record migrations before custody migrations. Existing-secret

@@ -1,12 +1,12 @@
 # aweb secrets values
 
 The sole structured credential codec used by custody and the runner. Runtime
-imports use only the Python standard library. `CAPTURE_FIELDS` defines each
-kind's required and optional fields; `encode_value` and `decode_value` validate
-the whole mapping. `ValueInvalid` carries a fixed message without the value.
+imports use only the Python standard library. `VALUE_FIELDS` defines each
+kind's required and optional fields. `encode_value` and `decode_value` validate
+the whole mapping. `CAPTURE_FIELDS` contains the subset eligible for derived
+capture. `ValueInvalid` carries a fixed message without the value.
 
-Custody and operation modules re-export these same objects. Moving them here
-does not change the encoded bytes, field validation or supported kinds.
+Custody and operation modules re-export these same objects.
 
 ```sh
 uv run pytest tests/test_values.py

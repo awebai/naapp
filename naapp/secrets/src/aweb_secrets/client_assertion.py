@@ -18,8 +18,8 @@ from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from aweb_secrets.secret import ASSERTION_ALGORITHMS
 
 ASSERTION_TYPE = "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+MAX_PEM_BYTES = 16_384
 _ASSERTION_SECONDS = 300
-_MAX_PEM_CHARS = 16_384
 
 
 def _base64url(value: bytes) -> str:
@@ -41,7 +41,7 @@ class CertificateCredential:
         """Validate the submitted key pair before sealing or signing."""
         try:
             cert_pem, key_pem = value["certificate_pem"], value["private_key_pem"]
-            if max(len(cert_pem), len(key_pem)) > _MAX_PEM_CHARS:
+            if max(len(cert_pem), len(key_pem)) > MAX_PEM_BYTES:
                 raise ValueError
             [certificate] = x509.load_pem_x509_certificates(cert_pem.encode("ascii"))
             key = serialization.load_pem_private_key(key_pem.encode("ascii"), password=None)

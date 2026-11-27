@@ -877,9 +877,9 @@ The scheme is executed server-side, so the raw value never leaves secrets
 
 For certificate authentication, register the public certificate with the
 authorization server. In the Secrets console choose **OAuth2 certificate
-credentials** and enter the client ID, one PEM certificate, its matching
-unencrypted RSA private key, and the registered key ID if the server
-requires one. Configure the token endpoint, scope, assertion audience, and
+credentials**. Enter the client ID and one PEM certificate, and select the
+matching unencrypted RSA private key file. Enter the registered key ID if
+the server requires one. Configure the token endpoint, scope, assertion audience, and
 signing algorithm (`PS256` or `RS256`). Use the audience string the server
 requires, preserving any trailing slash it specifies. The token endpoint and
 the resource each need an approved destination.

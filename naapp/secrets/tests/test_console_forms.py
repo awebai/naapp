@@ -204,6 +204,19 @@ async def test_native_browser_draft_dispatch_and_replacement(
         credential_opener=world.custody.backend_credential_opener,
     )
 
+    def assert_value_free(values, surface, *items):
+        # The PEM text has line breaks. A JSON response or stored request
+        # represents those as backslash escapes.
+        markers = {
+            spelling.encode()
+            for value in values
+            for spelling in (value, json.dumps(value, ensure_ascii=False)[1:-1])
+        }
+        for item in items:
+            data = item.encode() if isinstance(item, str) else item
+            if any(marker in data for marker in markers):
+                pytest.fail(f"native input leaked into {surface}")
+
     async def approve_latest(page):
         _, locator = world.inbox.links["alice@acme.com"][-1]
         await page.goto(service + "/approvals#token=" + quote(locator, safe=""))
@@ -216,27 +229,35 @@ async def test_native_browser_draft_dispatch_and_replacement(
         fields = [page.locator(f'#native-secret [data-kind="{kind}"] [data-value="{key}"]')
                   for key in value]
         for (name, text), field in zip(value.items(), fields, strict=True):
-            if name in {"certificate_pem", "private_key_pem"}:
+            if name == "private_key_pem":
+                assert await field.get_attribute("type") == "file"
+                await field.set_input_files(
+                    {"name": "key.pem", "mimeType": "application/x-pem-file", "buffer": text.encode()}
+                )
+            elif name == "certificate_pem":
                 assert await field.evaluate("(field) => field.tagName") == "TEXTAREA"
+                await field.fill(text)
             else:
                 assert await field.get_attribute("type") == "password"
-            await field.fill(text)
+                await field.fill(text)
         async with page.expect_response(service + path) as receipt:
             await page.get_by_role("button", name="Save a native value draft").click()
         response = await receipt.value
         assert response.status == 201
+        assert_value_free(value.values(), "the sealing response", await response.body())
         body = await response.json()
         assert set(body) == {"version", "created_at"} and body["version"] == version
-        assert datetime.fromisoformat(body["created_at"]) == await world.db.fetch_value(
-            "SELECT created_at FROM {{tables.sealed_versions}} WHERE version=$1", version
+        sealed = await world.db.fetch_one(
+            "SELECT created_at, ciphertext FROM {{tables.sealed_versions}} WHERE version=$1",
+            version,
         )
+        assert datetime.fromisoformat(body["created_at"]) == sealed["created_at"]
+        assert_value_free(value.values(), "the sealed version", sealed["ciphertext"])
         for field in fields:
             await expect(field).to_have_value("")
         await expect(page.locator("#native-status")).to_contain_text(f"Version {version}")
         state = await page.evaluate("() => JSON.stringify({...sessionStorage, ...localStorage})")
-        page_evidence = (await page.content(), state)
-        if any(text in item for text in value.values() for item in page_evidence):
-            pytest.fail("browser retained the submitted value after sealing")
+        assert_value_free(value.values(), "browser state after sealing", await page.content(), state)
 
     endpoint = None
     if kind == OAUTH2_CERTIFICATE:
@@ -246,7 +267,7 @@ async def test_native_browser_draft_dispatch_and_replacement(
         endpoint = CertificateTokenEndpoint(client_id, (first_certificate, next_certificate))
     async with (
         running_upstream(tmp_path, certificate_endpoint=endpoint) as upstream,
-        browser.new_context() as context,
+        await browser.new_context() as context,
     ):
         if endpoint is None:
             entered = (
@@ -373,6 +394,7 @@ async def test_native_browser_draft_dispatch_and_replacement(
         result = await broker.submit(secret=ref, submission=request)
         assert (result.status, result.body["state"]) == (200, "completed")
         assert result.body["result"]["status"] == 200
+        broker_replies = [result.body]
         expected_paths = ["/oauth2/token", upstream_path] if endpoint is not None else [upstream_path]
         assert upstream.paths == expected_paths
 
@@ -402,6 +424,7 @@ async def test_native_browser_draft_dispatch_and_replacement(
             )
             assert rotated.status == 200
             assert rotated.body["result"]["status"] == 200
+            broker_replies.append(rotated.body)
             assert upstream.paths == expected_paths * 2
             assert len(endpoint.used) == 2
 
@@ -414,14 +437,20 @@ async def test_native_browser_draft_dispatch_and_replacement(
         ]
         assert sorted(acts) == ["resource.created", "resource.version_added", "resource.version_added"]
         retained = await page.evaluate("() => JSON.stringify({...sessionStorage, ...localStorage})")
-        evidence = "\n".join(
-            browser_logs + [page.url, await page.content(), retained, caplog.text,
-                            json.dumps(events), json.dumps(result.body)]
-        ).encode()
-        wire = b"\n".join(native_http_responses)
         markers = (*entered.values(), *replacement.values(), malformed)
-        if any(value.encode() in evidence or value.encode() in wire for value in markers):
-            pytest.fail("native input leaked into a response, browser state, audit or log")
+        assert_value_free(markers, "the browser", page.url, await page.content(), retained)
+        assert_value_free(markers, "logs", *browser_logs, caplog.text)
+        assert_value_free(markers, "HTTP responses", *native_http_responses)
+        assert_value_free(markers, "audit envelopes", json.dumps(events))
+        assert_value_free(
+            markers, "broker replies", *(json.dumps(reply) for reply in broker_replies)
+        )
+        metadata = await world.db.fetch_all(
+            "SELECT record::text AS body FROM {{tables.secrets}}"
+            " UNION ALL SELECT request::text FROM {{tables.change_sets}}"
+            " UNION ALL SELECT result::text FROM {{tables.dispatch_observations}} WHERE result IS NOT NULL"
+        )
+        assert_value_free(markers, "stored metadata", *(row["body"] for row in metadata))
 
 
 @pytest.mark.parametrize(

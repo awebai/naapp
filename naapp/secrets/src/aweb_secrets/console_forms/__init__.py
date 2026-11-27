@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, Response
 
 from aweb_secrets import records
 from aweb_secrets.change import MAX_REASON_CHARS
+from aweb_secrets.client_assertion import MAX_PEM_BYTES
 from aweb_secrets.console_changes import ConsoleChanges, _errors
 from aweb_secrets.console_forms.grants import grant_forms_router
 from aweb_secrets.secret import (
@@ -96,7 +97,13 @@ def _kind_fields(prefix: str, *, fixed_kind: str | None = None) -> str:
                 label += " field ID"
             if name in optional:
                 label += " (optional)"
-            if kind == OAUTH2_CERTIFICATE and name in {"certificate_pem", "private_key_pem"}:
+            if kind == OAUTH2_CERTIFICATE and name == "private_key_pem":
+                fields.append(
+                    f'<label for="{identity}">Private key PEM file</label><input id="{identity}" '
+                    f'type="file" data-value="{name}" data-max-bytes="{MAX_PEM_BYTES}" required>'
+                )
+                continue
+            if kind == OAUTH2_CERTIFICATE and name == "certificate_pem":
                 fields.append(
                     f'<label for="{identity}">{label}</label><textarea id="{identity}" '
                     f'data-value="{name}" autocomplete="off" spellcheck="false" rows="4" required>'

@@ -309,3 +309,17 @@ async def test_an_installation_without_override_still_has_the_ordinary_tools(wor
     await world.ok(erin, "POST", "/v1/tasks", {"title": "Ordinary"})
     await world.ok(erin, "POST", "/v1/tasks/1/claim", {})
     assert (await world.ok(erin, "POST", "/v1/tasks/1/close", {}))["status"] == "closed"
+
+
+@pytest.mark.parametrize(
+    ("path", "claim_first"),
+    [("/v1/tasks/1/close", False), ("/v1/tasks/1/claim/renew", True), ("/v1/tasks/1/close-claimed", False)],
+    ids=["close", "claim-renew", "close-claimed"],
+)
+async def test_a_tool_whose_inputs_are_all_optional_takes_no_body(world: World, path: str, claim_first: bool) -> None:
+    # aw sends no body when none of a tool's body parameters is given.
+    alice, _ = world.teams["ours"]
+    await world.ok(alice, "POST", "/v1/tasks", {"title": "Work"})
+    if claim_first:
+        await world.ok(alice, "POST", "/v1/tasks/1/claim", {})
+    await world.ok(alice, "POST", path)

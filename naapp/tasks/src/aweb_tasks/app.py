@@ -17,7 +17,7 @@ from aweb_naapp.runtime.health import mount_health
 from aweb_naapp.runtime.installation import InstallationRefused, apply_installation_migrations
 from aweb_naapp.runtime.team_auth import refusal
 from awid.external_authority import TXTOutcomeResolver
-from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi import Body, Depends, FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 
 from aweb_tasks import MANIFEST_PATH
@@ -32,6 +32,8 @@ MIGRATIONS_PATH = Path(__file__).resolve().parent / "migrations"
 REFUSAL_STATUS: dict[Code, int] = {code: 409 for code in Code} | {Code.NOT_FOUND: 404}
 
 TaskType = Literal["task", "bug", "feature", "epic"]
+# aw sends no body when none of a tool's optional body parameters is given.
+OptionalBody = Body(default=None)
 Priority = Annotated[int, Field(ge=0, le=4)]
 Text = Annotated[str, Field(min_length=1)]
 
@@ -200,8 +202,9 @@ def create_app(
         return await answer(lambda: tasks.update(number, Fields(**payload.model_dump(exclude_unset=True))))
 
     @app.post("/v1/tasks/{number}/close")
-    async def close(number: int, payload: Close, tasks: Store) -> dict:
-        return await answer(lambda: tasks.close(number, with_children=payload.with_children))
+    async def close(number: int, tasks: Store, payload: Close | None = OptionalBody) -> dict:
+        given = payload or Close()
+        return await answer(lambda: tasks.close(number, with_children=given.with_children))
 
     @app.post("/v1/tasks/{number}/reopen")
     async def reopen(number: int, tasks: Store) -> dict:
@@ -248,8 +251,9 @@ def create_app(
         return await answer(lambda: tasks.release(number, payload.revision))
 
     @app.post("/v1/tasks/{number}/claim/renew")
-    async def claim_renew(number: int, payload: Renewal, tasks: Store) -> dict:
-        return await answer(lambda: tasks.renew_claim(number, payload.revision))
+    async def claim_renew(number: int, tasks: Store, payload: Renewal | None = OptionalBody) -> dict:
+        given = payload or Renewal()
+        return await answer(lambda: tasks.renew_claim(number, given.revision))
 
     @app.post("/v1/locks")
     async def lock(payload: LockRequest, tasks: Store) -> dict:
@@ -276,9 +280,10 @@ def create_app(
         return await answer(lambda: tasks.break_lock(payload.resource, payload.revision))
 
     @app.post("/v1/tasks/{number}/close-claimed")
-    async def close_claimed(number: int, payload: CloseClaimed, tasks: Store) -> dict:
+    async def close_claimed(number: int, tasks: Store, payload: CloseClaimed | None = OptionalBody) -> dict:
+        given = payload or CloseClaimed()
         return await answer(lambda: tasks.close(
-            number, with_children=payload.with_children, overrides=True, presented_revision=payload.revision,
+            number, with_children=given.with_children, overrides=True, presented_revision=given.revision,
         ))
 
     @app.get("/v1/tasks/{number}/history")

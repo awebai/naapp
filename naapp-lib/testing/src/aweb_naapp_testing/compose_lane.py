@@ -384,7 +384,11 @@ class ComposeLane:
     ) -> httpx.Response:
         """Send one HTTP request from ``machine`` on the lane, through the
         lane's DNS and TLS front, and return its first answer, error statuses
-        included. The request travels on stdin, never in argv."""
+        included. The request travels on stdin, never in argv.
+
+        Each header name is sent once, with the last value given for it. A
+        body goes as application/x-www-form-urlencoded unless ``headers``
+        names its Content-Type."""
         request = {
             "method": method,
             "url": url,

@@ -11,6 +11,8 @@ import pytest
 PACKAGE = Path(__file__).resolve().parent / "aweb_server_tests"
 LOCK = Path(__file__).resolve().parents[2] / "uv.lock"
 MODULES = sorted(path.stem for path in PACKAGE.glob("*.py") if path.stem != "__init__")
+
+
 def _definitions(path: Path) -> dict[str, str]:
     """Each top-level definition's source text, from its first decorator to its end."""
     source = path.read_text()

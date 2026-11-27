@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -48,9 +48,12 @@ async def db(test_db_factory: Any) -> Any:
     return database
 
 
-def store(db: Any, alias: str) -> TaskStore:
+def store(db: Any, alias: str, clock: Any = None) -> TaskStore:
     events = AppEvents(app_id="tasks-test", origin=None, key=None, policy=RetryPolicy(stalled_after=timedelta(hours=1)))
-    return TaskStore(db, installation_id=INSTALLATION, principal=principal(alias), events=events, app_id="tasks-test")
+    return TaskStore(
+        db, installation_id=INSTALLATION, principal=principal(alias), events=events, app_id="tasks-test",
+        **({} if clock is None else {"clock": clock}),
+    )
 
 
 async def waiting_on_locks(db: Any, count: int) -> None:
@@ -104,6 +107,24 @@ async def test_two_locks_at_once_give_one_lock(db: Any) -> None:
     assert outcomes[1] == "won" and outcomes[0] in {"locked_by_other", "lease_changed"}, outcomes
     (held,) = await store(db, "alice").locks()
     assert held["revision"] == 3
+
+
+async def test_a_lease_is_judged_at_the_time_after_its_lock_wait(db: Any) -> None:
+    now = [datetime(2026, 11, 27, 12, tzinfo=UTC)]
+
+    def clock() -> datetime:
+        return now[0]
+
+    await store(db, "alice", clock).create(title="Work", body="", type="task", priority=2, labels=[], parent=None, assignee=None)
+    await store(db, "alice", clock).claim(1)
+    async with db.transaction() as tx:
+        await tx.execute("SELECT 1 FROM {{tables.claims}} WHERE number = 1 FOR UPDATE")
+        waiting = asyncio.ensure_future(store(db, "bob", clock).claim(1))
+        await waiting_on_locks(db, 1)
+        # Alice's claim expires while Bob waits for the row.
+        now[0] += timedelta(hours=24)
+    claimed = await waiting
+    assert claimed["claim"]["holder_alias"] == "bob"
 
 
 def emitting(tmp_path: Path) -> AppEvents:

@@ -16,7 +16,7 @@ PRODUCTION_AWID_PROJECT := scripts/test-egress/production-awid
 # The aw release the e2e journeys run, installed by scripts/install-aw.sh.
 AW_DIR ?= $(abspath .tools/bin)
 
-SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_served_manifest_digests \
+SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_release_files test_served_manifest_digests \
 	test_secrets_shards test_shipping
 
 .PHONY: affected sync lint lint-scripts test test-scripts production-awid-sync browsers renderer-deps test-renderer image-smoke-folio image-smoke-library check-library-dev aw \
@@ -155,7 +155,7 @@ release-checks:
 # tested (docs/release.md).
 release-candidate:
 	@test -n "$(TAGS)" || { echo "TAGS is required" >&2; exit 2; }
-	python3 scripts/release_candidate.py $(if $(SOURCE),--source $(SOURCE)) $(TAGS)
+	python3 scripts/release_candidate.py $(if $(SOURCE),--source $(SOURCE)) $(if $(FILES),--files $(FILES)) $(TAGS)
 
 release-publish:
 	@test -n "$(TAG)" || { echo "TAG is required" >&2; exit 2; }

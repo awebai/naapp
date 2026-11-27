@@ -103,6 +103,7 @@ async def world(
                 database_url=library_db.config.get_dsn(),
                 db_schema=library_db.config.schema_name,
                 awid_registry_url=registry_origin,
+                app_id="example-library",
                 public_origin=ORIGIN,
             ),
             awid_txt_resolver=dns_naming(DOMAIN, namespace_key),
@@ -167,7 +168,7 @@ async def test_a_substituted_registry_team_key_does_not_admit_a_forged_member(
     forged = await _shelf(world, forger)
 
     assert forged.status_code == 401, forged.text
-    assert forged.json()["detail"].startswith("team_key_unverified")
+    assert forged.json()["detail"]["code"] == "team_key_unverified"
     assert await _pinned_key(world) == member.team_did_key
 
 

@@ -11,13 +11,13 @@ import redis
 from tests.server_compat.aweb_server_tests import AWEB_MODULE_NAMES
 from tests.server_compat.aweb_server_tests.app_task_requests import app_request_context
 from tests.server_compat.aweb_server_tests.dashboard_privacy import privacy_app
-from tests.server_compat.aweb_server_tests.real_stack import real_stack
 from tests.server_compat.aweb_server_tests.server_conftest import (
     ENVIRONMENT_DEFAULTS,
     aweb_cloud_db,
     shared_test_database,
     shared_test_pool,
 )
+from tests.server_compat.real_stack import real_stack
 
 # Copied definitions import some of aweb's test modules by aweb's own names.
 for aweb_name, copy in AWEB_MODULE_NAMES.items():

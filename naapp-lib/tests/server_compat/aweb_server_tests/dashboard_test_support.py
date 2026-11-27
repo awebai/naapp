@@ -1,4 +1,4 @@
-"""aweb server/tests/dashboard_test_support.py at 2788969b6fce509437eab53637927bb97cf18b58, the definitions the server-compatibility suite uses.
+"""aweb server/tests/dashboard_test_support.py at server-v1.27.53, the definitions the server-compatibility suite uses.
 
 Copied verbatim by scripts/server_test_support.py and checked against COPIED by
 tests/server_compat/test_aweb_server_tests.py. Do not edit them here; rerun the
@@ -6,9 +6,7 @@ script from the aweb tag this repository pins.
 """
 # ruff: noqa
 
-# Copied from an aweb commit, not a release: replaced by the re-copy
-# from the first server tag that carries this change.
-AWEB_REF = '2788969b6fce509437eab53637927bb97cf18b58'
+AWEB_REF = 'server-v1.27.53'
 AWEB_PATH = 'server/tests/dashboard_test_support.py'
 AWEB_BLOB = '7c385be349baa70e388c5c9705beaae95d1ac101'
 COPIED = {

@@ -1,16 +1,24 @@
-"""aweb server/tests/real_stack.py at 2788969b6fce509437eab53637927bb97cf18b58, the definitions the server-compatibility suite uses.
+"""A real AWID and a real aweb in process, the stack the server-compatibility suite
+drives this repository's runtime against.
 
-Copied verbatim by scripts/server_test_support.py and checked against COPIED by
-tests/server_compat/test_aweb_server_tests.py. Do not edit them here; rerun the
-script from the aweb tag this repository pins.
+aweb listens as a team-server site: TLS on this host's private address, reached
+through the runtime's own egress guard, as an operator's team server is. AWID is
+mounted from awid_service and reached over an in-process transport. The aweb app
+and its seeding come from aweb's own server test helpers in aweb_server_tests.
 """
-# ruff: noqa
+
 from __future__ import annotations
+
+import asyncio
+import os
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass
+from datetime import UTC, datetime
+
+import httpx
+import pytest_asyncio
 from aweb.routes.app_hooks import router as app_hooks_router
 from aweb.routes.apps import router as apps_router
-from aweb_naapp.runtime.operator_egress import OperatorNetworkSettings
-from aweb_naapp.runtime.team_auth import AWIDTeamCache
-from aweb_naapp.runtime.team_server import TeamServerDirectory, TeamServerReach
 from aweb_naapp_testing.team_server_site import TeamServerSite, team_server_site
 from awid.did import did_from_public_key
 from awid.ratelimit import NoOpRateLimiter
@@ -18,38 +26,22 @@ from awid.signing import sign_message
 from awid.team_server_record import record_signing_bytes
 from awid_service.db import AwidDatabaseInfra
 from awid_service.main import mount_registry
-from collections.abc import AsyncIterator, Callable
-from dataclasses import dataclass
-from datetime import datetime, timezone
 from fastapi import FastAPI
 from nacl.signing import SigningKey
 from redis.asyncio import Redis
-import asyncio
-import httpx
-import os
-import pytest_asyncio
-from tests.server_compat.aweb_server_tests.app_events_http import _build_events_app, _seed_team_and_agent
 
-# Copied from an aweb commit, not a release: replaced by the re-copy
-# from the first server tag that carries this change.
-AWEB_REF = '2788969b6fce509437eab53637927bb97cf18b58'
-AWEB_PATH = 'server/tests/real_stack.py'
-AWEB_BLOB = '143c18a5bee900b3876b6baa43b3840526c0be9d'
-COPIED = {
-    'REGISTRY_URL': '2078c4cc7a32370057f247fc3898fd819aa5747b2d35f1b285e0eb0e7148978c',
-    'MOVED_NAME': '6c1eb0d5972b1ad08490c872a803166267e73efd1e78ba9ddbfb59871eb6185d',
-    'ResponseFault': 'eea1fa0b31e14ae2b2119904407301f4372e8898e9fac90b19f94e7f1ac70fee',
-    'ServiceTransport': '44f2546ce62582b5cd58391ed7d677e4a47e06a4e96c2dd17029aa98b2b09e29',
-    'RealStack': 'b06b4bd9a884b3cee7bcf55d6436415b3d88911d35970f4bc19dce5a0fdef31d',
-    'real_stack': '4a0eab92cdeefc6477064565ec4b015b3e4061c4f79536eb86962f6038b97e28',
-}
-
+from aweb_naapp.runtime.operator_egress import OperatorNetworkSettings
+from aweb_naapp.runtime.team_auth import AWIDTeamCache
+from aweb_naapp.runtime.team_server import TeamServerDirectory, TeamServerReach
+from tests.server_compat.aweb_server_tests.app_events_http import (
+    _build_events_app,
+    _seed_team_and_agent,
+)
 
 REGISTRY_URL = "https://registry.example"
 
-
+# A second name of the stack's aweb, as a team that moves its server names it.
 MOVED_NAME = "aweb.moved.example"
-
 
 ResponseFault = Callable[[httpx.Request, httpx.Response], httpx.Response | None]
 
@@ -126,9 +118,7 @@ class RealStack:
             "team_id": team_id,
             "team_did_key": did_from_public_key(bytes(team_key.verify_key)),
             "server_url": server_url or self.aweb_url,
-            "issued_at": (issued_at or datetime.now(timezone.utc)).strftime(
-                "%Y-%m-%dT%H:%M:%SZ"
-            ),
+            "issued_at": (issued_at or datetime.now(UTC)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
         body = {
             "record": record,

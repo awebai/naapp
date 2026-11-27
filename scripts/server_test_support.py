@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Write the aweb server test helpers the server-compatibility suite uses.
 
-Usage: scripts/server_test_support.py <aweb checkout> <aweb server release tag | commit>
+Usage: scripts/server_test_support.py <aweb checkout> <aweb server release tag>
 
 The suite in naapp-lib/tests/server_compat drives this repository's runtime
 against the real aweb server it pins. Its fixtures and helpers are aweb's own
@@ -13,16 +13,11 @@ test_ prefix), with the imports they need. Each module records the tag, the
 aweb path, that file's blob and the sha256 of every copied definition's source
 text; tests/server_compat/test_aweb_server_tests.py checks the copies against
 that record. Run it again from the new tag when the aweb pin moves.
-
-A full commit SHA in place of the tag copies from a reviewed aweb commit whose
-server/tests change no release carries yet; the record names that commit, and
-the copies are replaced by the re-copy from the first server tag that does.
 """
 from __future__ import annotations
 
 import ast
 import hashlib
-import re
 import subprocess
 import sys
 from pathlib import Path
@@ -32,11 +27,12 @@ PACKAGE = ROOT / "naapp-lib/tests/server_compat/aweb_server_tests"
 IMPORT_PREFIX = "tests.server_compat.aweb_server_tests"
 TESTS = "server/tests"
 
-# The definitions the suite's test files import or take as fixtures, by aweb module.
+# The definitions the suite's test files and its real_stack import or take as
+# fixtures, by aweb module.
 ROOTS = {
     "conftest": ("shared_test_pool", "aweb_cloud_db"),
     "installation_fixtures": ("seed_hook_installation", "install_fixture_app"),
-    "real_stack": ("REGISTRY_URL", "RealStack", "real_stack"),
+    "test_app_events_http": ("_build_events_app", "_seed_team_and_agent"),
     "test_team_auth_deps": ("_make_certificate", "_encode_certificate"),
     "test_app_task_requests": ("_app_http", "_body", "_sign", "_stage", "app_request_context"),
     "test_dashboard_privacy": ("TEAM", "privacy_app"),
@@ -138,7 +134,7 @@ def collect(checkout: Path, tag: str):
     # Fixtures a copied definition can take by parameter: those of the modules it
     # comes from and of conftest, which pytest offers to every test.
     fixtures = {}
-    for name in (*ROOTS, "conftest", "real_stack"):
+    for name in (*ROOTS, "conftest"):
         for definition, node in module(name).definitions.items():
             if any("fixture" in ast.unparse(d) for d in getattr(node, "decorator_list", [])):
                 fixtures.setdefault(definition, name)
@@ -205,7 +201,6 @@ def module_name(source: str) -> str:
 
 
 def render_module(tag: str, current: Module, chosen, imports) -> str:
-    """``tag`` is the server release tag, or the full aweb commit, copied from."""
     nodes = sorted(
         {id(node): (node.lineno, node) for (s, _), node in chosen.items() if s == current.name}.values()
     )
@@ -250,14 +245,6 @@ def render_module(tag: str, current: Module, chosen, imports) -> str:
         record.append((sorted(names_of[id(node)])[0], hashlib.sha256(text.encode()).hexdigest()))
     lines += [
         "",
-        *(
-            [
-                "# Copied from an aweb commit, not a release: replaced by the re-copy",
-                "# from the first server tag that carries this change.",
-            ]
-            if is_commit(tag)
-            else []
-        ),
         f"AWEB_REF = {tag!r}",
         f"AWEB_PATH = {current.path!r}",
         f"AWEB_BLOB = {current.blob!r}",
@@ -271,16 +258,10 @@ def render_module(tag: str, current: Module, chosen, imports) -> str:
     return "\n".join(lines) + "\n"
 
 
-def is_commit(ref: str) -> bool:
-    return re.fullmatch(r"[0-9a-f]{40}", ref) is not None
-
-
 def main() -> None:
     if len(sys.argv) != 3:
-        raise SystemExit(f"usage: {sys.argv[0]} <aweb checkout> <aweb server release tag | commit>")
+        raise SystemExit(f"usage: {sys.argv[0]} <aweb checkout> <aweb server release tag>")
     checkout, tag = Path(sys.argv[1]), sys.argv[2]
-    if not (tag.startswith("server-v") or is_commit(tag)):
-        raise SystemExit(f"{tag!r} is neither a server release tag nor a full commit SHA")
     modules, chosen, imports, nested = collect(checkout, tag)
     sources = sorted({source for source, _ in chosen})
     PACKAGE.mkdir(parents=True, exist_ok=True)

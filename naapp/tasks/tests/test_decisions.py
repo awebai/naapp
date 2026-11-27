@@ -29,6 +29,7 @@ from aweb_tasks.decisions import (
     close,
     close_claimed,
     holder_of,
+    inside,
     lock,
     release,
     release_all,
@@ -613,6 +614,22 @@ def test_set_parent(number: int, parent: int, parent_of: dict[int, int | None], 
 )
 def test_set_parent_references(subject: Task | None, parent: Task | None, expected: Code | None) -> None:
     assert code_of(set_parent(INSTALLATION, subject, parent, {})) == expected
+
+
+@pytest.mark.parametrize(
+    ("parent", "expected"),
+    [
+        (task(2), None),
+        # Any status or claim: only the boundary is judged (a closed parent can gain a child).
+        (task(2, status=TaskStatus.CLOSED), None),
+        (task(2, claim=held(BOB, 1)), None),
+        (task(2, installation_id=NEIGHBOUR_INSTALLATION), Code.NOT_FOUND),
+        (None, Code.NOT_FOUND),
+    ],
+    ids=["open", "closed", "claimed", "other-installation", "missing"],
+)
+def test_inside(parent: Task | None, expected: Code | None) -> None:
+    assert code_of(inside(INSTALLATION, parent)) == expected
 
 
 def test_refusal_is_the_apps_shared_shape() -> None:

@@ -152,7 +152,7 @@ _MESSAGES = {
     Code.NOT_OVERRIDABLE: "The caller holds this lease; use the holder's own tools",
     Code.TASK_CLOSED: "The task is closed",
     Code.TASK_NOT_CLOSED: "The task is not closed",
-    Code.HAS_OPEN_CHILDREN: "The task has open children; close them with it using --with-children",
+    Code.HAS_OPEN_CHILDREN: "The task has open children; close it with its children to close them too",
     Code.NOT_FOUND: "No such task",
     Code.DEPENDENCY_CYCLE: "The dependency would make a task wait on itself",
     Code.PARENT_CYCLE: "The parent would make a task its own ancestor",
@@ -414,6 +414,13 @@ def reopen(installation_id: str, task: Task | None) -> Refusal | None:
 
 
 # --- Dependencies and parents ----------------------------------------------
+
+
+def inside(installation_id: str, task: Task | None) -> Refusal | None:
+    """The boundary alone, for operations no other rule judges: creating under a
+    parent (a new task has no descendants, and the parent's status and claim do
+    not matter), editing fields, commenting, and reading one task."""
+    return _outside(installation_id, task)
 
 
 def _reaches(start: int, goal: int, edges: Mapping[int, Collection[int]]) -> bool:

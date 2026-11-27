@@ -839,6 +839,31 @@ jobs:
     env:
       JUNIT_DIR: ${{ github.workspace }}/junit
       PACKAGES: naapp/tasks
+      REDIS_URL: redis://localhost:6379/0
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      # The production AWID the fixture starts does not start without Redis.
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -856,7 +881,12 @@ jobs:
       - name: Lint and type-check
         run: make lint
 
-      - name: Run unit tests
+      - name: Install the PostgreSQL client of the server's major version
+        run: |
+          sudo bash scripts/test-egress/install-postgres-client.sh
+          echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
+
+      - name: Run unit and contract tests
         run: make test
 
       - name: Keep the per-test results
@@ -866,6 +896,40 @@ jobs:
           name: junit-${{ github.job }}${{ matrix.shard && format('-{0}', matrix.shard) || '' }}
           path: junit/
           if-no-files-found: warn
+
+  tasks-image:
+    name: Tasks image starts and serves
+    needs: plan
+    if: contains(fromJSON(needs.plan.outputs.packages), 'naapp/tasks')
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      PACKAGES: naapp/tasks
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      # Built from the repository root as the release builds it, started with a
+      # minimal configuration; /live must name Tasks and this build's commit.
+      - name: Build the Tasks image and check it serves
+        env:
+          IMAGE_SMOKE_SHA: ${{ github.sha }}
+          IMAGE_SMOKE_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: make image-smoke-tasks
 
   result:
     name: naapp CI
@@ -887,6 +951,7 @@ jobs:
       - secrets-runner
       - secrets-values
       - tasks
+      - tasks-image
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

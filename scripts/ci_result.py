@@ -31,6 +31,7 @@ JOBS = {
     'secrets-runner': 'naapp/secrets/runner',
     'secrets-values': 'naapp/secrets/values',
     'tasks': 'naapp/tasks',
+    'tasks-image': 'naapp/tasks',
 }
 
 

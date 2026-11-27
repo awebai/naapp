@@ -159,7 +159,33 @@ def _secrets(directory: Path) -> dict[str, bytes]:
     return _runtime_documents(runtime)
 
 
-APPS = {"folio": _folio, "library": _library, "logs": _logs, "secrets": _secrets}
+def _tasks(directory: Path) -> dict[str, bytes]:
+    from aweb_naapp.runtime.app import NaappRuntime
+    from aweb_naapp.runtime.installation import apply_installation_migrations
+    from aweb_tasks import MANIFEST_PATH
+    from aweb_tasks.app import MIGRATIONS_PATH
+    from aweb_tasks.config import TasksSettings
+
+    template = json.loads(MANIFEST_PATH.read_bytes())
+    settings = TasksSettings(
+        _env_file=None,
+        database_url="postgresql://localhost/unused",
+        public_origin=_origin("tasks"),
+        app_id=_app_id("tasks"),
+        app_key_files=_key_files("tasks", template, directory),
+    )
+    # The arguments aweb_tasks.app.create_app gives the runtime's manifest.
+    runtime = NaappRuntime(
+        settings,
+        module_name="tasks",
+        migrations_path=MIGRATIONS_PATH,
+        manifest_path=MANIFEST_PATH,
+        stores=(apply_installation_migrations,),
+    )
+    return _runtime_documents(runtime)
+
+
+APPS = {"folio": _folio, "library": _library, "logs": _logs, "secrets": _secrets, "tasks": _tasks}
 
 
 def digests(app: str) -> dict[str, str]:

@@ -20,7 +20,12 @@
       "/aweb-app.json": "ac7f68608c96c40d5e2f57169064f5f4e76622dd5d7ee4b06ce74f4185a184ef",
       "/manifests/v2.json": "13bfac65eede613e1a5d9c36ce9e7c2f9c8854f5b62df301e9b4ffad9b1457fc",
       "/manifests/v3.json": "ac7f68608c96c40d5e2f57169064f5f4e76622dd5d7ee4b06ce74f4185a184ef"
+    },
+    "tasks": {
+      "/.well-known/aweb-app-versions.json": "633f0ffbdc3dfea0273de9f3ee81932c098dedb8240a0f2e406b21a6606f75c5",
+      "/aweb-app.json": "261c262b9c9805cfaaeddb13286cf5166aee16f3e9fd4f70e999800bc829fd58",
+      "/manifests/v2.json": "261c262b9c9805cfaaeddb13286cf5166aee16f3e9fd4f70e999800bc829fd58"
     }
   },
-  "recorded_from": "folio and library: aweb d8ee9ed31ad275da7cab3a3cade0006e06587f02, each in its own aweb environment; logs and secrets: naapp 2726d99c7, after their v3 manifests gained the session action"
+  "recorded_from": "folio and library: aweb d8ee9ed31ad275da7cab3a3cade0006e06587f02, each in its own aweb environment; logs and secrets: naapp 2726d99c7, after their v3 manifests gained the session action; tasks: its first manifest, before any installation"
 }

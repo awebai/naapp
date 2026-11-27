@@ -406,9 +406,10 @@ The runtime's cached `runtime.hook_resolver()` uses that same directory and the
 served app identity. If the manifest declares `hook-resolve`, its key is loaded
 at construction: missing or ambiguous configuration refuses startup. An app
 without that purpose can start but cannot obtain a resolver using another
-purpose's key. The keyword-only `team_server_transport` constructor seam is
-for requests to the coordination server; `awid_transport` remains the AWID
-registry seam. Both default to normal production networking.
+purpose's key. Requests to the coordination server go through the runtime's
+`egress` guard, which defaults to `OperatorEgress.from_settings` with the
+system resolver; the keyword-only `awid_transport` constructor seam is for the
+AWID registry and defaults to normal production networking.
 
 For event ingestion, use the same publication check as request authentication:
 `await team_auth.require_active_certificate(runtime.team_cache(), team_id=...,

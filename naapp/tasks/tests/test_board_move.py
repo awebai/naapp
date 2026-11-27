@@ -8,6 +8,7 @@ against that server's database; the target is a real Tasks database.
 from __future__ import annotations
 
 import asyncio
+import base64
 import dataclasses
 import hashlib
 import io
@@ -168,8 +169,56 @@ async def test_export_reads_the_schema_under_any_database_collation(board: OldBo
         subprocess.run(["psql", "-X", "-q", "-c", f"DROP DATABASE {database}"], env=admin, check=True)
 
 
+LOAD_SQL = Path(move.__file__).with_name("load_export.sql")
+FETCH_SQL = Path(move.__file__).with_name("fetch_listing.sql")
+
+
+def loaded_text(path: Path) -> str:
+    """The export file's text as the loader keeps it: without the final newline."""
+    return path.read_text(encoding="utf-8").removesuffix("\n")
+
+
+def from_file(path: Path) -> move.Export:
+    text = loaded_text(path)
+    return move.Export(json.loads(text), sha256=hashlib.sha256(text.encode()).hexdigest())
+
+
+async def export_of(board: OldBoard, tmp_path: Path) -> move.Export:
+    """Step 3 on the operator's host: the export, as the loader would name it."""
+    path = tmp_path / "export.json"
+    result = await board.export(path)
+    assert result.returncode == 0, result.stderr
+    return from_file(path)
+
+
+def psql(db: Any, sql: Path, **variables: str) -> subprocess.CompletedProcess[str]:
+    """One of the move's reviewed psql files, run by the operator against the Tasks database."""
+    config = db.config
+    env = {
+        **os.environ, "PGHOST": config.host, "PGPORT": str(config.port), "PGUSER": config.user,
+        "PGPASSWORD": config.password, "PGDATABASE": config.database,
+    }
+    defined = [arg for name, value in variables.items() for arg in ("-v", f"{name}={value}")]
+    return subprocess.run(
+        ["psql", "-X", "-q", "-At", "-v", "ON_ERROR_STOP=1", *defined, "-f", str(sql)],
+        env=env, capture_output=True, text=True, check=False,
+    )
+
+
+async def loaded(board: OldBoard, db: Any, tmp_path: Path) -> move.Export:
+    """Step 3: the export on the operator's host, loaded into the staging schema."""
+    path = tmp_path / "export.json"
+    result = await board.export(path)
+    assert result.returncode == 0, result.stderr
+    load = await asyncio.to_thread(psql, db, LOAD_SQL, schema=target(db).staging_schema, file=str(path))
+    assert load.returncode == 0, load.stderr
+    export = await move.read_export(target(db))
+    assert load.stdout == f"loaded export sha256 {export.sha256}\n"
+    return export
+
+
 async def stop_codes(board: OldBoard, tmp_path: Path) -> dict[str, list[str]]:
-    return {stop.code: list(stop.subjects) for stop in move.stops(move.Export(await export(board, tmp_path)))}
+    return {stop.code: list(stop.subjects) for stop in move.stops(await export_of(board, tmp_path))}
 
 
 async def workspace_of(board: OldBoard, alias: str) -> Any:
@@ -452,7 +501,7 @@ async def full_board(board: OldBoard) -> dict[str, dict[str, Any]]:
 
 async def test_the_dataset_follows_each_mapping_rule(board: OldBoard, tmp_path: Path) -> None:
     tasks = await full_board(board)
-    exported = move.Export(await export(board, tmp_path))
+    exported = await export_of(board, tmp_path)
     by_id = {task["task_id"]: task for task in exported.tasks}
     number = {name: task["task_number"] for name, task in tasks.items()}
 
@@ -519,7 +568,7 @@ async def test_the_dataset_is_only_for_the_exported_teams_destination(
     board: OldBoard, tmp_path: Path
 ) -> None:
     await board.create("alice", title="Ours")
-    exported = move.Export(await export(board, tmp_path))
+    exported = await export_of(board, tmp_path)
     elsewhere = dataclasses.replace(destination_of(exported), team_id="other-team:board.example")
 
     with pytest.raises(move.MoveRefused, match="the destination other-team"):
@@ -529,7 +578,7 @@ async def test_the_dataset_is_only_for_the_exported_teams_destination(
 async def staged(board: OldBoard, live: Any, deployment: Deployment, tmp_path: Path,
                  ) -> tuple[move.Export, move.Destination, bytes]:
     """Steps 3 to 5: the export, staged for the team's installation, and its listing."""
-    exported = move.Export(await export(board, tmp_path))
+    exported = await loaded(board, live, tmp_path)
     destination = await deployment.destination(board.team_id)
     await move.stage(target(live), exported, destination)
     return exported, destination, await move.staged_listing(target(live))
@@ -570,21 +619,68 @@ async def test_stage_refuses_an_export_with_stops(
 
     with pytest.raises(move.MoveRefused, match="blank_title"):
         await staged(board, live, deployment, tmp_path)
-    assert not await staging_exists(live)
+    # The loaded export stays; nothing is staged.
+    assert (await move.read_export(target(live))).tasks[0]["title"] == " "
+    with pytest.raises(move.MoveRefused, match="is not staged"):
+        await move.staged_listing(target(live))
 
 
-async def test_a_retry_stages_only_after_the_last_stage_is_discarded(
+async def test_a_retry_stages_only_from_a_new_load_after_a_discard(
     board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
 ) -> None:
     await board.create("alice", title="One")
-    await staged(board, live, deployment, tmp_path)
+    _, destination, _ = await staged(board, live, deployment, tmp_path)
     await board.create("alice", title="Two")
 
-    with pytest.raises(move.MoveRefused, match="exists"):
-        await staged(board, live, deployment, tmp_path)
+    with pytest.raises(move.MoveRefused, match="already staged"):
+        await move.stage(target(live), await export_of(board, tmp_path), destination)
     assert await move.discard(target(live)) is True
     exported, destination, from_staging = await staged(board, live, deployment, tmp_path)
 
+    assert from_staging == move.listing(move.dataset(exported, destination))
+    assert [task["title"] for task in exported.tasks] == ["One", "Two"]
+
+
+async def test_the_loader_refuses_a_staging_schema_that_exists(
+    board: OldBoard, live: Any, tmp_path: Path
+) -> None:
+    await board.create("alice", title="One")
+    first = await loaded(board, live, tmp_path)
+    await board.create("alice", title="Two")
+    path = tmp_path / "second.json"
+    assert (await board.export(path)).returncode == 0
+
+    load = await asyncio.to_thread(psql, live, LOAD_SQL, schema=target(live).staging_schema, file=str(path))
+
+    assert load.returncode != 0
+    assert "already exists" in load.stderr
+    assert (await move.read_export(target(live))).sha256 == first.sha256
+
+
+async def test_a_board_larger_than_ours_loads_and_stages_whole(
+    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
+) -> None:
+    """Our board has about 700 tasks and more than 4,000 comments."""
+    await board.db.execute(
+        "INSERT INTO aweb.tasks (team_id, task_number, task_ref_suffix, title, description, created_by_alias)"
+        " SELECT $1, n, 'big' || n, 'Task ' || n, repeat('d', 4000), 'alice' FROM generate_series(1, 750) n",
+        board.team_id,
+    )
+    await board.db.execute(
+        "INSERT INTO aweb.task_comments (task_id, team_id, author_alias, body)"
+        " SELECT task_id, team_id, 'bob', repeat('c', 600) || k FROM aweb.tasks, generate_series(1, 6) k"
+        " WHERE team_id = $1",
+        board.team_id,
+    )
+    await board.db.execute(
+        "INSERT INTO aweb.task_counters (team_id, next_number) VALUES ($1, 751)", board.team_id,
+    )
+
+    exported, destination, from_staging = await staged(board, live, deployment, tmp_path)
+
+    assert (len(exported.tasks), len(exported.comments)) == (750, 4500)
+    assert (tmp_path / "export.json").stat().st_size > 5_000_000
+    assert exported.sha256 == hashlib.sha256(loaded_text(tmp_path / "export.json").encode()).hexdigest()
     assert from_staging == move.listing(move.dataset(exported, destination))
 
 
@@ -700,7 +796,7 @@ async def test_open_refuses_when_the_installation_changed_after_staging(
         board.team_id, ["tasks.read"], expected_generation=installed["generation"]
     )
     # Each command reads the grant afresh, as a new process does.
-    async with cli.destination_of(exported, deployment.settings, app_options(coordination)) as now:
+    async with cli.destination_of(exported.team_id, deployment.settings, app_options(coordination)) as now:
         assert now.generation == reinstalled["generation"] != staged_for.generation
 
         with pytest.raises(move.MoveRefused, match="was staged for"):
@@ -736,10 +832,10 @@ def app_options(coordination: Any) -> dict[str, Any]:
     }
 
 
-async def command(deployment: Deployment, coordination: Any, *args: str) -> bytes:
-    """One operator command, in-process, with the deployment's settings; the app
+async def command(deployment: Deployment, coordination: Any, *args: str) -> str:
+    """One operator job, in-process, with the deployment's settings; the app
     reaches the in-process registry and server through their transports."""
-    out = io.BytesIO()
+    out = io.StringIO()
     status = await cli.run(
         list(args), settings=deployment.settings, out=out, app_options=app_options(coordination),
     )
@@ -747,26 +843,44 @@ async def command(deployment: Deployment, coordination: Any, *args: str) -> byte
     return out.getvalue()
 
 
-async def test_the_operator_moves_the_board_with_the_commands(
+async def fetched(live: Any, name: str) -> bytes:
+    """A stored listing, fetched by the operator with the reviewed psql file."""
+    result = await asyncio.to_thread(psql, live, FETCH_SQL, schema=target(live).staging_schema, name=name)
+    assert result.returncode == 0, result.stderr
+    return base64.b64decode(result.stdout)
+
+
+async def test_the_operator_moves_the_board_with_the_jobs(
     board: OldBoard, live: Any, deployment: Deployment, coordination: Any, installed: dict,
     tmp_path: Path,
 ) -> None:
     await full_board(board)
-    path = tmp_path / "export.json"
-    assert (await board.export(path)).returncode == 0
+    exported = await loaded(board, live, tmp_path)
 
-    assert await command(deployment, coordination, "check", str(path)) == b"no stops\n"
-    from_export = await command(deployment, coordination, "list-export", str(path))
-    await command(deployment, coordination, "stage", str(path))
-    from_staging = await command(deployment, coordination, "list-staged")
-    assert from_staging == from_export
+    checked = await command(deployment, coordination, "check")
+    assert checked == f"no stops in export sha256 {exported.sha256}\n"
+    export_line = await command(deployment, coordination, "list-export")
+    staged_line = await command(deployment, coordination, "stage")
+    assert staged_line == (
+        f"staged {installed['installation_id']} generation {installed['generation']}"
+        f" in {target(live).staging_schema}\n"
+    )
+    staging_line = await command(deployment, coordination, "list-staged")
+    dataset_line = await command(deployment, coordination, "list-export", "--dataset-only")
+
+    # The verifier compares what the operator fetched with the digests in the jobs' logs.
+    from_export, from_staging = await fetched(live, "export"), await fetched(live, "staged")
+    assert from_export == from_staging
+    assert export_line == f"export {move.digest_line(from_export)}\n"
+    assert staging_line == f"staged {move.digest_line(from_staging)}\n"
+    assert installed["installation_id"].encode() in from_staging
+    assert exported.sha256.encode() in from_staging
     digest = hashlib.sha256(from_staging).hexdigest()
-    await command(deployment, coordination, "open", str(path), "--listing-sha256", digest)
-    dataset_only = await command(deployment, coordination, "list-export", str(path), "--dataset-only")
-    from_live = await command(deployment, coordination, "list-live", str(path))
-    assert from_live == dataset_only
-    assert from_live and len(from_live) < len(from_export)
-    assert installed["installation_id"].encode() in from_export
+
+    await command(deployment, coordination, "open", "--listing-sha256", digest)
+
+    live_line = await command(deployment, coordination, "list-live", "--team-id", board.team_id)
+    assert live_line.removeprefix("live ") == dataset_line.removeprefix("export-dataset ")
 
 
 def run(live: Any, *args: str) -> subprocess.CompletedProcess[bytes]:
@@ -778,14 +892,13 @@ def run(live: Any, *args: str) -> subprocess.CompletedProcess[bytes]:
     )
 
 
-async def test_the_commands_exit_with_the_stop_or_the_refusal(
+async def test_the_jobs_exit_with_the_stop_or_the_refusal(
     board: OldBoard, live: Any, tmp_path: Path
 ) -> None:
     task = await board.create("alice", title=" ")
-    path = tmp_path / "export.json"
-    assert (await board.export(path)).returncode == 0
+    await loaded(board, live, tmp_path)
 
-    checked = await asyncio.to_thread(run, live, "check", str(path))
+    checked = await asyncio.to_thread(run, live, "check")
     assert checked.returncode == 2
     assert json.loads(checked.stdout) == {
         "code": "blank_title", "reason": "a task's title is blank, which the app refuses",
@@ -793,10 +906,14 @@ async def test_the_commands_exit_with_the_stop_or_the_refusal(
     }
     listed = await asyncio.to_thread(run, live, "list-staged")
     assert (listed.returncode, listed.stderr) == (
-        3, f"refused: {target(live).staging_schema} does not exist\n".encode(),
+        3, f"refused: {target(live).staging_schema} is not staged\n".encode(),
     )
-    assert not await staging_exists(live)
     discarded = await asyncio.to_thread(run, live, "discard")
     assert (discarded.returncode, discarded.stdout) == (
-        0, f"{target(live).staging_schema} did not exist\n".encode(),
+        0, f"{target(live).staging_schema} dropped\n".encode(),
     )
+    missing = await asyncio.to_thread(run, live, "check")
+    assert (missing.returncode, missing.stderr) == (
+        3, f"refused: {target(live).staging_schema} does not exist: load the export first\n".encode(),
+    )
+    assert not await staging_exists(live)

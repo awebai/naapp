@@ -16,7 +16,6 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
 from typing import Any
 
 from aweb_naapp.runtime.authorization import GrantUnavailable
@@ -48,12 +47,14 @@ class Stop:
 
 
 class Export:
-    """One team's frozen board, as the export query read it."""
+    """One team's frozen board, as the export query read it, named by the
+    sha256 of the text it was loaded from."""
 
-    def __init__(self, document: dict[str, Any]) -> None:
+    def __init__(self, document: dict[str, Any], *, sha256: str) -> None:
         if document.get("format") != EXPORT_FORMAT:
             raise ExportError(f"not an {EXPORT_FORMAT} document")
         self.document = document
+        self.sha256 = sha256
         self.team_id: str = document["team_id"]
         self.tasks: list[dict[str, Any]] = document["tasks"]
         self.comments: list[dict[str, Any]] = document["comments"]
@@ -61,10 +62,6 @@ class Export:
         self.claims: list[dict[str, Any]] = document["claims"]
         self.reservations: list[dict[str, Any]] = document["reservations"]
         self._by_id = {task["task_id"]: task for task in self.tasks}
-
-    @classmethod
-    def read(cls, path: Path) -> Export:
-        return cls(json.loads(path.read_text(encoding="utf-8")))
 
     def ref(self, task: dict[str, Any]) -> str:
         """The task's reference as the server forms it: team slug, then its suffix."""
@@ -332,7 +329,7 @@ def dataset(export: Export, destination: Destination) -> Dataset:
         },
         source=[
             {"kind": "destination", **dataclasses.asdict(destination)},
-            {"kind": "export", "team_id": export.team_id,
+            {"kind": "export", "team_id": export.team_id, "sha256": export.sha256,
              "exported_at": export.document["exported_at"],
              "last_write_at": export.document["last_write_at"]},
             {"kind": "root_task_counter", "next_number": export.document["root_task_counter"]},
@@ -374,6 +371,8 @@ def listing(data: Dataset, *, source: bool = True) -> bytes:
 
 SCHEMA_NAME = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]{0,50}$")
 SOURCE_TABLE = "board_move_source"
+EXPORT_TABLE = "board_move_export"
+LISTINGS_TABLE = "board_move_listings"
 
 
 @dataclass(frozen=True)
@@ -394,7 +393,10 @@ class Target:
 
 @asynccontextmanager
 async def _connected(dsn: str, schema: str) -> AsyncIterator[AsyncDatabaseManager]:
-    db = AsyncDatabaseManager(DatabaseConfig(connection_string=dsn, schema=schema))
+    # One statement or transaction at a time: one connection.
+    db = AsyncDatabaseManager(
+        DatabaseConfig(connection_string=dsn, schema=schema, min_connections=1, max_connections=1)
+    )
     await db.connect()
     try:
         yield db
@@ -456,14 +458,31 @@ async def _write(tx: Any, data: Dataset) -> None:
     )
 
 
+async def read_export(target: Target) -> Export:
+    """The export the operator loaded into the staging schema."""
+    async with _connected(target.dsn, target.live_schema) as live:
+        if not await _schema_exists(live, target.staging_schema):
+            raise MoveRefused(f"{target.staging_schema} does not exist: load the export first")
+        rows = await live.fetch_all(
+            f"SELECT sha256, document FROM {_table(EXPORT_TABLE, target.staging_schema)}"
+        )
+    if len(rows) != 1:
+        raise MoveRefused(f"{target.staging_schema} holds {len(rows)} exports, not one")
+    return Export(json.loads(rows[0]["document"]), sha256=rows[0]["sha256"])
+
+
 async def stage(target: Target, export: Export, destination: Destination) -> None:
-    """Writes the export's dataset into a new staging schema, built by the app's
-    own migrations; no member request reads or writes it."""
+    """Writes the export's dataset into the staging schema the export was
+    loaded into, built by the app's own migrations; no member request reads or
+    writes it. A failed stage discards the schema, export included."""
     data = dataset(export, destination)
     async with _connected(target.dsn, target.live_schema) as live:
-        if await _schema_exists(live, target.staging_schema):
-            raise MoveRefused(f"{target.staging_schema} exists: discard it, then stage from a new export")
-        await live.execute(f'CREATE SCHEMA "{target.staging_schema}"')
+        if not await _schema_exists(live, target.staging_schema):
+            raise MoveRefused(f"{target.staging_schema} does not exist: load the export first")
+        if await live.fetch_value("SELECT to_regclass($1)", f"{target.staging_schema}.installations"):
+            raise MoveRefused(
+                f"{target.staging_schema} is already staged: discard it, then load and stage a new export"
+            )
     try:
         async with _connected(target.dsn, target.staging_schema) as staging:
             await AsyncMigrationManager(
@@ -493,12 +512,38 @@ async def staged_listing(target: Target) -> bytes:
     async with _connected(target.dsn, target.live_schema) as live:
         if not await _schema_exists(live, target.staging_schema):
             raise MoveRefused(f"{target.staging_schema} does not exist")
+        if not await live.fetch_value("SELECT to_regclass($1)", f"{target.staging_schema}.installations"):
+            raise MoveRefused(f"{target.staging_schema} is not staged")
         return listing(await _staged(live, schema=target.staging_schema))
 
 
 def listing_digest(data: bytes) -> str:
     """The SHA-256 of a listing, as `shasum -a 256` prints it."""
     return hashlib.sha256(data).hexdigest()
+
+
+def digest_line(data: bytes) -> str:
+    """What a job's log says of a listing: enough to bind the stored bytes."""
+    return f"sha256 {listing_digest(data)} bytes {len(data)} lines {data.count(b'\n')}"
+
+
+async def store_listing(target: Target, name: str, data: bytes) -> str:
+    """Keeps a listing in the staging schema, for the operator to fetch, and
+    returns its digest line."""
+    async with _connected(target.dsn, target.live_schema) as live:
+        if not await _schema_exists(live, target.staging_schema):
+            raise MoveRefused(f"{target.staging_schema} does not exist")
+        table = _table(LISTINGS_TABLE, target.staging_schema)
+        await live.execute(
+            f"CREATE TABLE IF NOT EXISTS {table}"
+            " (name TEXT PRIMARY KEY, listing BYTEA NOT NULL, sha256 TEXT NOT NULL)"
+        )
+        await live.execute(
+            f"INSERT INTO {table} (name, listing, sha256) VALUES ($1, $2, $3)"
+            " ON CONFLICT (name) DO UPDATE SET listing = EXCLUDED.listing, sha256 = EXCLUDED.sha256",
+            name, data, listing_digest(data),
+        )
+    return digest_line(data)
 
 
 async def discard(target: Target) -> bool:

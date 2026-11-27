@@ -1,4 +1,4 @@
-"""Producer-private request commitments (docs/hook-events.md, decisions 70/73).
+"""Producer-private request commitments (aweb's docs/hook-events.md, decisions 70/73).
 
 This module frames bytes and loads purpose-specific keys without importing the
 web runtime. The caller supplies authoritative installation/tool context and a

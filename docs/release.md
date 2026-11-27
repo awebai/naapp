@@ -108,7 +108,13 @@ every release asset and runs `publish_release.py --only pypi --assets <dir> <tag
 That refuses unless the tag is annotated, its message lists files, and the assets
 are exactly those files with those sha256 digests, and the lane's own files: a
 missing file, an extra file or a different digest refuses before anything is
-uploaded. It then uploads each package's files in lane order, only those PyPI
+uploaded. It also installs the lane's wheels together, by path, into a clean
+environment that takes every other dependency from PyPI, and imports them: a
+lane that needs another lane's release PyPI does not serve yet uploads nothing,
+and its workflow can be rerun once that release is out. So release
+`aweb-naapp-v` before `secrets-v` (`aweb-naapp-journey-support` requires
+`aweb-naapp-testing`) and before an `aweb-secrets-runner-v` whose `aweb-naapp`
+floor it raises. It then uploads each package's files in lane order, only those PyPI
 does not yet serve, so a rerun after a partial upload adopts what is there, and
 reads PyPI back. A file PyPI already serves with other bytes refuses permanently.
 The upload uses the repository's `PYPI_TOKEN` secret; no PyPI token lives on the

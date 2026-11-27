@@ -162,10 +162,11 @@ def lock_release_files(
             prefix, version = tag_parts(tag)
             names = lane_files(downloaded, prefix, version)
             locked[tag] = {name: sums[name] for name in names}
+        for tag in locked:
+            if (files / tag).exists():
+                raise CandidateRefusal(f"{files / tag} already exists")
         for tag, lane in locked.items():
             target = files / tag
-            if target.exists():
-                raise CandidateRefusal(f"{target} already exists")
             target.mkdir(parents=True)
             for name in lane:
                 shutil.copyfile(downloaded / name, target / name)

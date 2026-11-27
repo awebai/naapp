@@ -225,7 +225,10 @@ class PypiLaneContractTest(unittest.TestCase):
         root, assets = self.locked_release("aweb-secrets-runner-v0.1.0rc1", {
             **release_lane("aweb-secrets-values", "0.1.0rc1"), **release_lane("aweb-secrets-runner", "0.1.0rc1")})
         commands = self._uploading_publisher()
-        PUBLISH.publish_pypi(root, "aweb-secrets-runner-v0.1.0rc1", assets)
+        installed = []
+        PUBLISH.publish_pypi(root, "aweb-secrets-runner-v0.1.0rc1", assets,
+                             installable=lambda directory, versions: installed.append((directory, versions)))
+        self.assertEqual(installed, [(assets, {"aweb-secrets-runner-v": "0.1.0rc1"})])
         self.assertEqual([argv for argv in commands if "build" in argv], [])
         inspected = [argv[argv.index("--package") + 1] for argv in commands if "inspect-staged" in argv]
         self.assertEqual(inspected, ["aweb-secrets-values", "aweb-secrets-runner"])
@@ -249,6 +252,26 @@ class PypiLaneContractTest(unittest.TestCase):
         root, assets = self.locked_release("secrets-v0.1.0", files)
         commands = self._uploading_publisher()
         with self.assertRaisesRegex(PUBLISH.PublishRefusal, "secrets-v0.1.0 locks files its lane does not ship"):
+            PUBLISH.publish_pypi(root, "secrets-v0.1.0", assets)
+        self.assertEqual(commands, [])
+
+    def test_a_lane_whose_dependencies_pypi_does_not_serve_uploads_nothing(self):
+        project = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, project)
+        (project / "team_journey_support.py").write_text("")
+        (project / "pyproject.toml").write_text(
+            '[project]\nname = "aweb-naapp-journey-support"\nversion = "0.1.0"\n'
+            'requires-python = ">=3.12"\ndependencies = ["aweb-naapp-testing>=999.0"]\n'
+            '[build-system]\nrequires = ["hatchling"]\nbuild-backend = "hatchling.build"\n'
+            '[tool.hatch.build.targets.wheel]\nonly-include = ["team_journey_support.py"]\n'
+        )
+        built = project / "dist"
+        command(project, "uv", "build", "--quiet", "--no-sources", "--sdist", "--wheel", "--out-dir", str(built))
+        files = {path.name: path.read_bytes() for path in built.iterdir() if not path.name.startswith(".")}
+        root, assets = self.locked_release("secrets-v0.1.0", files)
+        commands = self._uploading_publisher()
+        with self.assertRaisesRegex(PUBLISH.PublishRefusal,
+                                    "secrets-v0.1.0 cannot be installed from PyPI with its locked wheels"):
             PUBLISH.publish_pypi(root, "secrets-v0.1.0", assets)
         self.assertEqual(commands, [])
 
@@ -574,6 +597,19 @@ class CandidateContractTest(unittest.TestCase):
                     CANDIDATE.create_candidate(root, ["secrets-v0.1.0"], files=self.files_directory(),
                                                runs=lambda _root, sha: [ci_run(sha)], download=damaged)
                 self.assertEqual(command(root, "git", "tag", "--list"), "")
+
+    def test_a_release_files_directory_that_exists_for_any_tag_creates_none(self):
+        root = self.candidate()
+        _downloads, download = self.built_files({**release_lane("aweb-naapp-journey-support", "0.1.0"),
+                                                 **release_lane("aweb-secrets-values", "0.1.0rc1"),
+                                                 **release_lane("aweb-secrets-runner", "0.1.0rc1")})
+        files = self.files_directory()
+        (files / "secrets-v0.1.0").mkdir(parents=True)
+        with self.assertRaisesRegex(CANDIDATE.CandidateRefusal, "secrets-v0.1.0 already exists"):
+            CANDIDATE.create_candidate(root, ["aweb-secrets-runner-v0.1.0rc1", "secrets-v0.1.0"], files=files,
+                                       runs=lambda _root, sha: [ci_run(sha)], download=download)
+        self.assertFalse((files / "aweb-secrets-runner-v0.1.0rc1").exists())
+        self.assertEqual(command(root, "git", "tag", "--list"), "")
 
     def test_the_release_files_are_the_qualifying_runs_artifact(self):
         stub = Path(tempfile.mkdtemp())

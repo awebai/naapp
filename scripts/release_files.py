@@ -186,8 +186,13 @@ def check_installs(
     versions: dict[str, str],
     runner: Callable[[list[str]], None] = run_command,
     modules: Callable[[Path], list[str]] = wheel_modules,
+    find_links: bool = True,
 ) -> None:
-    """Install each lane's wheels together, by path, into a clean environment and import them."""
+    """Install each lane's wheels together, by path, into a clean environment and import them.
+
+    With ``find_links`` a lane resolves another lane's packages from ``out``
+    when PyPI lacks them; without it every other dependency comes from PyPI,
+    as it will for whoever installs the published files."""
     for prefix, version in versions.items():
         specs = []
         for package, _ in PYPI_LANES[prefix]:
@@ -195,7 +200,7 @@ def check_installs(
             specs.append((package, str(wheel), modules(wheel)))
         # A lane that depends on another lane resolves it from this build when PyPI lacks it.
         argv = ["uv", "run", "--isolated", "--no-project", "--no-config", "--python", INSTALL_PYTHON,
-                "--find-links", str(out)]
+                *(["--find-links", str(out)] if find_links else [])]
         for _package, wheel, _modules in specs:
             argv += ["--with", wheel]
         runner([*argv, "python", "-I", "-c", INSTALL_CHECK, json.dumps(specs)])

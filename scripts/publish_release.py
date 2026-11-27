@@ -15,9 +15,10 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from pathlib import Path
 
-from release_files import locked_files, package_files, verify_assets
+from release_files import check_installs, locked_files, package_files, verify_assets
 from release_versions import (
     PYPI_LANES,
     VersionRefusal as PublishRefusal,
@@ -101,8 +102,21 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def publish_pypi(root: Path, tag: str, assets: Path) -> None:
-    """Upload the release files the annotated tag locks, each package in lane order; never build."""
+def installable_from_pypi(assets: Path, versions: dict[str, str]) -> None:
+    """The lane's wheels install together, by path, with every other dependency from PyPI."""
+    check_installs(assets, versions, find_links=False)
+
+
+def publish_pypi(
+    root: Path,
+    tag: str,
+    assets: Path,
+    installable: Callable[[Path, dict[str, str]], None] = installable_from_pypi,
+) -> None:
+    """Upload the release files the annotated tag locks, each package in lane order; never build.
+
+    PyPI files are immutable, so a lane whose dependencies PyPI does not serve
+    yet (another lane's release) uploads nothing; rerun it once they are out."""
     prefix, version = tag_parts(tag)
     locked = locked_files(root, tag)
     verify_assets(assets, locked)
@@ -111,6 +125,13 @@ def publish_pypi(root: Path, tag: str, assets: Path) -> None:
         raise PublishRefusal(f"{tag} locks files its lane does not ship: {', '.join(extra)}")
     if not os.environ.get("UV_PUBLISH_TOKEN", "").strip():
         raise PublishRefusal("UV_PUBLISH_TOKEN is required")
+    try:
+        installable(assets, {prefix: version})
+    except PublishRefusal as error:
+        raise PublishRefusal(
+            f"{tag} cannot be installed from PyPI with its locked wheels; publish the lanes it depends on "
+            f"first: {error}"
+        ) from error
     exact = ("bash", str(Path(__file__).resolve().parent / "pypi-exact-publish.sh"))
     for package, files in lane.items():
         with tempfile.TemporaryDirectory(prefix="aweb-pypi-") as temporary:

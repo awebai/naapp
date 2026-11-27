@@ -35,10 +35,10 @@ from awid_service.testing import REGISTRY_URL, SERVICE_TOKEN, dns_naming
 from pgdbm import AsyncMigrationManager
 
 from aweb_tasks.app import MIGRATIONS_PATH, create_app
+from aweb_tasks.board_move import __main__ as cli
+from aweb_tasks.board_move import move
 from aweb_tasks.config import TasksSettings
 from aweb_tasks.store import TaskStore
-from board_move import __main__ as cli
-from board_move import move
 
 from .deployment import TEST_APP_ID, served_manifest, write_key_files
 from .old_board import DOMAIN, NAMESPACE_KEY, OldBoard, old_board
@@ -773,7 +773,7 @@ def run(live: Any, *args: str) -> subprocess.CompletedProcess[bytes]:
     """An operator command as a process, with the deployment's database settings."""
     env = {**os.environ, "TASKS_DATABASE_URL": live.config.get_dsn(), "TASKS_DB_SCHEMA": live.schema}
     return subprocess.run(
-        [sys.executable, "-m", "board_move", *args],
+        [sys.executable, "-m", "aweb_tasks.board_move", *args],
         cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, check=False,
     )
 

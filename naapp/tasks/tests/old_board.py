@@ -22,7 +22,7 @@ from nacl.signing import SigningKey
 
 DOMAIN = "board.example"
 NAMESPACE_KEY = SigningKey.generate()
-EXPORT_SQL = Path(__file__).resolve().parents[1] / "board_move" / "export.sql"
+EXPORT_SQL = Path(__file__).resolve().parents[1] / "src" / "aweb_tasks" / "board_move" / "export.sql"
 
 
 @dataclass

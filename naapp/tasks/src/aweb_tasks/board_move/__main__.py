@@ -1,6 +1,6 @@
-"""The board move's commands, run by the operator from naapp/tasks:
+"""The board move's commands, run as one-off jobs of the Tasks service:
 
-    uv run python -m board_move <command> ...
+    python -m aweb_tasks.board_move <command> ...
 
 The environment is the Tasks deployment's own TASKS_* configuration: its
 database, and the registry and grant-read key through which every command
@@ -22,12 +22,12 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from aweb_tasks.app import create_app
+from aweb_tasks.board_move import move
 from aweb_tasks.config import TasksSettings
-from board_move import move
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m board_move")
+    parser = argparse.ArgumentParser(prog="python -m aweb_tasks.board_move")
     commands = parser.add_subparsers(dest="command", required=True)
     for name, help_text in (
         ("check", "list the export's stops"),

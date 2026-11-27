@@ -1,5 +1,5 @@
 """App task requests: the member's task authorization, stage receipts and
-task answer digests (docs/app-task-requests.md).
+task answer digests (aweb's docs/app-task-requests.md).
 
 A member signs one ``aweb.app-task-authorization/1`` for one task; the app
 carries it with its own ``app-request`` credential; the task service verifies
@@ -250,7 +250,7 @@ def _check_fields(fields: object) -> None:
 
 
 def validate_task(task: object) -> None:
-    """Check a task body against docs/app-task-requests.md §3."""
+    """Check a task body against aweb's docs/app-task-requests.md §3."""
     if not isinstance(task, Mapping) or set(task) != _TASK_FIELDS:
         raise _refuse("schema_invalid", "task fields")
     if not _clean_text(task["title"], 200):

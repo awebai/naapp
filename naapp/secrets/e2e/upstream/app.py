@@ -157,6 +157,7 @@ def create_upstream(
     token_lifetime_seconds: int = TOKEN_LIFETIME_SECONDS,
     redirect_target: str = "https://other.secrets.test/target",
     slow_seconds: float = 1,
+    verify_oauth_assertion: Callable[[Request, dict[str, list[str]]], bool] | None = None,
 ) -> FastAPI:
     """The upstream. ``now`` is its clock, against which SigV4 dates are
     checked; ``token_lifetime_seconds`` is the ``expires_in`` it issues."""
@@ -205,18 +206,22 @@ def create_upstream(
 
     @app.post("/oauth2/token")
     async def token(request: Request) -> Response:
-        form = {key: values[0] for key, values in parse_qs((await request.body()).decode()).items()}
-        client = _basic(request.headers.get("authorization"))
-        if client is None:
-            client = (form.get("client_id", ""), form.get("client_secret", ""))
-        if not (
-            _equal(client[0], creds.oauth_client_id)
-            and _equal(client[1], creds.oauth_client_secret)
-        ):
+        fields = parse_qs((await request.body()).decode())
+        form = {key: values[0] for key, values in fields.items()}
+        if verify_oauth_assertion is not None:
+            valid = verify_oauth_assertion(request, fields)
+        else:
+            client = _basic(request.headers.get("authorization"))
+            if client is None:
+                client = (form.get("client_id", ""), form.get("client_secret", ""))
+            valid = _equal(client[0], creds.oauth_client_id) and _equal(
+                client[1], creds.oauth_client_secret
+            )
+        if not valid:
             return JSONResponse({"error": "invalid_client"}, status_code=401)
         if form.get("grant_type") != "client_credentials":
             return JSONResponse({"error": "unsupported_grant_type"}, status_code=400)
-        if form.get("scope") != creds.oauth_scope:
+        if form.get("scope", "") != creds.oauth_scope:
             return JSONResponse({"error": "invalid_scope"}, status_code=400)
         access_token = secrets.token_urlsafe(32)
         issued.add(access_token)

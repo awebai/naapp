@@ -14,6 +14,10 @@ CANONICAL_VALUES = {
     "query": b'{"value":"fixture"}',
     "basic": b'{"password":"fixture","username":"fixture"}',
     "oauth2-client-credentials": b'{"client_id":"fixture","client_secret":"fixture"}',
+    "oauth2-certificate-credentials": (
+        b'{"certificate_pem":"certificate text","client_id":"fixture",'
+        b'"key_id":"fixture-key-id","private_key_pem":"private key text"}'
+    ),
     "aws-sigv4": (
         b'{"access_key_id":"fixture","secret_access_key":"fixture","session_token":"fixture"}'
     ),

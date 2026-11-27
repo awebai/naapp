@@ -6,15 +6,22 @@ from pathlib import Path
 from urllib.parse import quote
 
 from aweb_naapp.console import ConsoleRoute
+from aweb_secrets_values import CAPTURE_FIELDS, OAUTH2_CERTIFICATE, VALUE_FIELDS
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, Response
 
 from aweb_secrets import records
 from aweb_secrets.change import MAX_REASON_CHARS
+from aweb_secrets.client_assertion import MAX_PEM_BYTES
 from aweb_secrets.console_changes import ConsoleChanges, _errors
 from aweb_secrets.console_forms.grants import grant_forms_router
-from aweb_secrets.operation import CAPTURE_FIELDS
-from aweb_secrets.secret import KINDS, SecretRecord, mint_secret_id
+from aweb_secrets.secret import (
+    ASSERTION_ALGORITHMS,
+    KINDS,
+    OAUTH2_SECRET,
+    SecretRecord,
+    mint_secret_id,
+)
 
 _ASSETS = Path(__file__).parent
 _SCRIPT = (
@@ -38,24 +45,25 @@ _KIND_NAMES = {
     "basic": "Basic credentials",
     "header": "Custom header",
     "query": "Query parameter",
-    "oauth2-client-credentials": "OAuth2 client credentials",
+    OAUTH2_SECRET: "OAuth2 client credentials",
+    OAUTH2_CERTIFICATE: "OAuth2 certificate credentials",
     "aws-sigv4": "AWS Signature Version 4",
 }
 
 
 def _kind_fields(prefix: str, *, fixed_kind: str | None = None) -> str:
     fields = []
+    oauth_params = (("token_endpoint", "Token endpoint URL", True), ("scope", "OAuth scopes", False))
     params = {
         "header": (("name", "Header name", True), ("prefix", "Header prefix", False)),
         "query": (("param", "Query parameter name", True),),
-        "oauth2-client-credentials": (
-            ("token_endpoint", "Token endpoint URL", True),
-            ("scope", "OAuth scopes", False),
-        ),
+        OAUTH2_SECRET: oauth_params,
+        OAUTH2_CERTIFICATE: (*oauth_params, ("audience", "Assertion audience URL", True)),
         "aws-sigv4": (("region", "AWS region", True), ("service", "AWS service", True)),
     }
     reference = prefix == "reference"
-    for kind in (fixed_kind,) if fixed_kind else KINDS:
+    value_fields = CAPTURE_FIELDS if reference else VALUE_FIELDS
+    for kind in (fixed_kind,) if fixed_kind else (kind for kind in KINDS if kind in value_fields):
         inactive = " hidden disabled" if fixed_kind is None and kind != "bearer" else ""
         fields.append(
             f'<fieldset data-kind="{kind}"{inactive}><legend>{_KIND_NAMES[kind]}</legend>'
@@ -68,14 +76,20 @@ def _kind_fields(prefix: str, *, fixed_kind: str | None = None) -> str:
                 + (" required" if needed else "")
                 + ">"
             )
-        if kind == "oauth2-client-credentials" and fixed_kind is None:
+        if kind == OAUTH2_SECRET and fixed_kind is None:
             fields.append(
                 f'<label for="{prefix}-client-auth">Client authentication</label>'
                 f'<select id="{prefix}-client-auth" data-param="client_auth">'
                 '<option value="client_secret_basic">HTTP Basic authentication</option>'
                 '<option value="client_secret_post">Form body</option></select>'
             )
-        required, optional = CAPTURE_FIELDS[kind]
+        if kind == OAUTH2_CERTIFICATE and fixed_kind is None:
+            algorithms = "".join(f'<option value="{alg}">{alg}</option>' for alg in ASSERTION_ALGORITHMS)
+            fields.append(
+                f'<label for="{prefix}-signing-alg">Assertion signing algorithm</label>'
+                f'<select id="{prefix}-signing-alg" data-param="signing_alg">{algorithms}</select>'
+            )
+        required, optional = value_fields[kind]
         for name in sorted(required | optional):
             identity = f"{prefix}-{kind}-{name}-field"
             label = name.replace("_", " ").capitalize()
@@ -83,6 +97,19 @@ def _kind_fields(prefix: str, *, fixed_kind: str | None = None) -> str:
                 label += " field ID"
             if name in optional:
                 label += " (optional)"
+            if kind == OAUTH2_CERTIFICATE and name == "private_key_pem":
+                fields.append(
+                    f'<label for="{identity}">Private key PEM file</label><input id="{identity}" '
+                    f'type="file" data-value="{name}" data-max-bytes="{MAX_PEM_BYTES}" required>'
+                )
+                continue
+            if kind == OAUTH2_CERTIFICATE and name == "certificate_pem":
+                fields.append(
+                    f'<label for="{identity}">{label}</label><textarea id="{identity}" '
+                    f'data-value="{name}" autocomplete="off" spellcheck="false" rows="4" required>'
+                    "</textarea>"
+                )
+                continue
             attributes = (
                 'data-field="' + name + '" pattern="[A-Za-z0-9_-]{1,128}" maxlength="128"'
                 if reference else 'data-value="' + name + '" type="password"'
@@ -98,8 +125,10 @@ def _kind_fields(prefix: str, *, fixed_kind: str | None = None) -> str:
 
 
 def _secret_fields(prefix: str) -> str:
+    kinds = CAPTURE_FIELDS if prefix == "reference" else VALUE_FIELDS
     options = "".join(
         f'<option value="{kind}" data-auth-kind>{_KIND_NAMES[kind]}</option>' for kind in KINDS
+        if kind in kinds
     )
     return (
         f'<input type="hidden" name="secret_id" value="{mint_secret_id()}">'

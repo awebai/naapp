@@ -104,6 +104,8 @@ async def setup(
     variant="",
     reuse_source=None,
     paired=False,
+    primary=None,
+    credential_field="value",
 ):
     db, scope = uses.world.db, uses.world.admitted
     for migration in (
@@ -118,7 +120,7 @@ async def setup(
         await migration(db)
     if approval_required:
         await designate(uses, "finance", "finance@acme.com")
-    record = {**SECRET}
+    record = {**SECRET} if primary is None else primary[0].after
     body = after()
     if variant:
         if reuse_source is None:
@@ -129,7 +131,7 @@ async def setup(
     if job_output_max_bytes is not None:
         body["output"]["max_bytes"] = job_output_max_bytes
     body["credentials"][0]["secret_ref"] = record["ref"]
-    body["env"] = {"DB_ADMIN": {"$credential": record["ref"], "field": "value"}}
+    body["env"] = {"DB_ADMIN": {"$credential": record["ref"], "field": credential_field}}
     secondary = None
     if paired:
         assert reuse_source is None
@@ -154,7 +156,12 @@ async def setup(
             "approvers": ["finance"] if approval_required else [],
         }
     )
-    credential = secrets.token_urlsafe(32) if reuse_source is None else reuse_source.credential
+    if primary is None:
+        credential = secrets.token_urlsafe(32) if reuse_source is None else reuse_source.credential
+        primary_value = {"value": credential}
+    else:
+        primary_value = primary[1]
+        credential = primary_value[credential_field]
     signing_key, encryption_key = SigningKey.generate(), X25519PrivateKey.generate()
     runner = runners.RunnerRecord.from_after(
         {
@@ -166,9 +173,9 @@ async def setup(
     )
     async with db.transaction() as tx:
         await records.create_policy(tx, scope.installation_id, policy, team_id=TEAM)
-        sources = [(SecretRecord.from_after(record), credential, "grt_durable001" + variant)]
+        sources = [(SecretRecord.from_after(record), primary_value, "grt_durable001" + variant)]
         if secondary is not None:
-            sources.append((*secondary, "grt_durable002" + variant))
+            sources.append((secondary[0], {"value": secondary[1]}, "grt_durable002" + variant))
         for source_record, source_value, grant_id in sources:
             if reuse_source is None:
                 await records.create_secret(tx, scope.installation_id, TEAM, source_record)
@@ -177,7 +184,7 @@ async def setup(
                     installation_id=scope.installation_id,
                     team_id=TEAM,
                     secret_id=source_record.secret_id,
-                    value=encode_value("bearer", {"value": source_value}),
+                    value=encode_value(source_record.kind, source_value),
                 )
                 await records.set_active_version(
                     tx, scope.installation_id, TEAM, source_record.secret_id, version

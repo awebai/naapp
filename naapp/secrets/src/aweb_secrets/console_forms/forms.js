@@ -163,17 +163,32 @@
       event.preventDefault();
       if (button.disabled) return;
       button.disabled = true;
+      const fields = [...selected().querySelectorAll("[data-value]")];
+      const secret = control("secret_id") ? record("native") : null;
+      const reason = read("reason") || "Save a native secret value";
       let value = Object.fromEntries(
-        [...selected().querySelectorAll("[data-value]")]
-          .filter(input => input.value || input.dataset.value === "username")
-          .map(input => [input.dataset.value, input.value])
+        fields
+          .map(input => [input.dataset.value, input.type === "file" ? input.files[0] : input.value])
+          .filter(([name, entry]) => entry || name === "username")
       );
       for (const input of nativeForm.querySelectorAll("[data-value]")) input.value = "";
       feedback.textContent = "Saving your draft…";
       try {
+        for (const field of fields) {
+          const name = field.dataset.value;
+          const entry = value[name];
+          if (entry instanceof File) {
+            if (entry.size > Number(field.dataset.maxBytes)) {
+              feedback.textContent = "The private key file is too large. Choose a PEM key file.";
+              button.disabled = false;
+              return;
+            }
+            value[name] = await entry.text();
+          }
+        }
         const pending = api.post(nativeForm.action, {
-          ...(control("secret_id") ? {secret: record("native")} : {}),
-          value, reason: read("reason") || "Save a native secret value",
+          ...(secret ? {secret} : {}),
+          value, reason,
         });
         value = null;
         const receipt = await pending;

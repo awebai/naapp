@@ -1,7 +1,7 @@
 """The naapp ``/health``, ``/live`` and ``/ready`` routes.
 
 They follow the probe contract of the aweb server and AWID
-(``docs/aweb-sot.md``, "Health probes"): ``/live`` answers 200 whenever the
+(aweb's ``docs/aweb-sot.md``, "Health probes"): ``/live`` answers 200 whenever the
 process serves requests and checks no dependency; ``/ready`` answers 200 when
 every dependency check passes and 503 otherwise, with ``status`` ``ok`` or
 ``unhealthy`` and each check named in ``checks`` as ``ok`` or ``error``;

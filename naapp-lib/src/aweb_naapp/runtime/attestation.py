@@ -1,6 +1,6 @@
 """Principal attestation and member person verification for relying naapps.
 
-Contracts: docs/principal-attestation.md §4 and docs/member-person.md. Both run
+Contracts: aweb's docs/principal-attestation.md §4 and docs/member-person.md. Both run
 after team-auth v2 verification, which supplies the verified certificate and the
 current team key. Every refusal raises :class:`AttestationRefused` with the
 contract's code; nothing here infers self-custody, a default channel or a person

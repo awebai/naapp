@@ -8,18 +8,17 @@ from http import HTTPMethod
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 import yaml
-from aweb_naapp_testing.deployment import (
-    AWWorkspace,
-    RunningApp,
+from aweb_naapp_testing.lane_team import (
+    LaneApp,
+    LaneNamespace,
     assert_aw_status,
     aw_json,
     aw_request,
-    provision_team,
+    found_team,
 )
-from test_e2e_smoke import AWID_URL, installed_team
+from test_e2e_smoke import LibraryLane, installed_team
 
 from library.blueprint import (
     ParsedBlueprint,
@@ -350,7 +349,7 @@ def _put_json(team: Any, url: str, payload: Any) -> subprocess.CompletedProcess[
     return aw_request(team, HTTPMethod.PUT, url, body=_json_body(payload))
 
 
-def _publish_blueprint(team: Any, library: RunningApp, payload: dict[str, Any]) -> dict[str, Any]:
+def _publish_blueprint(team: Any, library: LaneApp, payload: dict[str, Any]) -> dict[str, Any]:
     blueprint = _payload_blueprint(payload)
     result = aw_json(
         _post_json(team, f"{library.origin}/v1/blueprints/import", payload),
@@ -362,7 +361,7 @@ def _publish_blueprint(team: Any, library: RunningApp, payload: dict[str, Any]) 
 
 def _import_to_shelf(
     team: Any,
-    library: RunningApp,
+    library: LaneApp,
     *,
     blueprint: ParsedBlueprint,
     profile_ref: str = "developer",
@@ -399,7 +398,7 @@ def _import_to_shelf(
 
 def _bind_profile(
     team: Any,
-    library: RunningApp,
+    library: LaneApp,
     *,
     agent_id: str,
     profile_ref: str,
@@ -425,19 +424,19 @@ def _bind_profile(
 
 
 def test_manifest_digest_and_public_blueprint_catalog_reads_are_unauth(
-    library: RunningApp,
-    aw_workspace: AWWorkspace,
+    library: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
     # Drift test, not a pinned digest: the bare manifest path serves exactly the v2
     # variant the catalog pins, filled for this e2e origin. The hosted pinned-digest
     # conformance lives at the unit level (test_app_manifest).
-    manifest = httpx.get(f"{library.origin}/aweb-app.json", timeout=10.0)
+    manifest = library.http.get(f"{library.origin}/aweb-app.json", timeout=10.0)
     assert manifest.status_code == 200, manifest.text
-    variant = httpx.get(f"{library.origin}/manifests/v2.json", timeout=10.0)
+    variant = library.http.get(f"{library.origin}/manifests/v2.json", timeout=10.0)
     assert manifest.content == variant.content
     assert json.loads(manifest.content)["app"]["origin"] == library.origin
 
-    team = installed_team(aw_workspace, library)
+    team = installed_team(namespace, library)
     unique = uuid.uuid4().hex[:8]
     runtime_hints = {"coordinator": ["claude-code"], "reviewer": ["pi", "claude-code"]}
     payload = _blueprint_payload(
@@ -456,7 +455,7 @@ def test_manifest_digest_and_public_blueprint_catalog_reads_are_unauth(
     )
     assert tags == {"blueprint_ref": blueprint.blueprint_ref, "tags": [f"e2e-{unique}", "starter"]}
 
-    catalog = httpx.get(
+    catalog = library.http.get(
         f"{library.origin}/v1/blueprints", params={"tags": f"e2e-{unique}"}, timeout=10.0
     )
     assert catalog.status_code == 200, catalog.text
@@ -464,28 +463,28 @@ def test_manifest_digest_and_public_blueprint_catalog_reads_are_unauth(
         _expected_blueprint_summary(blueprint, tags=[f"e2e-{unique}", "starter"])
     ]
 
-    missing = httpx.get(f"{library.origin}/v1/blueprints", params={"tags": "missing"}, timeout=10.0)
+    missing = library.http.get(f"{library.origin}/v1/blueprints", params={"tags": "missing"}, timeout=10.0)
     assert missing.status_code == 200, missing.text
     assert all(item["blueprint_ref"] != blueprint.blueprint_ref for item in missing.json())
 
-    detail = httpx.get(f"{library.origin}/v1/blueprints/{blueprint.blueprint_ref}", timeout=10.0)
+    detail = library.http.get(f"{library.origin}/v1/blueprints/{blueprint.blueprint_ref}", timeout=10.0)
     assert detail.status_code == 200, detail.text
     assert detail.json() == _expected_blueprint_detail(blueprint, tags=[f"e2e-{unique}", "starter"])
 
-    preview = httpx.get(
+    preview = library.http.get(
         f"{library.origin}/v1/blueprints/{blueprint.blueprint_ref}/profiles/developer", timeout=10.0
     )
     assert preview.status_code == 200, preview.text
     assert preview.json() == _expected_blueprint_profile(blueprint, "developer")
 
-    coordinator_preview = httpx.get(
+    coordinator_preview = library.http.get(
         f"{library.origin}/v1/blueprints/{blueprint.blueprint_ref}/profiles/coordinator",
         timeout=10.0,
     )
     assert coordinator_preview.status_code == 200, coordinator_preview.text
     assert coordinator_preview.json()["runtime_hints"] == ["claude-code"]
 
-    reviewer_preview = httpx.get(
+    reviewer_preview = library.http.get(
         f"{library.origin}/v1/blueprints/{blueprint.blueprint_ref}/profiles/reviewer", timeout=10.0
     )
     assert reviewer_preview.status_code == 200, reviewer_preview.text
@@ -493,19 +492,19 @@ def test_manifest_digest_and_public_blueprint_catalog_reads_are_unauth(
 
 
 def test_publish_blueprint_preserves_frozen_import_contract(
-    library: RunningApp,
-    aw_workspace: AWWorkspace,
+    library: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = installed_team(aw_workspace, library)
+    team = installed_team(namespace, library)
     result = _publish_blueprint(team, library, _canonical_payload())
     assert result == _expected_import_return()
 
 
 def test_import_to_shelf_idempotent_conflict_never_clobbers_and_signals_update(
-    library: RunningApp,
-    aw_workspace: AWWorkspace,
+    library: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = installed_team(aw_workspace, library)
+    team = installed_team(namespace, library)
     unique = uuid.uuid4().hex[:8]
     blueprint_payload = _blueprint_payload(blueprint_ref=f"example.copy-{unique}")
     blueprint = _payload_blueprint(blueprint_payload)
@@ -572,10 +571,10 @@ def test_import_to_shelf_idempotent_conflict_never_clobbers_and_signals_update(
 
 
 def test_update_from_source_merges_noops_and_rejects_collision(
-    library: RunningApp,
-    aw_workspace: AWWorkspace,
+    library: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = installed_team(aw_workspace, library)
+    team = installed_team(namespace, library)
     unique = uuid.uuid4().hex[:8]
     payload = _blueprint_payload(blueprint_ref=f"example.update-{unique}")
     blueprint = _payload_blueprint(payload)
@@ -727,10 +726,10 @@ def test_update_from_source_merges_noops_and_rejects_collision(
 
 
 def test_create_shelf_version_publish_profile_and_created_materialize(
-    library: RunningApp,
-    aw_workspace: AWWorkspace,
+    library: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = installed_team(aw_workspace, library)
+    team = installed_team(namespace, library)
     created = aw_json(
         _post_json(
             team,
@@ -825,7 +824,7 @@ def test_create_shelf_version_publish_profile_and_created_materialize(
     }
     assert published["blueprint_digest"] == import_return(expected_blueprint)["digest"]
 
-    public_blueprint = httpx.get(
+    public_blueprint = library.http.get(
         f"{library.origin}/v1/blueprints",
         params={"tags": f"e2e-{unique}"},
         timeout=10.0,
@@ -868,10 +867,10 @@ def test_create_shelf_version_publish_profile_and_created_materialize(
 
 
 def test_register_bind_materialize_blueprint_copy_and_proposals(
-    library: RunningApp,
-    aw_workspace: AWWorkspace,
+    library: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = installed_team(aw_workspace, library)
+    team = installed_team(namespace, library)
     unique = uuid.uuid4().hex[:8]
     payload = _blueprint_payload(blueprint_ref=f"example.flow-{unique}")
     blueprint = _payload_blueprint(payload)
@@ -970,10 +969,10 @@ def test_register_bind_materialize_blueprint_copy_and_proposals(
 
 
 def test_profile_proposal_approval_mints_and_rejects_stale_asset(
-    library: RunningApp,
-    aw_workspace: AWWorkspace,
+    library: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = installed_team(aw_workspace, library)
+    team = installed_team(namespace, library)
     unique = uuid.uuid4().hex[:8]
     payload = _blueprint_payload(blueprint_ref=f"example.mint-{unique}")
     blueprint = _payload_blueprint(payload)
@@ -1122,8 +1121,9 @@ def test_profile_proposal_approval_mints_and_rejects_stale_asset(
 
 
 def test_empty_profile_invariant_never_requires_reachable_library(
-    library: RunningApp,
-    aw_workspace: AWWorkspace,
+    library: LaneApp,
+    library_lane: LibraryLane,
+    namespace: LaneNamespace,
 ) -> None:
     expected = _load_json(_EXPECTED / "empty-profile-invariant.json")
     assert expected == {
@@ -1142,36 +1142,36 @@ def test_empty_profile_invariant_never_requires_reachable_library(
         "materialize": {"requires_bound_profile": True, "empty_profile_is_not_error": True},
     }
 
-    aw_workspace.env.update(
-        {
-            "AWEB_URL": "http://127.0.0.1:1",
-            "LIBRARY_URL": "http://127.0.0.1:1",
-            "AWEBAI_LIBRARY_URL": "http://127.0.0.1:1",
-        }
+    unreachable = "http://127.0.0.1:1"
+    # Library logs each request it serves, this one included.
+    assert library.http.get(f"{library.origin}/v1/blueprints").status_code == 200
+    served = library_lane.requests_served()
+    assert any('"GET /v1/blueprints HTTP/1.1"' in line for line in served), served[-3:]
+    team = found_team(
+        namespace,
+        env={"AWEB_URL": unreachable, "LIBRARY_URL": unreachable, "AWEBAI_LIBRARY_URL": unreachable},
     )
-    library.proxy.last_request = None
-    team = provision_team(aw_workspace, awid_url=AWID_URL, namespace_prefix="library-e2e")
     assert team.team_id
-    assert library.proxy.last_request is None
+    assert library_lane.requests_served() == served
 
 
-def test_team_scoped_writes_require_real_team_cert(library: RunningApp) -> None:
+def test_team_scoped_writes_require_real_team_cert(library: LaneApp) -> None:
     payload = _canonical_payload()
-    unauth_publish = httpx.post(
+    unauth_publish = library.http.post(
         f"{library.origin}/v1/blueprints/import", json=payload, timeout=10.0
     )
     assert unauth_publish.status_code == 401, unauth_publish.text
-    unauth_register = httpx.post(f"{library.origin}/v1/team/register", json={}, timeout=10.0)
+    unauth_register = library.http.post(f"{library.origin}/v1/team/register", json={}, timeout=10.0)
     assert unauth_register.status_code == 401, unauth_register.text
-    unauth_shelf = httpx.get(f"{library.origin}/v1/shelf", timeout=10.0)
+    unauth_shelf = library.http.get(f"{library.origin}/v1/shelf", timeout=10.0)
     assert unauth_shelf.status_code == 401, unauth_shelf.text
-    unauth_import_shelf = httpx.post(
+    unauth_import_shelf = library.http.post(
         f"{library.origin}/v1/shelf/import",
         json={"source_blueprint_ref": "aweb.engineering", "profile_ref": "developer"},
         timeout=10.0,
     )
     assert unauth_import_shelf.status_code == 401, unauth_import_shelf.text
-    unauth_profile_tags = httpx.put(
+    unauth_profile_tags = library.http.put(
         f"{library.origin}/v1/profiles/developer/tags",
         json={"tags": ["implementation"]},
         timeout=10.0,
@@ -1198,25 +1198,25 @@ def test_contract_fixture_contains_materialized_profile_refs() -> None:
 
 
 def test_delete_blueprint_removes_from_catalog_and_requires_auth(
-    library: RunningApp,
-    aw_workspace: AWWorkspace,
+    library: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
     """The HTTP/auth walk for the destructive delete: an unsigned DELETE is rejected
     (auth gates it), and the signed owner DELETE removes the blueprint + cascades to
     its catalog profile."""
-    team = installed_team(aw_workspace, library)
+    team = installed_team(namespace, library)
     unique = uuid.uuid4().hex[:8]
     payload = _blueprint_payload(blueprint_ref=f"example.e2e-{unique}-del")
     blueprint = _payload_blueprint(payload)
     _publish_blueprint(team, library, payload)
 
     ref = blueprint.blueprint_ref
-    assert httpx.get(f"{library.origin}/v1/blueprints/{ref}", timeout=10.0).status_code == 200
+    assert library.http.get(f"{library.origin}/v1/blueprints/{ref}", timeout=10.0).status_code == 200
 
     # an UNSIGNED delete is rejected and does NOT remove the blueprint.
-    unauth = httpx.request("DELETE", f"{library.origin}/v1/blueprints/{ref}", timeout=10.0)
+    unauth = library.http.request("DELETE", f"{library.origin}/v1/blueprints/{ref}", timeout=10.0)
     assert unauth.status_code in (401, 403), unauth.text
-    assert httpx.get(f"{library.origin}/v1/blueprints/{ref}", timeout=10.0).status_code == 200
+    assert library.http.get(f"{library.origin}/v1/blueprints/{ref}", timeout=10.0).status_code == 200
 
     # the signed OWNER delete succeeds, removes it, and cascades to its profile.
     deleted = aw_json(
@@ -1224,9 +1224,9 @@ def test_delete_blueprint_removes_from_catalog_and_requires_auth(
         context="delete blueprint",
     )
     assert deleted["blueprint_ref"] == ref
-    assert httpx.get(f"{library.origin}/v1/blueprints/{ref}", timeout=10.0).status_code == 404
+    assert library.http.get(f"{library.origin}/v1/blueprints/{ref}", timeout=10.0).status_code == 404
     assert (
-        httpx.get(
+        library.http.get(
             f"{library.origin}/v1/blueprints/{ref}/profiles/coordinator", timeout=10.0
         ).status_code
         == 404

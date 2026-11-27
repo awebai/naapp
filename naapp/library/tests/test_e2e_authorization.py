@@ -1,7 +1,7 @@
 """Library admits a member only for a team that installed it and granted the
 operation's scopes, and only with a certificate the registry published.
 
-Real AWID (the compose stack), a real coordination server and real Library
+The lane's AWID, its coordination server and Library's production image
 behind TLS; teams install Library with the real ``aw plugin install``.
 """
 
@@ -12,13 +12,12 @@ import time
 import uuid
 from http import HTTPMethod
 
-import httpx
 import pytest
 from aweb_naapp_testing import Member
-from aweb_naapp_testing.deployment import (
-    AWWorkspace,
-    E2ETeam,
-    RunningApp,
+from aweb_naapp_testing.lane_team import (
+    LaneApp,
+    LaneNamespace,
+    LaneTeam,
     assert_aw_status,
     aw_json,
     aw_request,
@@ -35,13 +34,13 @@ pytestmark = pytest.mark.e2e
 GRANT_WINDOW_SECONDS = 75.0
 
 
-def _publish(team: E2ETeam, app: RunningApp, blueprint_ref: str):
+def _publish(team: LaneTeam, app: LaneApp, blueprint_ref: str):
     body = json.dumps(_blueprint_payload(blueprint_ref=blueprint_ref), separators=(",", ":"))
     return aw_request(team, HTTPMethod.POST, f"{app.origin}/v1/blueprints/import", body=body)
 
 
-def _catalog_has(app: RunningApp, blueprint_ref: str) -> bool:
-    response = httpx.get(f"{app.origin}/v1/blueprints/{blueprint_ref}", timeout=10.0)
+def _catalog_has(app: LaneApp, blueprint_ref: str) -> bool:
+    response = app.http.get(f"{app.origin}/v1/blueprints/{blueprint_ref}", timeout=10.0)
     return response.status_code == 200
 
 
@@ -50,10 +49,10 @@ def _ref() -> str:
 
 
 def test_a_team_that_never_installed_library_cannot_publish(
-    library: RunningApp,
-    aw_workspace: AWWorkspace,
+    library: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = connected_team(aw_workspace, library)
+    team = connected_team(namespace)
     blueprint_ref = _ref()
 
     assert_aw_status(
@@ -68,10 +67,10 @@ def test_a_team_that_never_installed_library_cannot_publish(
 
 
 def test_an_install_without_library_write_cannot_write(
-    library: RunningApp,
-    aw_workspace: AWWorkspace,
+    library: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = installed_team(aw_workspace, library, grant_scopes=("library:read",))
+    team = installed_team(namespace, library, grant_scopes=("library:read",))
     blueprint_ref = _ref()
 
     assert_aw_status(
@@ -91,10 +90,10 @@ def test_an_install_without_library_write_cannot_write(
 
 
 def test_an_uninstalled_team_is_refused(
-    library: RunningApp,
-    aw_workspace: AWWorkspace,
+    library: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = installed_team(aw_workspace, library)
+    team = installed_team(namespace, library)
     aw_json(
         aw_request(team, HTTPMethod.GET, f"{library.origin}/v1/proposals"),
         context="installed member reads",
@@ -115,18 +114,18 @@ def test_an_uninstalled_team_is_refused(
 
 
 def test_a_team_signed_certificate_the_registry_never_published_is_unauthenticated(
-    library: RunningApp,
-    aw_workspace: AWWorkspace,
+    library: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = installed_team(aw_workspace, library)
+    team = installed_team(namespace, library)
     # Signed by the team's real controller key, never registered at AWID.
     unpublished = Member(
         team_id=team.team_id,
-        team_key=SigningKey(team_key_seed(team)),
+        team_key=SigningKey(team_key_seed(namespace, team)),
         certificate_id=str(uuid.uuid4()),
         alias="unpublished",
     )
-    response = httpx.get(
+    response = library.http.get(
         f"{library.origin}/v1/shelf",
         headers=unpublished.headers(aud=library.origin, method="GET", path="/v1/shelf"),
         timeout=10.0,
@@ -135,10 +134,10 @@ def test_a_team_signed_certificate_the_registry_never_published_is_unauthenticat
 
 
 def test_a_granted_member_publishes_shelves_and_materializes(
-    library: RunningApp,
-    aw_workspace: AWWorkspace,
+    library: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = installed_team(aw_workspace, library)
+    team = installed_team(namespace, library)
     blueprint_ref = _ref()
 
     published = aw_json(_publish(team, library, blueprint_ref), context="granted publish")

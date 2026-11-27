@@ -17,11 +17,11 @@ from manifest_config import TEST_GRANT_SEED_HEX
 from pgdbm import AsyncDatabaseManager, AsyncMigrationManager, DatabaseConfig
 from pgdbm.testing import AsyncTestDatabase, DatabaseTestConfig
 from test_e2e_smoke import (  # noqa: F401
-    aw_workspace,
     library,
-    library_origin,
+    library_lane,
+    library_on_pre_status_registry,
     library_without_awid_service_token,
-    workspaces,
+    namespace,
 )
 
 _MIGRATIONS = Path(__file__).resolve().parent.parent / "src" / "library" / "migrations"

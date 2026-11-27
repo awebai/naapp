@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from aweb_naapp_testing.compose_lane import BASE_COMPOSE
 
 _REPO_ROOT = Path(__file__).parents[1]
 _ROOT = Path(__file__).parents[3]
@@ -167,6 +168,8 @@ def test_ci_runs_the_e2e_with_the_pinned_aw_release() -> None:
     assert "go build" not in "\n".join(commands)
     assert "scripts/install-aw.sh" in _recipe("aw")
     assert "scripts/check-naapp-e2e-aw.sh" in _recipe("e2e-library")
+    # The lane's machines run that same release, mounted read-only.
+    assert 'NAAPP_AW_BINARY="$${NAAPP_AW_BINARY:-$(AW_DIR)/aw}"' in _recipe("e2e-library")
 
 
 def test_the_e2e_stack_runs_published_awid_by_digest() -> None:
@@ -184,9 +187,12 @@ def test_the_e2e_stack_runs_published_awid_by_digest() -> None:
     assert not foreign, f"found external checkout(s): {[s.get('with', {}).get('repository') for s in foreign]}"
 
     compose = yaml.safe_load((_REPO_ROOT / "docker-compose.e2e.yml").read_text(encoding="utf-8"))
-    image = compose["services"]["awid"].get("image", "")
+    awid = compose["services"]["awid"]
+    assert awid == {"extends": {"file": "${NAAPP_E2E_BASE_COMPOSE:?}", "service": "awid"}}
+    lane = yaml.safe_load(BASE_COMPOSE.read_text(encoding="utf-8"))
+    image = lane["services"]["awid"].get("image", "")
     assert re.fullmatch(r"ghcr\.io/awebai/awid:[0-9.]+@sha256:[0-9a-f]{64}", image), image
-    assert "build" not in compose["services"]["awid"]
+    assert "build" not in lane["services"]["awid"]
 
 
 def test_ci_also_covers_naapp_lib() -> None:

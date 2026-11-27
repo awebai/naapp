@@ -42,6 +42,9 @@ import pytest
 from awid.signing import load_signing_key_pem
 
 from aweb_naapp_testing.deployment_logs import logged_process, redacted
+from aweb_naapp_testing.lane_team import assert_aw_status as assert_aw_status
+from aweb_naapp_testing.lane_team import assert_aw_success as assert_aw_success
+from aweb_naapp_testing.lane_team import aw_json
 from aweb_naapp_testing.network import Certificates, local_address, make_certificates
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[4]
@@ -377,34 +380,6 @@ def aw_request(
         timeout=60,
         check=False,
     )
-
-
-def assert_aw_success(result: subprocess.CompletedProcess[str], *, context: str) -> str:
-    assert result.returncode == 0, (
-        f"aw id request failed: {context}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}\n"
-    )
-    return result.stdout
-
-
-def assert_aw_status(
-    result: subprocess.CompletedProcess[str], status: int, *, context: str
-) -> None:
-    assert result.returncode != 0, (
-        f"expected HTTP {status} failure for {context}, got success: {result.stdout}"
-    )
-    assert f"HTTP {status}" in result.stderr, (
-        f"expected HTTP {status} for {context}\n"
-        f"stdout:\n{result.stdout}\n"
-        f"stderr:\n{result.stderr}\n"
-    )
-
-
-def aw_json(result: subprocess.CompletedProcess[str], *, context: str) -> Any:
-    stdout = assert_aw_success(result, context=context)
-    try:
-        return json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise AssertionError(f"invalid JSON for {context}: {stdout}") from exc
 
 
 def aw_workspace_env(*, home: Path, awid_url: str) -> dict[str, str]:

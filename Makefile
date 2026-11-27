@@ -122,7 +122,7 @@ e2e-folio:
 
 e2e-library:
 	PATH="$(AW_DIR):$$PATH" bash scripts/check-naapp-e2e-aw.sh
-	PATH="$(AW_DIR):$$PATH" $(MAKE) -C naapp/library e2e
+	NAAPP_AW_BINARY="$${NAAPP_AW_BINARY:-$(AW_DIR)/aw}" $(MAKE) -C naapp/library e2e
 
 e2e-secrets:
 	NAAPP_AW_BINARY="$${NAAPP_AW_BINARY:-$(AW_DIR)/aw}" $(MAKE) -C naapp/secrets e2e

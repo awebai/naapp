@@ -62,6 +62,13 @@ read-only database assertions. Register disposable credential values with
 `redact()` before starting a service and call `close()` in fixture cleanup to
 retain redacted logs and remove the project's containers.
 
+`aweb_naapp_testing.lane_team` founds teams on a lane with the real `aw` in
+one machine: `prepare_namespace()` publishes the namespace's controller in the
+lane's DNS, `found_team()` founds a team in it, and `connect_team()` and
+`install_app()` install an app the way an operator's team does. `ComposeLane.http`
+sends ordinary requests, and `LaneClient` takes httpx's `params` and `json`
+for them. `naapp/library/tests/test_e2e_smoke.py` shows the fixtures.
+
 ## Checks that hold across the move
 
 `scripts/test_served_manifest_digests.py` checks that each app serves the

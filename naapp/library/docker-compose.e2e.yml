@@ -1,88 +1,60 @@
+# Library's real-stack journeys (tests/test_e2e_*.py, test_library_contract_e2e.py
+# and test_old_registry_e2e.py) on the shared ComposeLane services. The tests
+# write NAAPP_E2E_RUNTIME (DNS zone, TLS, the env files and the grant-read keys)
+# before they start a service, and drive the real aw only inside the cli
+# containers. Everything is disposable: generated keys, tmpfs databases.
+#
+# Library runs three times from its production image, each at its own origin
+# behind the TLS front: with the AWID service token, without it, and reading
+# the pre-status registry. Each lists the lane's coordination server as its
+# operator's team server, inside the lane's network.
+x-library: &library
+  build:
+    context: ../..
+    dockerfile: naapp/library/Dockerfile
+  dns: ["${NAAPP_E2E_DNS_IP:-127.0.0.11}"]
+  volumes:
+    - "${NAAPP_E2E_RUNTIME:?}/library-keys:/run/library-keys:ro"
+    - "${NAAPP_E2E_RUNTIME:?}/tls/ca.pem:/run/library-ca/ca.pem:ro"
+  depends_on:
+    postgres: {condition: service_healthy}
+    awid: {condition: service_started}
+
 services:
+  dns:
+    extends: {file: "${NAAPP_E2E_BASE_COMPOSE:?}", service: dns}
+
   postgres:
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: library
-      POSTGRES_PASSWORD: library
-      POSTGRES_DB: library
-    ports:
-      - "${NAAPP_E2E_POSTGRES_PORT:-55432}:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U library -d library"]
-      interval: 2s
-      timeout: 5s
-      retries: 30
-    tmpfs:
-      - /var/lib/postgresql/data
+    extends: {file: "${NAAPP_E2E_BASE_COMPOSE:?}", service: postgres}
 
   redis:
-    image: redis:7-alpine
-    ports:
-      - "6379"
-    healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
-      interval: 2s
-      timeout: 5s
-      retries: 30
+    extends: {file: "${NAAPP_E2E_BASE_COMPOSE:?}", service: redis}
 
   awid:
-    image: ghcr.io/awebai/awid:0.5.40@sha256:0839d39c97a21de121b6431c93452856967bb92692a633ee821b004c52b87b6b
-    environment:
-      AWID_DATABASE_URL: postgresql://library:library@postgres:5432/library
-      AWID_REDIS_URL: redis://redis:6379/0
-      AWID_HOST: 0.0.0.0
-      AWID_PORT: 8010
-      AWID_DB_SCHEMA: awid
-      AWID_LOG_JSON: "false"
-      AWID_RATE_LIMIT_BACKEND: redis
-      AWID_RATE_LIMIT_DISABLED: "true"
-      AWID_SKIP_DNS_VERIFY: "1"
-      AWID_PUBLIC_ORIGINS: ${AWID_PUBLIC_ORIGINS:-http://awid:8010,http://${NAAPP_E2E_HOST:-127.0.0.1}:${NAAPP_E2E_AWID_PORT:-18010}}
-      # The installing team publishes its loopback test server as its team server.
-      APP_ENV: test
-      AWID_ALLOW_INSECURE_DELIVERY_ORIGIN: "true"
-      AWID_SERVICE_TOKEN: ${LIBRARY_E2E_AWID_SERVICE_TOKEN:-library-e2e-awid-service-token-0123456789abcdef}
-    ports:
-      - "${NAAPP_E2E_AWID_PORT:-18010}:8010"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8010/ready"]
-      interval: 2s
-      timeout: 5s
-      start_period: 5s
-      retries: 30
+    extends: {file: "${NAAPP_E2E_BASE_COMPOSE:?}", service: awid}
 
-  # Real pre-status registry, pinned to the abqt base. It shares the real data
-  # services so the same published private-team certificate is tested on both.
+  # Real pre-status registry, pinned to the abqt base. It reads the same
+  # registry database, so the same published private-team certificate is
+  # tested on both.
   awid-pre-status:
     build:
       context: https://github.com/awebai/aweb.git#0bc7546de0b5c002e3496ae4807fb1a4e12bd0b4
       dockerfile: awid/Dockerfile
+    dns: ["${NAAPP_E2E_DNS_IP:-127.0.0.11}"]
     environment:
-      AWID_DATABASE_URL: postgresql://library:library@postgres:5432/library
+      AWID_DATABASE_URL: "${NAAPP_E2E_DATABASE_URL:?}"
       AWID_REDIS_URL: redis://redis:6379/0
+      AWID_DB_SCHEMA: awid
       AWID_HOST: 0.0.0.0
       AWID_PORT: 8010
-      AWID_DB_SCHEMA: awid
-      AWID_LOG_JSON: "false"
-      AWID_RATE_LIMIT_BACKEND: redis
-      AWID_RATE_LIMIT_DISABLED: "true"
-      AWID_SKIP_DNS_VERIFY: "1"
-      AWID_PUBLIC_ORIGINS: ${AWID_PUBLIC_ORIGINS:-http://awid:8010,http://${NAAPP_E2E_HOST:-127.0.0.1}:${NAAPP_E2E_AWID_PORT:-18010}}
-      AWID_SERVICE_TOKEN: ${LIBRARY_E2E_AWID_SERVICE_TOKEN:-library-e2e-awid-service-token-0123456789abcdef}
-    ports:
-      - "8010"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_healthy
-      awid:
-        condition: service_healthy
+      AWID_PUBLIC_ORIGINS: http://awid-pre-status.svc.test:8010
+      AWID_RATE_LIMIT_DISABLED: "1"
+      AWID_SERVICE_TOKEN: "${NAAPP_E2E_AWID_SERVICE_TOKEN:?}"
+      AWID_ALLOW_INSECURE_DELIVERY_ORIGIN: "1"
+      APP_ENV: development
+    networks:
+      default:
+        aliases: ["awid-pre-status.svc.test"]
     healthcheck:
       # The pinned pre-status registry serves /health only.
       test: ["CMD", "curl", "-f", "http://localhost:8010/health"]
@@ -90,3 +62,35 @@ services:
       timeout: 5s
       start_period: 5s
       retries: 30
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      awid: {condition: service_started}
+
+  aweb:
+    extends: {file: "${NAAPP_E2E_BASE_COMPOSE:?}", service: aweb}
+
+  # The production image, as an operator runs it: HTTP behind the TLS front.
+  library:
+    <<: *library
+    env_file: ["${NAAPP_E2E_RUNTIME:?}/library.env"]
+
+  library-without-token:
+    <<: *library
+    env_file: ["${NAAPP_E2E_RUNTIME:?}/library-without-token.env"]
+
+  library-pre-status:
+    <<: *library
+    env_file: ["${NAAPP_E2E_RUNTIME:?}/library-pre-status.env"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      awid-pre-status: {condition: service_healthy}
+
+  # Terminates TLS for the coordination server and the Library origins,
+  # keeping the public Host each deployment checks.
+  front:
+    extends: {file: "${NAAPP_E2E_BASE_COMPOSE:?}", service: front}
+
+  # The real aw, the pinned release mounted read-only.
+  cli:
+    extends: {file: "${NAAPP_E2E_BASE_COMPOSE:?}", service: cli}

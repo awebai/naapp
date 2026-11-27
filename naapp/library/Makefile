@@ -1,4 +1,4 @@
-.PHONY: test test-server lint compile run e2e e2e-up e2e-down api-serve api-stop \
+.PHONY: test test-server lint compile run e2e api-serve api-stop \
 	prod-tools-prepare prod-shelf-pin prod-ops-test prod-public-identity prod-status prod-health-client-proof prod-move-build prod-deploy prod-wait prod-verify prod-rollback prod-recovery \
 	prod-gate-candidate prod-gate-recovery prod-gate-current-incumbent \
 	aatk-predicate-inventory aatk-spec-check aatk-validate-preplan aatk-validate-release
@@ -55,14 +55,10 @@ compile:
 run:
 	uv run $(LOCAL_ENV_FILE) python -m uvicorn library.api:app --host 127.0.0.1 --port $(API_PORT) --reload
 
+# The tests start and remove their own lane (docker-compose.e2e.yml). The lane's
+# machines run the aw release at NAAPP_AW_BINARY.
 e2e:
-	$(MAKE) -C ../.. naapp-package-e2e PACKAGE=naapp/library ENABLE=LIBRARY_E2E
-
-e2e-up:
-	docker compose -p $(NAAPP_E2E_PROJECT) -f docker-compose.e2e.yml up --build -d
-
-e2e-down:
-	docker compose -p $(NAAPP_E2E_PROJECT) -f docker-compose.e2e.yml down -v --remove-orphans
+	LIBRARY_E2E=1 uv run pytest -q -m e2e
 
 api-serve:
 	@[ ! -f .api.pid ] || { echo "api server already running (pid $$(cat .api.pid)); make api-stop first"; exit 1; }

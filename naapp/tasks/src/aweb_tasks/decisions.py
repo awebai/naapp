@@ -50,10 +50,6 @@ class Refusal:
     code: Code
     message: str
 
-    def detail(self) -> dict[str, str]:
-        """The apps' shared ``{code, message}`` refusal body."""
-        return {"code": str(self.code), "message": self.message}
-
 
 @dataclass(frozen=True)
 class Holder:

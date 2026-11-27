@@ -632,15 +632,6 @@ def test_inside(parent: Task | None, expected: Code | None) -> None:
     assert code_of(inside(INSTALLATION, parent)) == expected
 
 
-def test_refusal_is_the_apps_shared_shape() -> None:
-    verdict = claim(INSTALLATION, task(status=TaskStatus.CLOSED), ALICE, T0)
-    assert isinstance(verdict, Refusal)
-    detail = verdict.detail()
-    assert set(detail) == {"code", "message"}
-    assert detail["code"] == "task_closed"
-    assert detail["message"]
-
-
 def test_lease_kind_lifetimes() -> None:
     assert LeaseKind.CLAIM.lifetime == CLAIM_LIFE
     assert LeaseKind.LOCK.lifetime == LOCK_LIFE

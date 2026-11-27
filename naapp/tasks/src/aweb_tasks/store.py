@@ -199,12 +199,16 @@ class TaskStore:
             None if lease.holder is None else alias, lease.revision, lease.expires_at,
         )
 
-    async def _renew_on_write(self, tx: TransactionManager, row: Any, now: datetime) -> None:
-        """The holder's write to its task renews its claim; anyone else's leaves it."""
+    async def _renew_on_write(self, tx: TransactionManager, row: Any, now: datetime, cause: str) -> None:
+        """The holder's write to its task renews its claim, recorded as a change
+        of its own; anyone else's write leaves the claim as it is."""
         lease = _lease(row)
         renewed = decisions.renew_on_write(lease, self.caller, now)
         if renewed != lease:
             await self._write_claim(tx, row["number"], renewed, row["holder_alias"])
+            await self._record(tx, "claim_renewed", cause, now, number=row["number"], detail={
+                "revision": renewed.revision,
+            })
 
     async def _apply_closing(self, tx: TransactionManager, closing: Closing, cause: str, now: datetime) -> None:
         for ended in closing.ended_claims:
@@ -446,11 +450,16 @@ class TaskStore:
                 )
             if changed:
                 await self._record(tx, "updated", "update", now, number=number, detail=changed)
-            if fields.status is not None and fields.status is not TaskStatus.CLOSED and fields.status != task.status:
+            reopened = (
+                fields.status is not None and fields.status is not TaskStatus.CLOSED and fields.status != task.status
+            )
+            if reopened:
+                assert fields.status is not None
                 await self._set_open_status(tx, number, fields.status, now, cause="update")
-            # A close releases the holder's claim; renewing it first would spend its revision twice.
-            if number not in closing.closed:
-                await self._renew_on_write(tx, row, now)
+            # An update that changes nothing is no write. A close releases the
+            # holder's claim; renewing it first would spend its revision twice.
+            if (changed or reopened) and number not in closing.closed:
+                await self._renew_on_write(tx, row, now, "update")
             await self._apply_closing(tx, closing, "update", now)
             return await self._answer(tx, number, now)
 
@@ -522,7 +531,7 @@ class TaskStore:
                 self.installation_id, number, json.dumps(self.actor), body, now,
             )
             await self._record(tx, "commented", "comment-add", now, number=number)
-            await self._renew_on_write(tx, row, now)
+            await self._renew_on_write(tx, row, now, "comment-add")
             return {"author": self.actor, "body": body, "created_at": now.isoformat()}
 
     async def add_dependency(self, number: int, waits_on: int) -> dict[str, Any]:
@@ -546,7 +555,7 @@ class TaskStore:
             )
             if added is not None:
                 await self._record(tx, "dependency_added", "dep-add", now, number=number, detail={"waits_on": waits_on})
-            await self._renew_on_write(tx, rows[number], now)
+                await self._renew_on_write(tx, rows[number], now, "dep-add")
             return await self._answer(tx, number, now)
 
     async def remove_dependency(self, number: int, waits_on: int) -> dict[str, Any]:
@@ -566,7 +575,7 @@ class TaskStore:
                 # The edge itself is missing: there is no dependency to remove.
                 raise TaskRefused(Refusal(code=decisions.Code.NOT_FOUND, message="No such dependency"))
             await self._record(tx, "dependency_removed", "dep-remove", now, number=number, detail={"waits_on": waits_on})
-            await self._renew_on_write(tx, rows[number], now)
+            await self._renew_on_write(tx, rows[number], now, "dep-remove")
             return await self._answer(tx, number, now)
 
     # --- claims --------------------------------------------------------------

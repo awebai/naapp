@@ -18,6 +18,7 @@ from aweb_naapp.runtime.installation import InstallationRefused, apply_installat
 from aweb_naapp.runtime.team_auth import refusal
 from awid.external_authority import TXTOutcomeResolver
 from fastapi import Body, Depends, FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, model_validator
 
 from aweb_tasks import MANIFEST_PATH
@@ -138,6 +139,14 @@ def create_app(
     )
     app = FastAPI(title="tasks", lifespan=runtime.lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     app.state.runtime = runtime
+
+    # The installation fence refuses at admission, and again inside every
+    # transaction, on entry or just before commit: one answer for all of them.
+    @app.exception_handler(InstallationRefused)
+    async def installation_refused(request: Request, error: InstallationRefused) -> JSONResponse:
+        return JSONResponse(
+            status_code=error.status, content={"detail": {"code": error.code, "message": str(error)}}
+        )
     mount_manifest_routes(app, runtime=runtime)
     mount_health(app, resolved, checks=runtime.health_checks())
 
@@ -151,15 +160,12 @@ def create_app(
     async def store(
         request: Request, authorization: Annotated[Authorization, Depends(authorized)]
     ) -> TaskStore:
-        try:
-            permit = await runtime.installation_fence().permit(authorization.principal.team_id)
-            if (authorization.grant.installation_id, authorization.grant.generation) != (
-                permit.admitted.installation_id,
-                permit.admitted.generation,
-            ):
-                raise InstallationRefused("generation_superseded", 409, "Installation changed during admission")
-        except InstallationRefused as error:
-            raise refusal(error.status, error.code, str(error)) from None
+        permit = await runtime.installation_fence().permit(authorization.principal.team_id)
+        if (authorization.grant.installation_id, authorization.grant.generation) != (
+            permit.admitted.installation_id,
+            permit.admitted.generation,
+        ):
+            raise InstallationRefused("generation_superseded", 409, "Installation changed during admission")
         return TaskStore(
             permit.database(),
             installation_id=permit.admitted.installation_id,

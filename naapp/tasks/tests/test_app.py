@@ -49,6 +49,7 @@ class Clock:
 @dataclass
 class World:
     coordination: Any
+    db: Any
     client: httpx.AsyncClient
     clock: Clock
     teams: dict[str, list[Member]]
@@ -122,7 +123,7 @@ async def world_fixture(coordination, test_db_factory, tmp_path):
     )
     async with app.router.lifespan_context(app):
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=ORIGIN) as client:
-            yield World(coordination, client, clock, {name: members for name, (members, _) in teams.items()})
+            yield World(coordination, db, client, clock, {name: members for name, (members, _) in teams.items()})
 
 
 def code(response: httpx.Response) -> str:
@@ -323,3 +324,49 @@ async def test_a_tool_whose_inputs_are_all_optional_takes_no_body(world: World, 
     if claim_first:
         await world.ok(alice, "POST", "/v1/tasks/1/claim", {})
     await world.ok(alice, "POST", path)
+
+
+async def test_a_fence_that_refuses_after_admission_answers_and_commits_nothing(world: World) -> None:
+    alice, _ = world.teams["ours"]
+    (carol,) = world.teams["neighbour"]
+    await world.ok(alice, "GET", "/v1/tasks")  # admits our installation, so its fence row exists
+    ours = await world.db.fetch_value(
+        "SELECT installation_id FROM {{tables.installation_fences}} WHERE team_id = $1", alice.team_id
+    )
+    # Our installation's fence goes stale while a write is in flight: the
+    # fence's recheck before commit must refuse it.
+    await world.db.execute(f"""
+        CREATE FUNCTION {world.db.schema}.stale_fence() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN
+            UPDATE {world.db.schema}.installation_fences SET fresh_until = NULL
+             WHERE installation_id = NEW.installation_id;
+            RETURN NEW;
+        END $$;
+        CREATE TRIGGER stale_fence AFTER INSERT ON {world.db.schema}.tasks
+            FOR EACH ROW WHEN (NEW.installation_id = '{ours}') EXECUTE FUNCTION {world.db.schema}.stale_fence();
+    """)
+    refused = await world.call(alice, "POST", "/v1/tasks", {"title": "Lost"})
+    assert (refused.status_code, code(refused)) == (503, "authority_unavailable"), refused.text
+    assert set(refused.json()["detail"]) == {"code", "message"}
+    assert await world.db.fetch_value("SELECT count(*) FROM {{tables.tasks}} WHERE installation_id = $1", ours) == 0
+    assert await world.db.fetch_value("SELECT count(*) FROM {{tables.events}} WHERE installation_id = $1", ours) == 0
+    assert await world.db.fetch_value("SELECT count(*) FROM {{tables.outbox_events}}") == 0
+    # The neighbouring installation is unaffected.
+    assert (await world.ok(carol, "POST", "/v1/tasks", {"title": "Theirs"}))["number"] == 1
+
+
+async def test_a_holders_write_records_the_renewal_it_makes(world: World) -> None:
+    alice, _ = world.teams["ours"]
+    for title in ("Work", "Prerequisite"):
+        await world.ok(alice, "POST", "/v1/tasks", {"title": title})
+    await world.ok(alice, "POST", "/v1/tasks/1/claim", {})
+    await world.ok(alice, "POST", "/v1/tasks/1/comments", {"body": "progress"})
+    await world.ok(alice, "POST", "/v1/tasks/1/dependencies", {"on": 2})
+    history = await world.ok(alice, "GET", "/v1/tasks/1/history")
+    renewals = [(e["cause"], e["detail"]["revision"], e["actor"]["alias"]) for e in history if e["kind"] == "claim_renewed"]
+    assert renewals == [("comment-add", 2, "alice"), ("dep-add", 3, "alice")]
+    # An update that changes nothing is no write: it renews nothing.
+    before = len(history)
+    shown = await world.ok(alice, "PATCH", "/v1/tasks/1", {})
+    assert shown["claim"]["revision"] == 3
+    assert len(await world.ok(alice, "GET", "/v1/tasks/1/history")) == before

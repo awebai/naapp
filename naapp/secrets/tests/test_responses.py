@@ -49,6 +49,16 @@ def test_an_ordinary_response_is_returned_whole() -> None:
     assert result.upstream_bytes == len(body)
 
 
+@pytest.mark.parametrize("status", [202, 204])
+def test_an_empty_success_may_have_no_content_type(status: int) -> None:
+    result = handle_response(
+        status=status, headers=[], body=b"", truncated=False, max_bytes=4096,
+        projection=None, known=_known(), token_issuing=False, content_types=["application/json"],
+    )
+    assert result.disposition == "returned"
+    assert result.status == status and result.body == b""
+
+
 def test_expiry_in_final_projection_redaction_is_not_a_credential_finding(monkeypatch) -> None:
     known = _known()
     redact_json = known.redact_json

@@ -962,7 +962,7 @@ It holds:
 
 ```text
 v, operation_id, secret_id, method: GET | POST | PUT | PATCH | DELETE,
-url: fixed host/port, path template with typed {params},
+url: fixed host/port, path template with typed {params}, optional fixed query values,
 params: typed schema per param (D1's bounded JSON Schema subset: enum, integer ranges,
         bounded strings with fixed character classes, no free regex), placement path|query|body,
 body: fixed JSON template whose body params fill {"$param": name} slots,

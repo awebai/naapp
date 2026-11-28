@@ -25,12 +25,50 @@ from tests.test_console_changes import ROOT, approve, clients, sign_in
 from tests.test_console_forms import enrolled_page, wait_for_review
 from tests.test_console_forms import service as _service
 from tests.test_console_ui_browser import browser as _browser
+from tests.test_graph_mailbox import MAILBOX, graph_secret
 
 world = _world
 service = _service
 browser = _browser
 PAGE = "/grants/new"
 DRAFT = f"/installations/{INSTALLATION_ID}/grants/drafts"
+
+
+async def test_owner_confirms_a_graph_mailbox_draft_in_the_browser(world, service, browser):
+    from tests.test_admission import BOB
+
+    record = graph_secret()
+    async with world.db.transaction() as tx:
+        await records.create_secret(tx, INSTALLATION_ID, TEAM, record)
+    async with await browser.new_context() as context:
+        page, _, _ = await enrolled_page(world, context, service)
+        await page.goto(service + PAGE)
+        await page.get_by_role("link", name="Grant access to a Microsoft 365 mailbox").click()
+        await page.get_by_label("Certificate secret name").fill(record.ref)
+        await page.get_by_label("Mailbox object ID").fill(MAILBOX)
+        await page.get_by_label("Vault member DIDs, one per line").fill(BOB.did_key)
+        url = service + f"/installations/{INSTALLATION_ID}/grants/graph-mailbox/drafts"
+        async with page.expect_response(url) as submitted:
+            await page.get_by_role("button", name="Save a draft for review", exact=True).click()
+        response = await submitted.value
+        assert response.status == 201
+        draft = await response.json()
+        assert await world.db.fetch_value("SELECT count(*) FROM {{tables.grants}}") == 0
+        [(_, token)] = world.inbox.links["alice@acme.com"]
+        await page.goto(service + "/approvals#token=" + quote(token, safe=""))
+        await wait_for_review(page, service + ROOT + "/" + draft["change_id"] + "/review")
+        await page.get_by_role("button", name="Confirm with your passkey").click()
+        await expect(page.locator("#form-status")).to_have_attribute("data-state", "applied")
+
+    async with world.db.transaction() as tx:
+        grants = await records.active_grants(
+            tx, INSTALLATION_ID, record.secret_id,
+            principal_did=BOB.did_key, roles=[],
+        )
+    assert len(grants) == 2
+    assert {operation for grant in grants for operation, _ in grant.operations} == {
+        "list-messages", "get-message", "send-mail", "reply",
+    }
 
 
 @pytest.fixture

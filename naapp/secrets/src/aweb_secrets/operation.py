@@ -70,11 +70,14 @@ CHARSETS: Mapping[str, re.Pattern[str]] = {
     "alnum": re.compile(r"[A-Za-z0-9]+"),
     "slug": re.compile(r"[a-z0-9][a-z0-9_-]*"),
     "base64url": re.compile(r"[A-Za-z0-9_-]+"),
+    "base64url-padded": re.compile(r"[A-Za-z0-9_-]+={0,2}"),
 }
 
 
 _PARAM_NAME = re.compile(r"[a-z_][a-z0-9_]{0,63}")
 _PATH_PARAM = re.compile(r"\{([a-z_][a-z0-9_]{0,63})\}")
+_FIXED_QUERY_NAME = re.compile(r"\$?[A-Za-z_][A-Za-z0-9_.~-]{0,63}")
+_FIXED_QUERY_VALUE = re.compile(r"[\x20-\x7e]{0,512}")
 _TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 _LOWER_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9a-z]+")
 _HEADER_VALUE = re.compile(r"[\x20-\x7e\t]*")
@@ -127,9 +130,21 @@ def _json_values(value: Any) -> Iterator[Any]:
 
 def _check_url(method: str, url: Any) -> list[str]:
     """The URL's path parameters, in order, refusing anything but one fixed https target."""
-    url = _exact(url, frozenset({"host", "port", "path"}), "url")
+    url = _exact(
+        url, frozenset({"host", "port", "path"}), "url", optional=frozenset({"query"})
+    )
     _require(isinstance(url["host"], str) and not url["host"].startswith("*."), "the host is fixed")
     _require(isinstance(url["path"], str) and "**" not in url["path"], "the path is fixed")
+    query = url.get("query", {})
+    _require(
+        isinstance(query, Mapping)
+        and len(query) <= 16
+        and all(
+            _matches(_FIXED_QUERY_NAME, name) and _matches(_FIXED_QUERY_VALUE, value)
+            for name, value in query.items()
+        ),
+        "url.query is a bounded map of fixed query names to printable ASCII values",
+    )
     try:
         parse_destination(
             {"host": url["host"], "port": url["port"], "path": url["path"], "methods": [method]},
@@ -345,6 +360,12 @@ def _check(after: Any) -> None:
     _require(method in METHODS, "the method is GET, POST, PUT, PATCH or DELETE")
     path_params = _check_url(method, after["url"])
     placements = _check_params(after["params"])
+    _require(
+        set(after["url"].get("query", {})).isdisjoint(
+            name for name, where in placements.items() if where == "query"
+        ),
+        "fixed query names cannot be caller query slots",
+    )
     _require(
         path_params == [name for name in path_params if placements.get(name) == "path"]
         and set(path_params) == {name for name, where in placements.items() if where == "path"}

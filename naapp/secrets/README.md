@@ -175,6 +175,75 @@ versions are destroyed. OAuth scope and descriptions remain editable. Both draft
 and confirmation refuse a reshape; confirmation serializes with ingest under the
 parent-then-custody lock order documented in `custody.store`.
 
+### Set up one Microsoft 365 mailbox
+
+Use the vault team’s Secrets host and the CEO’s owner account. Have the
+Exchange administrator register the application certificate and scope
+`Application Mail.Read` and `Application Mail.Send` to the one mailbox
+with Exchange Application RBAC. If agents need Archive, use mailbox-scoped
+`Application Mail.ReadWrite` for that mailbox in place of `Application
+Mail.Read`. Remove overlapping tenant-wide permissions that would bypass
+the mailbox scope. See
+[Exchange Online Application RBAC](https://learn.microsoft.com/en-us/exchange/permissions-exo/application-rbac).
+
+1. Designate the CEO as the vault team’s Secrets owner with her contact
+   address, then enroll her passkey from the delivered link. Use her
+   browser session for the rest of setup and for per-use approvals.
+2. In **Create a secret**, choose **OAuth2 certificate credentials**.
+   Enter the application’s client ID and PEM certificate, and select the
+   matching RSA key file. Set both token endpoint and assertion audience
+   to `https://login.microsoftonline.com/<tenant-object-id>/oauth2/v2.0/token`.
+   Set the scope to `https://graph.microsoft.com/.default` and choose
+   **PS256**. Save and confirm the native secret draft.
+3. From **Grant access to a role**, follow **Grant access to a Microsoft
+   365 mailbox**. Enter the secret name, the mailbox’s Microsoft object ID,
+   and the DIDs of the vault members staged for the permitted CEO seats.
+   Select **Allow moving to Archive** only when the Exchange administrator
+   scoped the corresponding permission. Review the operation, destination,
+   and grant records and confirm the draft with the CEO’s passkey. Repeat
+   with a separate certificate secret and mailbox object ID for another mailbox.
+
+The read operations expose one page of up to 25 message summaries and an
+individual text message selected by its ID. Send writes one plain-text
+message to one recipient. Reply uses the original message’s reply target.
+With Archive enabled, the only move destination is the mailbox’s Archive
+folder. Each write is bound to the CEO’s approval and the original request.
+Graph's `202` on send and reply means acceptance for processing. See
+[list messages](https://learn.microsoft.com/en-us/graph/api/user-list-messages?view=graph-rest-1.0),
+[get message](https://learn.microsoft.com/en-us/graph/api/message-get?view=graph-rest-1.0),
+[sendMail](https://learn.microsoft.com/en-us/graph/api/user-sendmail?view=graph-rest-1.0),
+[reply](https://learn.microsoft.com/en-us/graph/api/message-reply?view=graph-rest-1.0), and
+[move](https://learn.microsoft.com/en-us/graph/api/message-move?view=graph-rest-1.0).
+
+### Call a granted operation from an agent
+
+Use the vault member identity staged by the operator for that seat. Keep the
+hosted identity for the agent’s normal work. Save the named request in a
+private file when it contains message text or a recipient.
+
+```json
+{"request_id":"mailbox-list-1","operation":"list-messages","params":{}}
+```
+
+```sh
+aw --identity-home "$VAULT_IDENTITY_HOME" id request POST \
+  "$SECRETS_API_ORIGIN/v1/secrets/$MAILBOX_SECRET_REF/requests" \
+  --team-auth --raw --header 'Content-Type: application/json' \
+  --body-file mailbox-request.json
+```
+
+Use a fresh request ID for each new logical request. The other operation
+parameters are `message_id` for `get-message` and `archive-message`,
+`recipient`, `subject`, and `text` for `send-mail`, and `message_id` and
+`text` for `reply`. On `awaiting_approval`, the CEO opens the delivered
+approval link and reviews the operation. To read the decision, use the
+same vault identity with `id request GET "$SECRETS_API_ORIGIN/v1/status/$REQUEST_REF"
+--team-auth --raw`. When status is `approved`, resubmit the original JSON
+with the original request ID. On `outcome_unknown`, use owner
+reconciliation to establish the result of that send before making another
+logical request. A same-team vault agent outside the configured list gets
+`grant_missing`. See [the dispatch contract](../../docs/design/secrets-dispatch-interfaces.md).
+
 The human app can mount owner value ingress alongside the shared console:
 
 ```python

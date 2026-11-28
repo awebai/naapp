@@ -1,12 +1,14 @@
 "use strict";
 (() => {
   const api = window.awebConsole;
-  const form = document.querySelector("#role-grant");
+  const form = document.querySelector("#role-grant, #graph-mailbox");
   if (!form) return;
   const status = document.querySelector("#form-status");
   const fields = {
     url: "Enter an exact HTTPS URL without query parameters or wildcards.",
     secret_ref: "Enter the name of an active secret in this team.",
+    mailbox: "Check the mailbox object ID, the Graph certificate configuration and the vault member DIDs.",
+    vault_agents: "Enter one distinct vault member DID per line.",
     role: "Enter an owner-defined role, such as secrets.role.deployers.",
     operation_id: "Enter an operation name using lowercase letters, numbers, underscores or hyphens.",
     method: "Choose a supported HTTP method.",
@@ -33,8 +35,13 @@
     form.querySelector("button").disabled = true;
     status.textContent = "Saving your access draft…";
     const data = Object.fromEntries(new FormData(form));
-    data.projection = data.projection.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
-    for (const name of ["max_bytes", "capacity", "window_s"]) data[name] = Number(data[name]);
+    if (form.id === "graph-mailbox") {
+      data.vault_agents = data.vault_agents.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+      data.include_archive = form.elements.include_archive.checked;
+    } else {
+      data.projection = data.projection.split(/\r?\n/).map(value => value.trim()).filter(Boolean);
+      for (const name of ["max_bytes", "capacity", "window_s"]) data[name] = Number(data[name]);
+    }
     try {
       const drafted = await api.post(form.action, data);
       const root = "/installations/" + encodeURIComponent(form.dataset.installation) + "/change-sets";

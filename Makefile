@@ -17,7 +17,8 @@ PRODUCTION_AWID_PROJECT := scripts/test-egress/production-awid
 AW_DIR ?= $(abspath .tools/bin)
 
 SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_release_files test_served_manifest_digests \
-	test_secrets_shards test_shipping
+	test_secrets_shards test_shipping test_generate_owner_act_delivery_vector test_naapp_image_users \
+	test_naapp_packaged_identity test_naapp_packaged_images
 
 .PHONY: affected sync lint lint-scripts test test-scripts production-awid-sync browsers renderer-deps test-renderer image-smoke-folio image-smoke-library image-smoke-tasks check-library-dev aw \
 	check-library-aatk check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets e2e-tasks rehearse-secrets-graph release-checks \

@@ -14,6 +14,7 @@ from aweb_secrets.console import _body, _require_json, _text
 from aweb_secrets.console_changes import ConsoleChanges, _errors
 from aweb_secrets.destination import DestinationInvalid, DestinationRecord, mint_destination_id
 from aweb_secrets.grant import GrantRecord, is_secrets_role, mint_grant_id
+from aweb_secrets.graph_mailbox import mailbox_changes
 from aweb_secrets.operation import MAX_RESPONSE_BYTES, METHODS, SIDE_EFFECTS, OperationTemplate
 from aweb_secrets.policy import APPROVALS, IDENTIFIER, Policy
 
@@ -30,6 +31,9 @@ _FIELDS = {
     "capacity",
     "window_s",
     "reason",
+}
+_GRAPH_FIELDS = {
+    "secret_ref", "mailbox", "mailbox_address", "vault_agents", "include_archive", "reason",
 }
 
 
@@ -189,6 +193,7 @@ def _form(installation_id: str) -> str:
     action = "/installations/" + installation_id + "/grants/drafts"
     return (
         "<h1>Grant HTTP access to a role</h1>"
+        '<p><a href="/grants/graph-mailbox/new">Grant access to a Microsoft 365 mailbox</a></p>'
         "<p>Choose an existing secret and the exact request this role may make. "
         "Access stays unchanged until you review the draft and confirm with your passkey.</p>"
         f'<form id="role-grant" class="form" method="post" action="{escape(action, quote=True)}" '
@@ -251,12 +256,39 @@ def _form(installation_id: str) -> str:
     )
 
 
+def _graph_form(installation_id: str) -> str:
+    installation = escape(installation_id, quote=True)
+    return (
+        "<h1>Grant access to a Microsoft 365 mailbox</h1>"
+        "<p>Choose an active Graph certificate secret with no prior grants. "
+        "This setup grants mailbox access to the listed vault-team identities. "
+        "Later grants require a separate owner confirmation. "
+        "You approve each send, reply and archive with your passkey.</p>"
+        f'<form id="graph-mailbox" class="form" method="post" data-installation="{installation}" '
+        f'action="/installations/{installation}/grants/graph-mailbox/drafts">'
+        + _input("secret_ref", "Certificate secret name", extra='maxlength="64" autocomplete="off"')
+        + _input("mailbox", "Mailbox object ID", extra='maxlength="36" autocomplete="off"')
+        + _input(
+            "mailbox_address", "Mailbox email address", kind="email",
+            extra='maxlength="254" autocomplete="off"',
+        )
+        + '<p><label for="graph-vault-agents">Vault member DIDs, one per line</label><br>'
+        '<textarea id="graph-vault-agents" name="vault_agents" rows="4" required></textarea></p>'
+        '<p><label><input type="checkbox" name="include_archive"> Allow moving to Archive</label></p>'
+        "<p>Archive requires Exchange mailbox-scoped Mail.ReadWrite permission.</p>"
+        '<p><label for="graph-reason">Reason for this change (optional)</label><br>'
+        '<textarea id="graph-reason" name="reason" rows="2" maxlength="512"></textarea></p>'
+        '<button class="btn primary" type="submit">Save a draft for review</button></form>'
+        '<p id="form-status" role="status" aria-live="polite"></p>'
+        '<script src="/console-forms/grants.js" defer></script>'
+    )
+
+
 def grant_forms_router(*, changes: ConsoleChanges) -> APIRouter:
     shell = changes.console.shell
     router = APIRouter(route_class=ConsoleRoute)
 
-    @router.get("/grants/new")
-    async def page(request: Request) -> Response:
+    async def grant_page(request: Request, *, graph: bool) -> Response:
         try:
             current = await changes.console.sessions.current(request)
         except HTTPException as refused:
@@ -268,18 +300,21 @@ def grant_forms_router(*, changes: ConsoleChanges) -> APIRouter:
                 await changes._owner(tx, current, admitted)
                 await changes.console.fence.check(tx, admitted)
                 changes._unexpired(current)
-        return shell.console_page(
-            title="Grant access", body_html=_form(installation_id), session=current
-        )
+        title = "Grant mailbox access" if graph else "Grant access"
+        body_html = _graph_form(installation_id) if graph else _form(installation_id)
+        return shell.console_page(title=title, body_html=body_html, session=current)
 
-    @router.post(
-        "/installations/{installation_id}/grants/drafts",
-        status_code=201,
-        dependencies=[Depends(_require_json)],
-    )
-    async def draft(installation_id: str, request: Request) -> dict[str, Any]:
+    @router.get("/grants/new")
+    async def page(request: Request) -> Response:
+        return await grant_page(request, graph=False)
+
+    @router.get("/grants/graph-mailbox/new")
+    async def graph_page(request: Request) -> Response:
+        return await grant_page(request, graph=True)
+
+    async def grant_draft(installation_id: str, request: Request, *, graph: bool) -> dict[str, Any]:
         current = await changes.console.sessions.current(request)
-        body = await _body(request, _FIELDS)
+        body = await _body(request, _GRAPH_FIELDS if graph else _FIELDS)
         async with _errors(changes.console, current):
             admitted = await changes._installation(current, installation_id)
             async with changes.console.db.transaction() as tx:
@@ -292,14 +327,49 @@ def grant_forms_router(*, changes: ConsoleChanges) -> APIRouter:
                 owner = await changes.console.directory.owner_of(tx, current.scope)
                 if owner is None:
                     raise HTTPException(403, "owner_required")
-                items = _configuration(
-                    body, secret_id=stored.record.secret_id, owner=owner.principal_did
-                )
+                if graph:
+                    if (
+                        not isinstance(body["vault_agents"], list)
+                        or type(body["include_archive"]) is not bool
+                    ):
+                        raise _invalid("vault_agents")
+                    try:
+                        items = mailbox_changes(
+                            stored.record,
+                            mailbox=_text(body, "mailbox"),
+                            mailbox_address=_text(body, "mailbox_address"),
+                            vault_agents=body["vault_agents"],
+                            approver=owner.principal_did,
+                            include_archive=body["include_archive"],
+                        )
+                    except ValueError:
+                        raise _invalid("mailbox") from None
+                else:
+                    items = _configuration(
+                        body, secret_id=stored.record.secret_id, owner=owner.principal_did
+                    )
                 await changes.console.fence.check(tx, admitted)
                 changes._unexpired(current)
             return await changes.draft(
-                current, installation_id, {"changes": items, "sealed": [], "reason": body["reason"]}
+                current, installation_id, {"changes": items, "sealed": [], "reason": body["reason"]},
+                require_unused_broker_secret=stored.record.secret_id if graph else None,
             )
+
+    @router.post(
+        "/installations/{installation_id}/grants/drafts",
+        status_code=201,
+        dependencies=[Depends(_require_json)],
+    )
+    async def draft(installation_id: str, request: Request) -> dict[str, Any]:
+        return await grant_draft(installation_id, request, graph=False)
+
+    @router.post(
+        "/installations/{installation_id}/grants/graph-mailbox/drafts",
+        status_code=201,
+        dependencies=[Depends(_require_json)],
+    )
+    async def graph_draft(installation_id: str, request: Request) -> dict[str, Any]:
+        return await grant_draft(installation_id, request, graph=True)
 
     @router.get("/console-forms/grants.js")
     async def script() -> Response:

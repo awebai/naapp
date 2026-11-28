@@ -962,10 +962,11 @@ It holds:
 
 ```text
 v, operation_id, secret_id, method: GET | POST | PUT | PATCH | DELETE,
-url: fixed host/port, path template with typed {params},
+url: fixed host/port, path template with typed {params}, optional fixed query values,
 params: typed schema per param (D1's bounded JSON Schema subset: enum, integer ranges,
         bounded strings with fixed character classes, no free regex), placement path|query|body,
-body: fixed JSON template whose body params fill {"$param": name} slots,
+body: fixed template whose body params fill {"$param": name} slots,
+      JSON by default or an explicitly typed mime-reply body,
 headers: {fixed: values, allowed: agent header names},
 response: {projection: JSON pointers | null, max_bytes, content_types},
 side_effect: none | reversible | irreversible,
@@ -976,6 +977,10 @@ reconcile: optional status-lookup operation_id (manual settlement in the first r
 timeout_s: integer 1..30,
 outcome_unknown_retry: optional {delay_s: integer 1..60, upstream_honours_idempotency_key: bool} | null
 ```
+
+The `mime-reply` body encodes one plain-text email as base64, with an
+owner-fixed sender and typed recipient, subject and In-Reply-To fields.
+The named operation's parameters show the recipient in the approval view.
 
 Parameters fill only typed slots. A value never becomes a path separator, header
 name, host or method. An amount ceiling ("refund at most 50.00 EUR") is an integer

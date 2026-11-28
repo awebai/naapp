@@ -22,6 +22,11 @@ def human_member_cache_seconds() -> int:
 
 
 @pytest.fixture
+def root_broker_network():
+    return None
+
+
+@pytest.fixture
 async def test_db_factory(test_db_factory: Any) -> SchemaDatabases:
     return SchemaDatabases(test_db_factory)
 

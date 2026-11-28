@@ -1,0 +1,13 @@
+{
+  "service_id": "srv-dc53gmec6qcc73fjlreg",
+  "service_name": "tasks",
+  "region": "virginia",
+  "repo": "https://github.com/awebai/naapp",
+  "branch": "main",
+  "root_dir": "",
+  "dockerfile_path": "./naapp/tasks/Dockerfile",
+  "docker_context": ".",
+  "origin_url": "https://tasks-0kra.onrender.com",
+  "public_url": "https://tasks.aweb.ai",
+  "health_path": "/live"
+}

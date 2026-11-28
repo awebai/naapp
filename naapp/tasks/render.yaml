@@ -1,0 +1,13 @@
+# Template for a fresh Tasks deployment on Render. It is NOT the production
+# identity: the live service is pinned in ops/render-production.json and operated
+# only through the Makefile's prod-* targets.
+# The build fields below must match that manifest; a test enforces it.
+services:
+  - type: web
+    name: tasks
+    env: docker
+    region: virginia
+    rootDir: ""
+    dockerfilePath: ./naapp/tasks/Dockerfile
+    dockerContext: .
+    healthCheckPath: /live

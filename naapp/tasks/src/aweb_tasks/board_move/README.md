@@ -150,17 +150,38 @@ Then grant `tasks.write` and `tasks.override`; our agents switch to `aw tasks`.
        python -m aweb_tasks.board_move list-live --installation-id <the installation id in the approved listing>
 
    Its line, `sha256 <hex> bytes <n> lines <m>`, must equal the `dataset` line from step 5. If it does, no write committed.
-   - **It reads no grant and starts no app runtime,** so no drain runs. Its single connection first runs `no_writers.sql`:
-     - it refuses unless the role can see other sessions' transactions: it holds `pg_read_all_stats` in effect (a `NOINHERIT` member does not), or it is a superuser;
-     - it waits at most 10 s for every transaction holding the dataset tables, then holds them;
-     - it refuses if any other client session of the database is inside a transaction, active or idle. That includes one-off jobs, which Render documents as continuing while their service is suspended.
+   - **It reads no grant and starts no app runtime,** so no drain runs. Its one transaction, run as the owner, runs the writer check and then lists:
+     1. `lock.sql` takes the seven dataset tables' EXCLUSIVE locks and holds them. It waits at most 10 s, so a transaction that has written the dataset makes it refuse with `lock_timeout`.
+     2. `writer_authority.sql` reads S and A3, the dataset's shape and every principal's write authority, as [the write-authority preflight](#the-write-authority-preflight) describes.
+     3. `sessions.sql` reads P and C3:
+        - **P:** no prepared transaction in the database.
+        - **C3:** every other backend attached to the database, classified by its role id.
+          - The owner's refuses while it is inside a transaction, active or idle.
+          - A superuser's refuses whenever connected.
+          - A platform role's is allowed.
+          - Any other role's refuses whenever connected. The role a session acts as after SET ROLE doesn't show, so a session that took the owner's role and kept it after losing the membership is caught only here.
+          - A role id that names no role refuses as unattributed.
+          - A backend with no role id is allowed. PostgreSQL 17 sets the role id of every client backend, WAL sender and background worker, and of no other backend ([backend_status.c](https://github.com/postgres/postgres/blob/REL_17_STABLE/src/backend/utils/activity/backend_status.c#L292-L305)). Attached to a database, that leaves an autovacuum worker, or a standby's slot-sync worker ([slotsync.c](https://github.com/postgres/postgres/blob/REL_17_STABLE/src/backend/replication/logical/slotsync.c#L10-L16)).
+          - The owner can't read another role's `backend_type`, so the check never uses it. What autovacuum runs as each table's owner is covered by the preflight's maintenance rules.
+   - **Platform roles** are login roles allowed to stay connected, named with `--platform-roles <name,...>`.
+     - The job first echoes them, as `platform roles: <names>` or `platform roles: none`.
+     - Each must be an existing login role, neither the owner nor a superuser, so A3 checks it as a principal.
+     - **On Render the set is empty.** In four reads of tasks-db's sessions, no platform role kept a session there.
+   - **A refusal** prints one `refused: code|principal|role|object` line for each reason, and the job exits with status 3. A refusal changes nothing.
+   - **A superuser's session makes it refuse at random.** On Render one comes and goes in tasks-db. Refusing is right, because a superuser can write. Rerun the whole command while the hold of steps 1 to 3 remains in effect.
    - **The installation id is taken from the approved listing, not from the grant.** Every dataset row of that listing carries it, so another installation's listing can never equal the baseline. A wrong id can only fail the comparison, never pass it.
-   - **Where it runs:** as a job only once aweb-adzd.8 has observed that Render runs a one-off job on a suspended service. Until then, and before cutover, the operator proves `no_writers.sql` on the Tasks database itself:
+   - **Where it runs:** as a job only once aweb-adzd.8 has observed that Render runs a one-off job on a suspended service. Until then, and before cutover, the operator runs the same check on the Tasks database itself:
 
-         PGOPTIONS='-c search_path=<TASKS_DB_SCHEMA>' psql "service=tasks" -X -q -v ON_ERROR_STOP=1 \
-           -c 'BEGIN' -f naapp/tasks/src/aweb_tasks/board_move/no_writers.sql -c 'ROLLBACK'
+         PGOPTIONS='-c search_path=<TASKS_DB_SCHEMA>' psql "service=tasks" -X -At -v ON_ERROR_STOP=1 -c 'BEGIN' \
+           -f naapp/tasks/src/aweb_tasks/board_move/lock.sql \
+           -f naapp/tasks/src/aweb_tasks/board_move/writer_authority.sql \
+           -f naapp/tasks/src/aweb_tasks/board_move/sessions.sql -c 'ROLLBACK'
 
-       It must be shown to refuse with another session in a transaction, and to pass without one.
+     - A pass prints `BEGIN`, `SET`, `DO` and `ROLLBACK`, and nothing else.
+     - A refusal prints one `code|principal|role|object` line for each reason, before `ROLLBACK`.
+     - A lock timeout stops it with an error instead, and exit status 3.
+     - To name platform roles, add `-c board_move.platform_roles=<name,...>` to PGOPTIONS.
+     - It must be shown to refuse while another session is connected to the database, and to pass without one. The listing itself still needs the job.
 5. **Return the agents to the old board,** which is untouched.
 6. **Resume** with `aweb_naapp.ops prod-resume`, which also waits on its own task. Then check:
    - `/live` answers;
@@ -171,7 +192,7 @@ Then grant `tasks.write` and `tasks.override`; our agents switch to `aw tasks`.
 
 ## The write-authority preflight
 
-`writer_authority.sql` proves that no role but the dataset's owner can write the seven dataset tables. It checks two things:
+`writer_authority.sql` proves that no role but the dataset's owner can write the seven dataset tables. It checks these things:
 - **S, the dataset's shape.** Each table is an ordinary table owned by the owner, with no inheritance parent or child. No foreign key leads from it to a table outside the seven with an ON DELETE or ON UPDATE action that writes.
 - **A3, every principal's write authority.** The principals are every login role that is neither the owner nor a superuser, and every subscription owner in the database. No role a principal reaches through any membership may:
   - be the owner, a superuser or `pg_write_all_data`, or own a dataset table;
@@ -183,8 +204,15 @@ Then grant `tasks.write` and `tasks.override`; our agents switch to `aw tasks`.
   - and, applied again to each writer found, every member of a writer and every role able to maintain a relation a writer owns, as above.
 
   No writer may own a view or materialized view, a SECURITY DEFINER function or procedure, or a rule but a view's.
-  - Objects in `pg_catalog` and `information_schema` are not checked. The trust assumption is that PostgreSQL's shipped objects there write no dataset row.
-  - Every other object is checked, an extension's included.
+- **Maintenance runs nothing from outside PostgreSQL as a writer.** ANALYZE, which autovacuum runs at any time with no principal, acts as each relation's owner. So no relation a writer owns may have:
+  - a column type, column collation, index operator class or index collation outside `pg_catalog`. A type in `pg_catalog` has its element, base and range subtype there too, so checking the column's own type covers them;
+  - a table or index access method PostgreSQL doesn't ship;
+  - a foreign partition or inheritance descendant, which ANALYZE samples through its wrapper;
+  - expression statistics, since PostgreSQL accepts a volatile statistics expression;
+  - an expression or partial index with any recorded dependency (`pg_depend`) other than its indexed table, that table's columns, and the parent partitioned index it is attached to. A user function, operator, collation or type refuses, and so does another relation.
+    - PostgreSQL records no dependency on its pinned core objects. So an expression of core functions and operators passes, as the app runtime's own partial indexes do.
+    - The two allowed dependencies are structural: what the index is on, and what it is attached to.
+- **What isn't checked.** Objects in `pg_catalog` and `information_schema` are not checked. The trust assumption is that PostgreSQL's shipped objects there write no dataset row. Every other object is checked, an extension's included.
 
 It is one read-only statement. Each row it returns is a refusal: `code`, `principal`, `role` (the role the principal reaches) and `object`. No row means nothing refuses. It returns only codes and the names of roles and database objects, never a secret.
 
@@ -197,6 +225,26 @@ It is one read-only statement. Each row it returns is a refusal: `code`, `princi
 - psql reads the SQL from the file, so none of it is on the command line.
 - A pass prints `BEGIN` and `ROLLBACK` and nothing between them, with exit status 0.
 - A refusal prints one `code|principal|role|object` line for each refusal between them.
+
+## What the check can't prove
+
+The check proves that, inside its transaction, nothing but the owner can write the dataset. After the listing, the proof rests on the operational fence:
+- the Tasks service is suspended;
+- the grant is cut back to `tasks.read` and drained for at least the 60 s cache bound;
+- the operator holds every other job on the Tasks service, and any direct write with the owner's URL, until the handoff to the old board.
+
+Within that fence, these are what the check can't prove. **The platform assumption** covers them: Render's platform roles don't write customer rows.
+- **`postgres`, Render's superuser,** can write anything, at any time after the check. The locks block it only while the listing runs, and C3 refuses while one of its sessions is connected.
+- **A role holding ADMIN on the owner, or CREATEROLE,** could grant itself membership after the check. On tasks-db no role but `postgres` holds either.
+- **A role or grant created after the check.** Only the platform can make one, since the owner has no power over other roles.
+
+The platform's roles, as read on tasks-db on 2026-11-28:
+- `datadog`: a login whose only membership is `pg_monitor`;
+- `primaryuser`: a login with no membership;
+- `render_conn`: a NOINHERIT login with no membership;
+- `postgres`: the superuser.
+
+None of the first three can become the owner or holds ADMIN on it, and none can write any of the owner's tables. A3 checks each as a principal. None kept a session in tasks-db in four reads, so `--platform-roles` stays empty, and C3 refuses any session of theirs. That includes a session that ran SET ROLE before a membership was revoked.
 
 ## What the move carries
 

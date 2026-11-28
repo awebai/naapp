@@ -1,7 +1,9 @@
 -- The board move's session checks, P and C3, read as the dataset's owner in the
 -- listing's transaction, after the dataset's EXCLUSIVE locks and after
--- writer_authority.sql. $1 names the platform roles: login roles the operator
--- allows to stay connected, empty unless the platform's evidence names them.
+-- writer_authority.sql. The setting board_move.platform_roles names the platform
+-- roles, comma-separated: login roles the operator allows to stay connected.
+-- Unset or empty, it names none, which is the default unless the platform's
+-- evidence names them.
 --
 -- Each row is one refusal: a code, and the principal, the role and the object
 -- involved, where the code has them. No row: nothing refuses.
@@ -35,7 +37,7 @@ owner AS (
 ),
 platform (name, oid, rolsuper, rolcanlogin) AS (
     SELECT named.name, pg_roles.oid, pg_roles.rolsuper, pg_roles.rolcanlogin
-    FROM unnest($1::text[]) named (name)
+    FROM unnest(string_to_array(nullif(current_setting('board_move.platform_roles', true), ''), ',')) named (name)
     LEFT JOIN pg_roles ON pg_roles.rolname = named.name
 ),
 sessions AS (

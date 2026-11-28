@@ -9,6 +9,8 @@ tests assert refusal codes, never wording.
 from __future__ import annotations
 
 import asyncio
+import os
+import subprocess
 from collections.abc import Awaitable, Callable
 from typing import Any
 from uuid import uuid4
@@ -100,6 +102,41 @@ async def test_an_autovacuum_worker_row_is_seen_by_the_owner_and_passes(dataset:
     finally:
         await owner.close()
         await dataset.as_owner("DROP TABLE churn")
+
+
+async def test_the_check_runs_as_the_readme_says(dataset: Dataset) -> None:
+    monitor, dsn = await dataset.login()
+    await dataset.admin.execute(f"GRANT pg_monitor TO {monitor}")
+    files = (move.LOCK_SQL, move.WRITER_AUTHORITY_SQL, move.SESSIONS_SQL)
+
+    def checked(platform_roles: str) -> subprocess.CompletedProcess[str]:
+        # The README's command, with a test DSN in place of the service name.
+        options = f"-c search_path={dataset.schema}"
+        if platform_roles:
+            options += f" -c board_move.platform_roles={platform_roles}"
+        return subprocess.run(
+            ["psql", dataset.owner_dsn, "-X", "-At", "-v", "ON_ERROR_STOP=1", "-c", "BEGIN",
+             *(argument for sql in files for argument in ("-f", str(sql))), "-c", "ROLLBACK"],
+            env={**os.environ, "PGOPTIONS": options}, capture_output=True, text=True, check=False,
+        )
+
+    connected = await asyncpg.connect(dsn)
+    try:
+        refused = await asyncio.to_thread(checked, "")
+        assert (refused.returncode, refused.stderr) == (0, "")
+        assert refused.stdout.splitlines() == [
+            "BEGIN", "SET", "DO", f"session_connected||{monitor}|{await pid(connected)}", "ROLLBACK",
+        ]
+
+        passed = await asyncio.to_thread(checked, monitor)
+        assert (passed.returncode, passed.stderr, passed.stdout) == (0, "", "BEGIN\nSET\nDO\nROLLBACK\n")
+    finally:
+        await connected.close()
+
+
+def test_the_lock_file_locks_every_dataset_table() -> None:
+    locked = move.LOCK_SQL.read_text(encoding="utf-8")
+    assert all(f"'{table}'" in locked for table in move.TABLES)
 
 
 # --- C3, the sessions ---------------------------------------------------------
@@ -296,3 +333,9 @@ async def test_the_check_refuses_on_write_authority(dataset: Dataset) -> None:
     await dataset.admin.execute(f"GRANT {dataset.owner} TO {member}")
 
     assert Refusal("write_authority_owner", member, dataset.owner, None) in await check(dataset)
+
+
+async def test_a_missing_dataset_table_refuses_as_the_shape_not_at_the_lock(dataset: Dataset) -> None:
+    await dataset.as_owner("DROP TABLE dependencies")
+
+    assert await check(dataset) == {Refusal("shape_missing_table", None, None, "dependencies")}

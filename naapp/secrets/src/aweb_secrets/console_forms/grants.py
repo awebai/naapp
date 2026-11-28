@@ -32,7 +32,9 @@ _FIELDS = {
     "window_s",
     "reason",
 }
-_GRAPH_FIELDS = {"secret_ref", "mailbox", "vault_agents", "include_archive", "reason"}
+_GRAPH_FIELDS = {
+    "secret_ref", "mailbox", "mailbox_address", "vault_agents", "include_archive", "reason",
+}
 
 
 def _invalid(field: str, status: int = 400) -> HTTPException:
@@ -258,12 +260,17 @@ def _graph_form(installation_id: str) -> str:
     installation = escape(installation_id, quote=True)
     return (
         "<h1>Grant access to a Microsoft 365 mailbox</h1>"
-        "<p>Choose an active Graph certificate secret. Only the listed vault-team identities "
+        "<p>Choose an active Graph certificate secret dedicated to this mailbox, with no existing use grants. "
+        "Only the listed vault-team identities "
         "can use this mailbox. You approve each send, reply and archive with your passkey.</p>"
         f'<form id="graph-mailbox" class="form" method="post" data-installation="{installation}" '
         f'action="/installations/{installation}/grants/graph-mailbox/drafts">'
         + _input("secret_ref", "Certificate secret name", extra='maxlength="64" autocomplete="off"')
         + _input("mailbox", "Mailbox object ID", extra='maxlength="36" autocomplete="off"')
+        + _input(
+            "mailbox_address", "Mailbox email address", kind="email",
+            extra='maxlength="254" autocomplete="off"',
+        )
         + '<p><label for="graph-vault-agents">Vault member DIDs, one per line</label><br>'
         '<textarea id="graph-vault-agents" name="vault_agents" rows="4" required></textarea></p>'
         '<p><label><input type="checkbox" name="include_archive"> Allow moving to Archive</label></p>'
@@ -329,6 +336,7 @@ def grant_forms_router(*, changes: ConsoleChanges) -> APIRouter:
                         items = mailbox_changes(
                             stored.record,
                             mailbox=_text(body, "mailbox"),
+                            mailbox_address=_text(body, "mailbox_address"),
                             vault_agents=body["vault_agents"],
                             approver=owner.principal_did,
                             include_archive=body["include_archive"],
@@ -342,7 +350,8 @@ def grant_forms_router(*, changes: ConsoleChanges) -> APIRouter:
                 await changes.console.fence.check(tx, admitted)
                 changes._unexpired(current)
             return await changes.draft(
-                current, installation_id, {"changes": items, "sealed": [], "reason": body["reason"]}
+                current, installation_id, {"changes": items, "sealed": [], "reason": body["reason"]},
+                require_unused_broker_secret=stored.record.secret_id if graph else None,
             )
 
     @router.post(

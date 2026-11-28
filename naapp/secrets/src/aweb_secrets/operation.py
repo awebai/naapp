@@ -63,6 +63,12 @@ SIDE_EFFECTS = ("none", "reversible", "irreversible")
 RESULT_HANDLINGS = ("deny", "withhold", "store_as_secret")
 MAX_TIMEOUT_S = 30
 
+_MAIL_LOCAL = r"[A-Za-z0-9!#$%&'*+/=?^_{}|~-]+"
+_MAIL_DOMAIN = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+_MAIL_ADDRESS = rf"{_MAIL_LOCAL}(?:\.{_MAIL_LOCAL})*@{_MAIL_DOMAIN}(?:\.{_MAIL_DOMAIN})+"
+# A message ID may use a single-label domain; an actual recipient needs a mail domain.
+_MESSAGE_ID = rf"<{_MAIL_LOCAL}(?:\.{_MAIL_LOCAL})*@{_MAIL_DOMAIN}(?:\.{_MAIL_DOMAIN})*>"
+
 # The fixed character classes a string parameter may be limited to.
 CHARSETS: Mapping[str, re.Pattern[str]] = {
     "digits": re.compile(r"[0-9]+"),
@@ -71,6 +77,9 @@ CHARSETS: Mapping[str, re.Pattern[str]] = {
     "slug": re.compile(r"[a-z0-9][a-z0-9_-]*"),
     "base64url": re.compile(r"[A-Za-z0-9_-]+"),
     "base64url-padded": re.compile(r"[A-Za-z0-9_-]+={0,2}"),
+    "mail-address": re.compile(_MAIL_ADDRESS),
+    "message-id": re.compile(_MESSAGE_ID),
+    "mail-subject": re.compile(r"[^\x00-\x1f\x7f-\x9f]+"),
 }
 
 
@@ -378,12 +387,39 @@ def _check(after: Any) -> None:
         _require(not body_params, "a body parameter needs a body template")
     else:
         _require(method in BODY_METHODS, f"a {method} request has no body")
-        body = _exact(body, frozenset({"template"}), "body")
+        body = _exact(body, frozenset({"template"}), "body", optional=frozenset({"format"}))
         _require(
             set(_body_slots(body["template"])) == body_params,
             "the body's slots are its body parameters",
         )
+        if "format" in body:
+            _require(body["format"] == "mime-reply", "unknown body format")
+            message = _exact(
+                body["template"], frozenset({"from", "to", "in_reply_to", "subject", "text"}),
+                "mime-reply template",
+            )
+            _require(
+                _matches(CHARSETS["mail-address"], message["from"])
+                and len(message["from"]) <= 254,
+                "the MIME sender is a fixed email address",
+            )
+            for field, charset in (
+                ("to", "mail-address"), ("in_reply_to", "message-id"), ("subject", "mail-subject"),
+                ("text", None),
+            ):
+                slot = _exact(message[field], frozenset({"$param"}), "MIME value")
+                param = after["params"][slot["$param"]]
+                _require(
+                    _schema_types(param["schema"]) == {"string"} and param["charset"] == charset,
+                    "MIME values need typed string slots",
+                )
     _check_headers(after["headers"])
+    if body is not None and "format" in body:
+        _require(
+            [value for name, value in after["headers"]["fixed"].items()
+             if name.lower() == "content-type"] == ["text/plain"],
+            "a base64 MIME request needs the fixed text/plain media type",
+        )
     _check_response(after["response"])
     _require(
         after["side_effect"] in SIDE_EFFECTS, "side_effect is none, reversible or irreversible"

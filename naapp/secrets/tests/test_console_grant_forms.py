@@ -14,6 +14,7 @@ from aweb_naapp_testing.owner_acts import INSTALLATION_ID
 from playwright.async_api import expect
 
 from aweb_secrets import records
+from aweb_secrets.grant import GrantRecord
 from aweb_secrets.operation import OperationTemplate
 from aweb_secrets.owners import OWNER_ROLE
 from aweb_secrets.policy import Policy
@@ -25,7 +26,7 @@ from tests.test_console_changes import ROOT, approve, clients, sign_in
 from tests.test_console_forms import enrolled_page, wait_for_review
 from tests.test_console_forms import service as _service
 from tests.test_console_ui_browser import browser as _browser
-from tests.test_graph_mailbox import MAILBOX, graph_secret
+from tests.test_graph_mailbox import MAILBOX, SENDER, graph_secret
 
 world = _world
 service = _service
@@ -46,6 +47,7 @@ async def test_owner_confirms_a_graph_mailbox_draft_in_the_browser(world, servic
         await page.get_by_role("link", name="Grant access to a Microsoft 365 mailbox").click()
         await page.get_by_label("Certificate secret name").fill(record.ref)
         await page.get_by_label("Mailbox object ID").fill(MAILBOX)
+        await page.get_by_label("Mailbox email address").fill(SENDER)
         await page.get_by_label("Vault member DIDs, one per line").fill(BOB.did_key)
         url = service + f"/installations/{INSTALLATION_ID}/grants/graph-mailbox/drafts"
         async with page.expect_response(url) as submitted:
@@ -69,6 +71,49 @@ async def test_owner_confirms_a_graph_mailbox_draft_in_the_browser(world, servic
     assert {operation for grant in grants for operation, _ in grant.operations} == {
         "list-messages", "get-message", "send-mail", "reply",
     }
+
+
+async def test_mailbox_confirmation_cannot_expand_an_existing_open_use_grant(world):
+    from tests.test_admission import BOB
+    from tests.test_use_approvals import POLICY_BODY
+
+    record = graph_secret()
+    policy = Policy.from_body({**POLICY_BODY, "open_request": True})
+    existing = GrantRecord.from_after({
+        "v": 1, "grant_id": "grt_existing_open", "secret_id": record.secret_id,
+        "subject": {"role": "secrets.role.finance"}, "capability": "use",
+        "operations": [], "open_request": True, "jobs": [], "policy_digest": policy.digest,
+    })
+    async with world.db.transaction() as tx:
+        await records.create_secret(tx, INSTALLATION_ID, TEAM, record)
+        await records.create_policy(tx, INSTALLATION_ID, policy, team_id=TEAM)
+        await records.create_grant(tx, INSTALLATION_ID, TEAM, existing)
+
+    scope = await enrol_owner(world, ALICE, "alice@acme.com")
+    async with clients(world, forms=True) as (human, _):
+        headers = await sign_in(world, human, scope)
+        response = await human.post(
+            f"/installations/{INSTALLATION_ID}/grants/graph-mailbox/drafts",
+            json={
+                "secret_ref": record.ref, "mailbox": MAILBOX, "mailbox_address": SENDER,
+                "vault_agents": [BOB.did_key],
+                "include_archive": False, "reason": "",
+            },
+            headers=headers,
+        )
+        assert response.status_code == 201, response.text
+        draft = response.json()
+        await approve(world, human, headers, draft)
+        confirmation = await human.post(
+            ROOT + "/" + draft["change_id"] + "/confirm", json={}, headers=headers,
+        )
+        assert confirmation.status_code == 409, confirmation.text
+        assert confirmation.json()["detail"] == "broker_secret_in_use"
+
+    assert await world.db.fetch_value("SELECT count(*) FROM {{tables.destinations}}") == 0
+    assert await world.db.fetch_value("SELECT count(*) FROM {{tables.operation_templates}}") == 0
+    assert await world.db.fetch_value("SELECT count(*) FROM {{tables.grants}}") == 1
+    assert await world.db.fetch_value("SELECT count(*) FROM {{tables.policies}}") == 1
 
 
 @pytest.fixture

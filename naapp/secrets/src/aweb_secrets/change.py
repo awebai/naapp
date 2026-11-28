@@ -457,6 +457,7 @@ _ENVELOPE: Mapping[str, Check] = {
     "team_id": _text(),
     "drafter": _drafter,
     "base_revision": _positive_int(0),
+    "require_unused_broker_secret": _matching(secret.SECRET_ID),
     "changes": _changes,
     "reason": _bounded_text(MAX_REASON_CHARS),
     "issued_at": _timestamp,
@@ -466,7 +467,10 @@ _ENVELOPE: Mapping[str, Check] = {
 
 def validate_change(change: Mapping[str, Any]) -> None:
     """Refuse, with :class:`ChangeRefused`, any change set outside the frozen shape."""
-    _fields(change, "change", _ENVELOPE)
+    _fields(
+        change, "change", _ENVELOPE,
+        optional=frozenset({"require_unused_broker_secret"}),
+    )
     if change["v"] != VERSION:
         raise ChangeRefused(f"change.v must be {VERSION}")
     for index, item in enumerate(change["changes"]):

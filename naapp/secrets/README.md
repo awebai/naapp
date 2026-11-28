@@ -194,10 +194,13 @@ the mailbox scope. See
    matching RSA key file. Set both token endpoint and assertion audience
    to `https://login.microsoftonline.com/<tenant-object-id>/oauth2/v2.0/token`.
    Set the scope to `https://graph.microsoft.com/.default` and choose
-   **PS256**. Save and confirm the native secret draft.
+   **PS256**. Save and confirm the native secret draft. Dedicate this secret
+   to the mailbox. The mailbox draft refuses a secret with existing use grants.
 3. From **Grant access to a role**, follow **Grant access to a Microsoft
-   365 mailbox**. Enter the secret name, the mailbox’s Microsoft object ID,
-   and the DIDs of the vault members staged for the permitted CEO seats.
+   365 mailbox**. Enter the secret name, the mailbox’s Microsoft object ID
+   and email address, and the DIDs from the staged members’ team certificates.
+   Use `member_did_aw` when present. The host-staged local vault members use
+   `member_did_key` (a `did:key`).
    Select **Allow moving to Archive** only when the Exchange administrator
    scoped the corresponding permission. Review the operation, destination,
    and grant records and confirm the draft with the CEO’s passkey. Repeat
@@ -205,14 +208,18 @@ the mailbox scope. See
 
 The read operations expose one page of up to 25 message summaries and an
 individual text message selected by its ID. Send writes one plain-text
-message to one recipient. Reply uses the original message’s reply target.
+message to one explicit recipient. To reply, use the original message’s
+`/internetMessageId` as `in_reply_to` and choose the explicit recipient
+using its `/replyTo` when present. Secrets sends through Graph's MIME
+`sendMail`, with that recipient in `To` and the message ID in `In-Reply-To`.
+The approval view shows the exact address to which it sends.
 With Archive enabled, the only move destination is the mailbox’s Archive
 folder. Each write is bound to the CEO’s approval and the original request.
 Graph's `202` on send and reply means acceptance for processing. See
 [list messages](https://learn.microsoft.com/en-us/graph/api/user-list-messages?view=graph-rest-1.0),
 [get message](https://learn.microsoft.com/en-us/graph/api/message-get?view=graph-rest-1.0),
 [sendMail](https://learn.microsoft.com/en-us/graph/api/user-sendmail?view=graph-rest-1.0),
-[reply](https://learn.microsoft.com/en-us/graph/api/message-reply?view=graph-rest-1.0), and
+[MIME send](https://learn.microsoft.com/en-us/graph/outlook-send-mime-message), and
 [move](https://learn.microsoft.com/en-us/graph/api/message-move?view=graph-rest-1.0).
 
 ### Call a granted operation from an agent

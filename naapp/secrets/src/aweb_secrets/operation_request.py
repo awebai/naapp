@@ -20,9 +20,12 @@ again before sending.
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from email.message import EmailMessage
+from email.policy import SMTP
 from typing import Any
 from urllib.parse import quote, urlencode
 
@@ -76,6 +79,16 @@ def _fill(template: Any, params: Mapping[str, Any]) -> Any:
     return template
 
 
+def _mime_reply(value: Mapping[str, str]) -> bytes:
+    message = EmailMessage(policy=SMTP)
+    message["From"] = value["from"]
+    message["To"] = value["to"]
+    message["In-Reply-To"] = value["in_reply_to"]
+    message["Subject"] = value["subject"]
+    message.set_content(value["text"])
+    return base64.b64encode(message.as_bytes())
+
+
 def render_operation(
     template: OperationTemplate,
     params: Mapping[str, Any],
@@ -123,9 +136,11 @@ def render_operation(
     reserved = {idempotency["header"].lower()} if idempotency else set()
     body = b""
     if after["body"] is not None:
-        body = json.dumps(
-            _fill(after["body"]["template"], params), separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")
+        filled = _fill(after["body"]["template"], params)
+        if after["body"].get("format") == "mime-reply":
+            body = _mime_reply(filled)
+        else:
+            body = json.dumps(filled, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         if "content-type" not in names:
             sent.append(("Content-Type", "application/json"))
             names.add("content-type")

@@ -7,7 +7,7 @@
   const fields = {
     url: "Enter an exact HTTPS URL without query parameters or wildcards.",
     secret_ref: "Enter the name of an active secret in this team.",
-    mailbox: "Check the mailbox object ID, the Graph certificate configuration and the vault member DIDs.",
+    mailbox: "Check the mailbox object ID and email address, the Graph certificate configuration and the vault member DIDs.",
     vault_agents: "Enter one distinct vault member DID per line.",
     role: "Enter an owner-defined role, such as secrets.role.deployers.",
     operation_id: "Enter an operation name using lowercase letters, numbers, underscores or hyphens.",

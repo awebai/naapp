@@ -215,12 +215,10 @@ def handle_response(
 
         if _is_encoded(headers):
             return withheld("content_encoded")
+        empty_success = status in (202, 204) and not body and not truncated
         if content_types is not None:
             media_type = _media_type(headers)
-            empty_success = (
-                media_type is None and status in (202, 204) and not body and not truncated
-            )
-            if media_type not in content_types and not empty_success:
+            if media_type not in content_types and not (media_type is None and empty_success):
                 return withheld("content_type_not_allowed")
 
         body, count = known.redact(body)
@@ -240,7 +238,7 @@ def handle_response(
         # Projected values are keyed by pointer. See also the field-name check
         # on the original path in _project.
         names_credential = False
-        if projection is not None:
+        if projection is not None and not empty_success:
             body, names_credential = _project(body, projection, complete=not truncated)
             for redact in (known.redact, known.redact_json):
                 scan.check()

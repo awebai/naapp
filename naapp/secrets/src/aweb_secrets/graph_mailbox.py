@@ -20,6 +20,7 @@ _GRAPH = "graph.microsoft.com"
 _LOGIN = "login.microsoftonline.com"
 _SCOPE = "https://graph.microsoft.com/.default"
 _MESSAGE_HEADERS = ("id", "subject", "from", "receivedDateTime", "isRead", "hasAttachments")
+_MESSAGE_DETAIL = (*_MESSAGE_HEADERS, "body", "replyTo", "internetMessageId")
 _IMMUTABLE_IDS = 'IdType="ImmutableId"'
 _MAX_REQUEST_BYTES = 32 * 1024
 _MAX_RESULT_BYTES = 128 * 1024
@@ -70,13 +71,19 @@ def _operation(
     projection: list[str] | None = None,
     prefer: str = _IMMUTABLE_IDS,
     effect: str = "none",
+    body_format: str | None = None,
 ) -> OperationTemplate:
     url: dict[str, Any] = {"host": _GRAPH, "port": 443, "path": path}
     if query:
         url["query"] = query
     fixed = {"Accept": "application/json", "Prefer": prefer}
+    request_body: dict[str, Any] | None = None
     if body is not None:
+        request_body = {"template": body}
         fixed["Content-Type"] = "application/json"
+        if body_format is not None:
+            request_body["format"] = body_format
+            fixed["Content-Type"] = "text/plain"
     return OperationTemplate.from_after(
         {
             "v": 1,
@@ -86,7 +93,7 @@ def _operation(
             "url": url,
             "params": params or {},
             "headers": {"fixed": fixed, "allowed": []},
-            "body": {"template": body} if body is not None else None,
+            "body": request_body,
             "response": {
                 "projection": projection,
                 "content_types": ["application/json"],
@@ -136,6 +143,7 @@ def mailbox_changes(
     secret: SecretRecord,
     *,
     mailbox: str,
+    mailbox_address: str,
     vault_agents: Sequence[str],
     approver: str,
     include_archive: bool = False,
@@ -159,6 +167,7 @@ def mailbox_changes(
     )
     base = f"/v1.0/users/{_uuid(mailbox)}"
     messages = base + "/messages"
+    send_mail = base + "/sendMail"
     message_params = {"message_id": _string(512, placement="path", charset="base64url-padded")}
     text = {"$param": "text"}
     operations = [
@@ -174,15 +183,19 @@ def mailbox_changes(
             "get-message",
             messages + "/{message_id}",
             params=message_params,
-            query={"$select": ",".join((*_MESSAGE_HEADERS, "body"))},
-            projection=["/" + name for name in (*_MESSAGE_HEADERS, "body")],
+            query={"$select": ",".join(_MESSAGE_DETAIL)},
+            projection=["/" + name for name in _MESSAGE_DETAIL],
             prefer=_IMMUTABLE_IDS + ', outlook.body-content-type="text"',
         ),
         _operation(
             secret_id,
             "send-mail",
-            base + "/sendMail",
-            params={"recipient": _string(254), "subject": _string(256), "text": _string(4096)},
+            send_mail,
+            params={
+                "recipient": _string(254, charset="mail-address"),
+                "subject": _string(256, charset="mail-subject"),
+                "text": _string(4096),
+            },
             body={
                 "message": {
                     "subject": {"$param": "subject"},
@@ -190,14 +203,28 @@ def mailbox_changes(
                     "toRecipients": [{"emailAddress": {"address": {"$param": "recipient"}}}],
                 }
             },
+            projection=["/id"],
             effect="irreversible",
         ),
         _operation(
             secret_id,
             "reply",
-            messages + "/{message_id}/reply",
-            params={**message_params, "text": _string(4096)},
-            body={"comment": text},
+            send_mail,
+            params={
+                "recipient": _string(254, charset="mail-address"),
+                "subject": _string(256, charset="mail-subject"),
+                "in_reply_to": _string(512, charset="message-id"),
+                "text": _string(4096),
+            },
+            body={
+                "from": mailbox_address,
+                "to": {"$param": "recipient"},
+                "in_reply_to": {"$param": "in_reply_to"},
+                "subject": {"$param": "subject"},
+                "text": text,
+            },
+            body_format="mime-reply",
+            projection=["/id"],
             effect="irreversible",
         ),
     ]
@@ -215,21 +242,17 @@ def mailbox_changes(
         )
 
     items = [_item("destination", token["destination_id"], token)]
+    targets = set()
     for op in operations:
         after = dict(op.after)
-        dest = _destination(
-            secret_id,
-            host=_GRAPH,
-            path=after["url"]["path"],
-            method=after["method"],
-            headers=list(after["headers"]["fixed"]),
-        )
-        items.extend(
-            [
-                _item("destination", dest["destination_id"], dest),
-                _item("operation", op.operation_id, after),
-            ]
-        )
+        target = (after["method"], after["url"]["path"], tuple(after["headers"]["fixed"]))
+        if target not in targets:
+            targets.add(target)
+            dest = _destination(
+                secret_id, host=_GRAPH, path=target[1], method=target[0], headers=target[2],
+            )
+            items.append(_item("destination", dest["destination_id"], dest))
+        items.append(_item("operation", op.operation_id, after))
     for writes in (False, True):
         selected = [op for op in operations if (op.after["side_effect"] != "none") == writes]
         pins = [{"operation_id": op.operation_id, "digest": op.digest} for op in selected]

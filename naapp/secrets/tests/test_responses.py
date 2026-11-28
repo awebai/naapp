@@ -50,13 +50,29 @@ def test_an_ordinary_response_is_returned_whole() -> None:
 
 
 @pytest.mark.parametrize("status", [202, 204])
-def test_an_empty_success_may_have_no_content_type(status: int) -> None:
+@pytest.mark.parametrize("projection", [None, ["/id"]])
+def test_an_empty_success_may_have_no_content_type(status: int, projection: list[str] | None) -> None:
     result = handle_response(
         status=status, headers=[], body=b"", truncated=False, max_bytes=4096,
-        projection=None, known=_known(), token_issuing=False, content_types=["application/json"],
+        projection=projection, known=_known(), token_issuing=False, content_types=["application/json"],
     )
     assert result.disposition == "returned"
     assert result.status == status and result.body == b""
+
+
+@pytest.mark.parametrize(
+    "status,body,truncated", [(202, b"unexpected", False), (200, b"", False), (204, b"", True)],
+)
+def test_the_empty_success_exception_requires_the_exact_status_and_complete_empty_body(
+    status: int, body: bytes, truncated: bool,
+) -> None:
+    result = handle_response(
+        status=status, headers=[], body=body, truncated=truncated, max_bytes=4096,
+        projection=["/id"], known=_known(), token_issuing=False,
+        content_types=["application/json"],
+    )
+    assert result.disposition == "withheld"
+    assert result.withheld_reason == "content_type_not_allowed" and result.body is None
 
 
 def test_expiry_in_final_projection_redaction_is_not_a_credential_finding(monkeypatch) -> None:

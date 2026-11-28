@@ -52,13 +52,21 @@ services:
   # Chromium for the browser journeys, on the lane's network and DNS, where
   # the Folio origins resolve. The tests connect to its Playwright server on
   # a loopback port of the runner, which the second network carries: the lane's
-  # own network is internal. The image is the Playwright release Folio's
-  # uv.lock pins (playwright==1.63.0); bump the two together.
+  # own network is internal. The server is the driver of the playwright wheel
+  # Folio's uv.lock pins (playwright==1.63.0), mounted read-only; the image
+  # carries that release's browsers. Bump the two together.
   playwright:
-    image: mcr.microsoft.com/playwright/python:v1.63.0-noble@sha256:72bd171a9ffc2b4b59532aaa6210e21014d07093120dc25528870c0b840da1f0
+    image: mcr.microsoft.com/playwright:v1.63.0-noble@sha256:eff16c30e6f3f4af0a03fa4b706120d5e9b0891c344a27d64559aff5900a4a27
     init: true
     dns: ["${NAAPP_E2E_DNS_IP:-127.0.0.11}"]
-    command: ["playwright", "run-server", "--host", "0.0.0.0", "--port", "3000"]
+    volumes:
+      - "${NAAPP_E2E_PLAYWRIGHT_DRIVER:?}:/playwright-driver:ro"
+    command:
+      - /playwright-driver/node
+      - /playwright-driver/package/cli.js
+      - run-server
+      - --host=0.0.0.0
+      - --port=3000
     networks: [default, browser-control]
     ports:
       - "127.0.0.1::3000"

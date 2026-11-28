@@ -16,6 +16,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
+import playwright
 import pytest
 from aweb_naapp_testing.compose_lane import (
     DEFAULT_SUBNET,
@@ -33,7 +34,11 @@ from aweb_naapp_testing.lane_team import (
     install_app,
     prepare_namespace,
 )
+from playwright.sync_api import Error, sync_playwright
 
+# The Playwright server the lane's browser container runs: the driver of the
+# playwright wheel in Folio's locked environment, the release the client speaks.
+PLAYWRIGHT_DRIVER = Path(playwright.__file__).parent / "driver"
 APP_DIR = Path(__file__).resolve().parents[1]
 E2E_BUILD_SHA = "0123456789abcdef0123456789abcdef01234567"
 # The lane's one namespace: every team the tests found is in it.
@@ -148,8 +153,6 @@ def browser_endpoint(lane: ComposeLane) -> str:
     """The Playwright server's address on the runner, once it accepts connections."""
     published = lane.checked(lane.compose("port", "playwright", "3000"), "find Playwright")
     endpoint = f"ws://{published}/"
-    from playwright.sync_api import Error, sync_playwright
-
     deadline = time.monotonic() + 60
     with sync_playwright() as playwright:
         while True:
@@ -187,6 +190,7 @@ def folio_lane(
             "NAAPP_E2E_POSTGRES_USER": POSTGRES_USER,
             "NAAPP_E2E_POSTGRES_PASSWORD": POSTGRES_PASSWORD,
             "NAAPP_E2E_POSTGRES_DB": POSTGRES_USER,
+            "NAAPP_E2E_PLAYWRIGHT_DRIVER": str(PLAYWRIGHT_DRIVER),
         },
         subnet=DEFAULT_SUBNET,
     )

@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 import os
 import secrets
-from collections import Counter
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -147,21 +146,23 @@ class LibraryLane:
     def deployment(self, deployment: Deployment) -> LaneApp:
         return LaneApp(origin=deployment.origin, app_id=E2E_APP_ID, http=self.client)
 
-    def requests_served(self) -> Counter[str]:
-        """The requests every Library deployment has logged, apart from the
-        image's own /live healthcheck, counted by log line. Compose interleaves
-        the services' logs in no fixed order, so they are not a sequence."""
-        logs = self.lane.checked(
-            self.lane.compose(
-                "logs", "--no-color", *(deployment.service for deployment in DEPLOYMENTS)
-            ),
-            "read Library's logs",
-        )
-        return Counter(
-            line
-            for line in logs.splitlines()
-            if " HTTP/1.1\" " in line and '"GET /live HTTP/1.1"' not in line
-        )
+    def requests_served(self) -> dict[str, list[str]]:
+        """The requests each Library deployment has logged, in order, apart
+        from the image's own /live healthcheck. Each service's log is read on
+        its own and without Compose's prefix, whose padding varies between
+        reads."""
+        served = {}
+        for deployment in DEPLOYMENTS:
+            logs = self.lane.checked(
+                self.lane.compose("logs", "--no-color", "--no-log-prefix", deployment.service),
+                f"read {deployment.service}'s logs",
+            )
+            served[deployment.service] = [
+                line
+                for line in logs.splitlines()
+                if " HTTP/1.1\" " in line and '"GET /live HTTP/1.1"' not in line
+            ]
+        return served
 
 
 @pytest.fixture(scope="session")

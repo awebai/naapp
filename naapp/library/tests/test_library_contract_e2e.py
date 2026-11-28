@@ -18,7 +18,7 @@ from aweb_naapp_testing.lane_team import (
     aw_request,
     found_team,
 )
-from library_lane import LibraryLane, installed_team
+from library_lane import LIBRARY, LibraryLane, installed_team
 
 from library.blueprint import (
     ParsedBlueprint,
@@ -1146,7 +1146,7 @@ def test_empty_profile_invariant_never_requires_reachable_library(
     # Library logs each request it serves, this one included.
     assert library.http.get(f"{library.origin}/v1/blueprints").status_code == 200
     served = library_lane.requests_served()
-    assert any('"GET /v1/blueprints HTTP/1.1"' in line for line in served), served
+    assert any('"GET /v1/blueprints HTTP/1.1"' in line for line in served[LIBRARY.service]), served
     team = found_team(
         namespace,
         env={"AWEB_URL": unreachable, "LIBRARY_URL": unreachable, "AWEBAI_LIBRARY_URL": unreachable},

@@ -173,7 +173,13 @@ Then grant `tasks.write` and `tasks.override`; our agents switch to `aw tasks`.
 
 `writer_authority.sql` proves that no role but the dataset's owner can write the seven dataset tables. It checks two things:
 - **S, the dataset's shape.** Each table is an ordinary table owned by the owner, with no inheritance parent or child. No foreign key leads from it to a table outside the seven with an ON DELETE or ON UPDATE action that writes.
-- **A3, every principal's write authority.** The principals are every login role that is neither the owner nor a superuser, and every subscription owner in the database. No role a principal reaches through any membership may be the owner, a superuser or `pg_write_all_data`, own a dataset table, or hold a write privilege on one. And the owner owns no view, no SECURITY DEFINER function or procedure, and no rule but a view's.
+- **A3, every principal's write authority.** The principals are every login role that is neither the owner nor a superuser, and every subscription owner in the database. No role a principal reaches through any membership may:
+  - be the owner, a superuser or `pg_write_all_data`, or own a dataset table;
+  - hold a write privilege on a dataset table, or TRIGGER on one;
+  - hold MAINTAIN on a relation a writer owns, since maintenance and a materialized view's refresh run code as the relation's owner.
+- **Nothing a writer owns acts for others.** The writers are every role with a write, TRIGGER or MAINTAIN privilege on a dataset table, which includes the owner and every superuser, and every member of a writer. No writer may own a view or materialized view, a SECURITY DEFINER function or procedure, or a rule but a view's.
+  - Objects in `pg_catalog` and `information_schema` are not checked. The trust assumption is that PostgreSQL's shipped objects there write no dataset row.
+  - Every other object is checked, an extension's included.
 
 It is one read-only statement. Each row it returns is a refusal: `code`, `principal`, `role` (the role the principal reaches) and `object`. No row means nothing refuses. It returns only codes and the names of roles and database objects, never a secret.
 

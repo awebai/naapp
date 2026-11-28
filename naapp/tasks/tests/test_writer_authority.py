@@ -43,6 +43,7 @@ class Dataset:
     owner: str
     owner_dsn: str
     role: Callable[..., Awaitable[str]]
+    login: Callable[[], Awaitable[tuple[str, str]]]
 
     async def as_owner(self, sql: str) -> None:
         connection = await asyncpg.connect(self.owner_dsn, server_settings={"search_path": self.schema})
@@ -82,6 +83,14 @@ async def dataset(test_db_factory: Any) -> AsyncIterator[Dataset]:
         created.append(name)
         return name
 
+    async def login() -> tuple[str, str]:
+        """A principal that can connect and resolve the dataset's schema: its name and DSN."""
+        name, secret = await role(), uuid4().hex
+        await admin.execute(f"ALTER ROLE {name} PASSWORD '{secret}'")
+        await admin.execute(f'GRANT CONNECT ON DATABASE "{database}" TO {name}')
+        await admin.execute(f'GRANT USAGE ON SCHEMA "{schema}" TO {name}')
+        return name, _dsn(admin.config, name, secret, database)
+
     owner, password = await role(), uuid4().hex
     await admin.execute(f"ALTER ROLE {owner} PASSWORD '{password}'")
     # pgdbm's connect runs CREATE SCHEMA IF NOT EXISTS, which needs CREATE.
@@ -100,7 +109,7 @@ async def dataset(test_db_factory: Any) -> AsyncIterator[Dataset]:
         await migrator.disconnect()
     try:
         yield Dataset(admin=admin, database=database, schema=schema, owner=owner,
-                      owner_dsn=owner_dsn, role=role)
+                      owner_dsn=owner_dsn, role=role, login=login)
     finally:
         for name in reversed(created):
             await admin.execute(f"DROP OWNED BY {name} CASCADE")
@@ -331,7 +340,7 @@ async def test_a_view_owned_by_the_owner_refuses(dataset: Dataset) -> None:
         "CREATE TABLE outside (id INTEGER); CREATE VIEW outside_view AS SELECT id FROM outside"
     )
 
-    assert await dataset.refusals() == {Refusal("indirection_view", None, None, "outside_view")}
+    assert await dataset.refusals() == {Refusal("indirection_view", None, dataset.owner, "outside_view")}
 
 
 async def test_a_security_definer_function_owned_by_the_owner_refuses(dataset: Dataset) -> None:
@@ -342,7 +351,7 @@ async def test_a_security_definer_function_owned_by_the_owner_refuses(dataset: D
     )
 
     assert await dataset.refusals() == {
-        Refusal("indirection_security_definer", None, None, "outside_write()"),
+        Refusal("indirection_security_definer", None, dataset.owner, "outside_write()"),
     }
 
 
@@ -352,7 +361,7 @@ async def test_a_security_definer_procedure_owned_by_the_owner_refuses(dataset: 
     )
 
     assert await dataset.refusals() == {
-        Refusal("indirection_security_definer", None, None, "outside_call(integer)"),
+        Refusal("indirection_security_definer", None, dataset.owner, "outside_call(integer)"),
     }
 
 
@@ -364,7 +373,7 @@ async def test_a_dml_rule_owned_by_the_owner_refuses(dataset: Dataset) -> None:
         " DELETE FROM tasks WHERE number = NEW.id"
     )
 
-    assert await dataset.refusals() == {Refusal("indirection_rule", None, None, "outside_into_tasks")}
+    assert await dataset.refusals() == {Refusal("indirection_rule", None, dataset.owner, "outside_into_tasks")}
 
 
 async def test_an_invoker_function_and_a_trigger_pass(dataset: Dataset) -> None:
@@ -375,3 +384,186 @@ async def test_an_invoker_function_and_a_trigger_pass(dataset: Dataset) -> None:
     )
 
     assert await dataset.refusals() == set()
+
+
+# --- A3: indirection through objects any other writer owns --------------------
+
+
+async def _writes(dsn: str, schema: str, sql: str) -> None:
+    connection = await asyncpg.connect(dsn, server_settings={"search_path": schema})
+    try:
+        await connection.execute(sql)
+    finally:
+        await connection.close()
+
+
+@dataclass(frozen=True)
+class Indirection:
+    code: str
+    object: str
+    # Run as the writer's owning role's creator (a superuser), then owned by the writer.
+    create: str
+    owned: str
+    # What the principal runs to write the dataset through it.
+    write: str
+
+
+INDIRECTIONS = [
+    Indirection(
+        "indirection_view", "tasks_view",
+        "CREATE VIEW tasks_view AS SELECT * FROM tasks",
+        "ALTER VIEW tasks_view OWNER TO {writer}; GRANT DELETE ON tasks_view TO {login}",
+        "DELETE FROM tasks_view",
+    ),
+    Indirection(
+        "indirection_security_definer", "delete_tasks()",
+        "CREATE FUNCTION delete_tasks() RETURNS void LANGUAGE sql SECURITY DEFINER"
+        " AS 'DELETE FROM {schema}.tasks'",
+        "ALTER FUNCTION delete_tasks() OWNER TO {writer}",
+        "SELECT delete_tasks()",
+    ),
+    Indirection(
+        "indirection_rule", "outside_deletes_tasks",
+        "CREATE TABLE outside (id INTEGER);"
+        " CREATE RULE outside_deletes_tasks AS ON INSERT TO outside DO ALSO DELETE FROM {schema}.tasks",
+        "ALTER TABLE outside OWNER TO {writer}; GRANT INSERT ON outside TO {login}",
+        "INSERT INTO outside VALUES (1)",
+    ),
+]
+
+
+@pytest.mark.parametrize("indirection", INDIRECTIONS, ids=[i.code for i in INDIRECTIONS])
+async def test_an_object_owned_by_an_unreached_writer_refuses(
+    dataset: Dataset, indirection: Indirection,
+) -> None:
+    # A NOLOGIN writer no principal reaches: A3's closure alone passes it.
+    writer = await dataset.role("NOLOGIN")
+    await dataset.admin.execute(f'GRANT DELETE ON "{dataset.schema}".tasks TO {writer}')
+    await dataset.admin.execute(f'GRANT USAGE ON SCHEMA "{dataset.schema}" TO {writer}')
+    login, dsn = await dataset.login()
+    names = {"writer": writer, "login": login, "schema": f'"{dataset.schema}"'}
+    await dataset.admin.execute(indirection.create.format(**names))
+    await dataset.admin.execute(indirection.owned.format(**names))
+
+    # The login can't write the dataset itself, but writes it through the object.
+    with pytest.raises(asyncpg.InsufficientPrivilegeError):
+        await _writes(dsn, dataset.schema, "DELETE FROM tasks")
+    await _writes(dsn, dataset.schema, indirection.write)
+
+    assert await dataset.refusals() == {Refusal(indirection.code, None, writer, indirection.object)}
+
+
+async def test_a_view_owned_by_a_superuser_outside_the_system_schemas_refuses(dataset: Dataset) -> None:
+    superuser = await dataset.admin.fetch_value("SELECT current_user")
+    await dataset.admin.execute(f'CREATE VIEW "{dataset.schema}".tasks_view AS SELECT * FROM "{dataset.schema}".tasks')
+
+    assert await dataset.refusals() == {Refusal("indirection_view", None, superuser, "tasks_view")}
+
+
+async def test_an_object_owned_by_a_role_that_cannot_write_passes(dataset: Dataset) -> None:
+    reader = await dataset.role("NOLOGIN")
+    await dataset.admin.execute(f'GRANT SELECT ON "{dataset.schema}".tasks TO {reader}')
+    await dataset.admin.execute(f'CREATE VIEW "{dataset.schema}".tasks_view AS SELECT * FROM "{dataset.schema}".tasks')
+    await dataset.admin.execute(f'ALTER VIEW "{dataset.schema}".tasks_view OWNER TO {reader}')
+    await dataset.admin.execute(
+        f'CREATE FUNCTION "{dataset.schema}".count_tasks() RETURNS bigint LANGUAGE sql SECURITY DEFINER'
+        f' AS \'SELECT count(*) FROM "{dataset.schema}".tasks\''
+    )
+    await dataset.admin.execute(f'ALTER FUNCTION "{dataset.schema}".count_tasks() OWNER TO {reader}')
+
+    assert await dataset.refusals() == set()
+
+
+async def test_a_trigger_grant_refuses(dataset: Dataset) -> None:
+    # A trigger the login attaches runs with the rights of whoever next writes.
+    login = await dataset.role("LOGIN")
+    await dataset.admin.execute(f'GRANT TRIGGER ON "{dataset.schema}".locks TO {login}')
+
+    assert await dataset.refusals() == {
+        Refusal("write_authority_trigger_privilege", login, login, "locks"),
+    }
+
+
+async def test_a_materialized_view_owned_by_an_unreached_writer_refuses(dataset: Dataset) -> None:
+    # A refresh runs the view's query, and the functions it calls, as the view's owner.
+    writer = await dataset.role("NOLOGIN")
+    await dataset.admin.execute(f'GRANT DELETE ON "{dataset.schema}".tasks TO {writer}')
+    await dataset.admin.execute(f'GRANT USAGE ON SCHEMA "{dataset.schema}" TO {writer}')
+    login, dsn = await dataset.login()
+    schema = f'"{dataset.schema}"'
+    await dataset.admin.execute(
+        f"CREATE FUNCTION {schema}.deleted_tasks() RETURNS bigint LANGUAGE sql"
+        f" AS 'WITH gone AS (DELETE FROM {schema}.tasks RETURNING 1) SELECT count(*) FROM gone'"
+    )
+    await dataset.admin.execute(
+        f"CREATE MATERIALIZED VIEW {schema}.tasks_gone AS SELECT {schema}.deleted_tasks() WITH NO DATA"
+    )
+    await dataset.admin.execute(f"ALTER MATERIALIZED VIEW {schema}.tasks_gone OWNER TO {writer}")
+    await dataset.admin.execute(f"GRANT MAINTAIN ON {schema}.tasks_gone TO {login}")
+
+    await _writes(dsn, dataset.schema, "REFRESH MATERIALIZED VIEW tasks_gone")
+
+    assert await dataset.refusals() == {
+        Refusal("indirection_view", None, writer, "tasks_gone"),
+        Refusal("write_authority_maintain_privilege", login, login, "tasks_gone"),
+    }
+
+
+async def test_a_maintain_grant_on_a_dataset_table_refuses(dataset: Dataset) -> None:
+    # Maintenance runs index and statistics expressions as the table's owner.
+    login = await dataset.role("LOGIN")
+    await dataset.admin.execute(f'GRANT MAINTAIN ON "{dataset.schema}".comments TO {login}')
+
+    assert await dataset.refusals() == {
+        Refusal("write_authority_maintain_privilege", login, login, "comments"),
+    }
+
+
+async def test_a_maintain_grant_on_a_writer_owned_outside_table_refuses(dataset: Dataset) -> None:
+    login = await dataset.role("LOGIN")
+    await dataset.as_owner("CREATE TABLE outside (id INTEGER)")
+    await dataset.admin.execute(f'GRANT MAINTAIN ON "{dataset.schema}".outside TO {login}')
+
+    assert await dataset.refusals() == {
+        Refusal("write_authority_maintain_privilege", login, login, "outside"),
+    }
+
+
+async def test_a_login_that_reaches_pg_maintain_refuses(dataset: Dataset) -> None:
+    login = await dataset.role("LOGIN NOINHERIT")
+    await dataset.admin.execute(f"GRANT pg_maintain TO {login}")
+
+    refusals = await dataset.refusals()
+    assert {refusal.code for refusal in refusals} == {"write_authority_maintain_privilege"}
+    assert {(refusal.principal, refusal.role) for refusal in refusals} == {(login, "pg_maintain")}
+    assert {"comments", "tasks"} <= {refusal.object for refusal in refusals}
+
+
+async def test_a_member_of_an_unreached_writer_owning_a_security_definer_function_refuses(
+    dataset: Dataset,
+) -> None:
+    # Membership in a writer, in any mode, makes a writer.
+    writer = await dataset.role("NOLOGIN")
+    member = await dataset.role("NOLOGIN NOINHERIT")
+    await dataset.admin.execute(f'GRANT DELETE ON "{dataset.schema}".tasks TO {writer}')
+    await dataset.admin.execute(f"GRANT {writer} TO {member}")
+    await dataset.admin.execute(
+        f'CREATE FUNCTION "{dataset.schema}".noop() RETURNS void LANGUAGE sql SECURITY DEFINER AS \'SELECT\''
+    )
+    await dataset.admin.execute(f'ALTER FUNCTION "{dataset.schema}".noop() OWNER TO {member}')
+
+    assert await dataset.refusals() == {Refusal("indirection_security_definer", None, member, "noop()")}
+
+
+@pytest.mark.parametrize("grant", ["TRIGGER", "MAINTAIN", "UPDATE (title)"])
+async def test_a_security_definer_function_owned_by_any_kind_of_writer_refuses(
+    dataset: Dataset, grant: str,
+) -> None:
+    writer = await dataset.role("NOLOGIN")
+    await dataset.admin.execute(f'GRANT {grant} ON "{dataset.schema}".tasks TO {writer}')
+    await dataset.admin.execute(
+        f'CREATE FUNCTION "{dataset.schema}".noop() RETURNS void LANGUAGE sql SECURITY DEFINER AS \'SELECT\''
+    )
+    await dataset.admin.execute(f'ALTER FUNCTION "{dataset.schema}".noop() OWNER TO {writer}')
+
+    assert await dataset.refusals() == {Refusal("indirection_security_definer", None, writer, "noop()")}

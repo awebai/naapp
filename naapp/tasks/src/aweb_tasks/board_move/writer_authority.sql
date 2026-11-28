@@ -17,11 +17,21 @@
 -- A3. The principals are every login role that is neither the owner nor a
 -- superuser, and the owner of every subscription in this database, as which
 -- its apply worker runs. A principal refuses if any role it reaches through
--- pg_auth_members, in any mode, NOINHERIT and NOLOGIN roles included, is the
--- owner, a superuser or pg_write_all_data, owns a dataset table, or holds a
--- write privilege on one, on the table or on any column. And the owner may own
--- no view, no SECURITY DEFINER function or procedure, and no rule but a view's
--- _RETURN, on any relation in this database: each acts with the owner's rights.
+-- pg_auth_members, in any mode, NOINHERIT and NOLOGIN roles included:
+-- - is the owner, a superuser or pg_write_all_data, or owns a dataset table;
+-- - holds a write privilege on a dataset table, on the table or on any column,
+--   or TRIGGER on one: a trigger runs with the rights of whoever next writes;
+-- - holds MAINTAIN on a relation a writer owns: maintenance, and a
+--   materialized view's refresh, run code as the relation's owner.
+--
+-- The writers are the owner, every superuser, every role that owns a dataset
+-- table or holds a write, TRIGGER or MAINTAIN privilege on one, and every
+-- member of a writer, in any mode. No writer may own a view or materialized
+-- view, a SECURITY DEFINER function or procedure, or a rule but a view's
+-- _RETURN: each lets whoever can use it act with its owner's rights. Objects
+-- in pg_catalog and information_schema are not checked: the trust assumption
+-- is that PostgreSQL's shipped objects there write no dataset row. Every other
+-- object, an extension's included, is.
 
 WITH RECURSIVE
 dataset (name) AS (
@@ -43,6 +53,18 @@ principals (oid) AS (
     UNION
     SELECT subowner FROM pg_subscription
     WHERE subdbid = (SELECT oid FROM pg_database WHERE datname = current_database())
+),
+writers (role) AS (
+    -- A table's owner, and every superuser, holds every privilege on it.
+    SELECT pg_roles.oid FROM pg_roles CROSS JOIN tables
+    WHERE tables.oid IS NOT NULL
+      AND (has_table_privilege(pg_roles.oid, tables.oid, 'INSERT, UPDATE, DELETE, TRUNCATE, TRIGGER, MAINTAIN')
+           OR has_any_column_privilege(pg_roles.oid, tables.oid, 'INSERT, UPDATE'))
+    UNION
+    SELECT membership.member FROM writers JOIN pg_auth_members membership ON membership.roleid = writers.role
+),
+checked AS (
+    SELECT oid FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema')
 ),
 reach (principal, role) AS (
     SELECT oid, oid FROM principals
@@ -89,18 +111,32 @@ refusals (code, principal, role, object) AS (
     WHERE tables.oid IS NOT NULL
       AND has_any_column_privilege(reach.role, tables.oid, 'INSERT, UPDATE')
       AND NOT has_table_privilege(reach.role, tables.oid, 'INSERT, UPDATE')
-    -- A3, through what the owner owns
     UNION ALL
-    SELECT 'indirection_view', NULL, NULL, oid::regclass::text FROM pg_class
-    WHERE relkind = 'v' AND relowner = (SELECT oid FROM owner)
+    SELECT 'write_authority_trigger_privilege', principal, role, tables.name
+    FROM reach CROSS JOIN tables
+    WHERE tables.oid IS NOT NULL AND has_table_privilege(reach.role, tables.oid, 'TRIGGER')
     UNION ALL
-    SELECT 'indirection_security_definer', NULL, NULL, oid::regprocedure::text FROM pg_proc
-    WHERE prosecdef AND proowner = (SELECT oid FROM owner)
+    SELECT 'write_authority_maintain_privilege', principal, role, relation.oid::regclass::text
+    FROM reach CROSS JOIN pg_class relation
+    WHERE relation.relkind IN ('r', 'p', 'm')
+      AND relation.relnamespace IN (SELECT oid FROM checked)
+      AND relation.relowner IN (SELECT role FROM writers)
+      AND has_table_privilege(reach.role, relation.oid, 'MAINTAIN')
+    -- A3, through what a writer owns
     UNION ALL
-    SELECT 'indirection_rule', NULL, NULL, rule.rulename
+    SELECT 'indirection_view', NULL, relowner, oid::regclass::text FROM pg_class
+    WHERE relkind IN ('v', 'm')
+      AND relnamespace IN (SELECT oid FROM checked) AND relowner IN (SELECT role FROM writers)
+    UNION ALL
+    SELECT 'indirection_security_definer', NULL, proowner, oid::regprocedure::text FROM pg_proc
+    WHERE prosecdef
+      AND pronamespace IN (SELECT oid FROM checked) AND proowner IN (SELECT role FROM writers)
+    UNION ALL
+    SELECT 'indirection_rule', NULL, relation.relowner, rule.rulename
     FROM pg_rewrite rule JOIN pg_class relation ON relation.oid = rule.ev_class
-    WHERE relation.relowner = (SELECT oid FROM owner)
-      AND NOT (relation.relkind = 'v' AND rule.rulename = '_RETURN')
+    WHERE relation.relnamespace IN (SELECT oid FROM checked)
+      AND relation.relowner IN (SELECT role FROM writers)
+      AND NOT (relation.relkind IN ('v', 'm') AND rule.rulename = '_RETURN')
 )
 SELECT refusals.code, principal.rolname AS principal, reached.rolname AS role, refusals.object
 FROM refusals

@@ -894,6 +894,20 @@ jobs:
           sudo bash scripts/test-egress/install-postgres-client.sh
           echo /usr/lib/postgresql/17/bin >> "$GITHUB_PATH"
 
+      # The writer check's test of a prepared transaction prepares one, and
+      # postgres:17 allows none. The setting takes a server restart.
+      - name: Allow prepared transactions on the test PostgreSQL
+        env:
+          PGPASSWORD: postgres
+        run: |
+          psql -h localhost -U postgres -d postgres -Atc "ALTER SYSTEM SET max_prepared_transactions = 8"
+          docker restart "${{ job.services.postgres.id }}"
+          for _ in $(seq 1 30); do
+            pg_isready -h localhost -U postgres -d postgres && break
+            sleep 2
+          done
+          test "$(psql -h localhost -U postgres -d postgres -Atc 'SHOW max_prepared_transactions')" = 8
+
       - name: Run unit and contract tests
         run: make test
 

@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -40,6 +40,28 @@ class ExportError(ValueError):
 
 class MoveRefused(Exception):
     """A step that would leave the move in a state the procedure does not allow."""
+
+
+@dataclass(frozen=True)
+class Refusal:
+    """One reason the writer check refuses: a code, and the principal, the role it
+    reaches and the object involved, where the code has them."""
+
+    code: str
+    principal: str | None
+    role: str | None
+    object: str | None
+
+    def line(self) -> str:
+        return "|".join(part or "" for part in (self.code, self.principal, self.role, self.object))
+
+
+class CheckRefused(MoveRefused):
+    """The writer check found a writer the move cannot rule out."""
+
+    def __init__(self, refusals: tuple[Refusal, ...]) -> None:
+        self.refusals = refusals
+        super().__init__("\n".join(refusal.line() for refusal in refusals))
 
 
 @dataclass(frozen=True)
@@ -569,15 +591,31 @@ async def discard(target: Target) -> bool:
         return existed
 
 
-NO_WRITERS_SQL = Path(__file__).with_name("no_writers.sql")
 # The dataset's shape and every principal's write authority: one read-only
 # statement whose rows are refusals. The operator's preflight runs this file.
 WRITER_AUTHORITY_SQL = Path(__file__).with_name("writer_authority.sql")
+# The check's first step: the dataset's EXCLUSIVE locks, waiting at most 10 s.
+LOCK_SQL = Path(__file__).with_name("lock.sql")
+# P and C3: the prepared transactions and the other sessions attached to the database.
+SESSIONS_SQL = Path(__file__).with_name("sessions.sql")
 
 
-async def live_listing(target: Target, installation_id: str) -> bytes:
-    """The installation's live dataset, listed as its staging was, once
-    ``no_writers.sql`` has shown that no other session is writing.
+def _postgres_error(failed: Exception) -> BaseException:
+    return failed.__cause__ if isinstance(failed, QueryError) and failed.__cause__ else failed
+
+
+async def live_listing(
+    target: Target, installation_id: str, *, platform_roles: Sequence[str] = (),
+) -> bytes:
+    """The installation's live dataset, listed as its staging was, once the
+    writer check has shown that nothing but the dataset's owner can write it.
+
+    The check runs in the listing's transaction, as the owner, from the files
+    the operator runs with psql: ``lock.sql`` takes the dataset's EXCLUSIVE
+    locks, then ``writer_authority.sql`` reads the shape and write authority
+    and ``sessions.sql`` the prepared transactions and sessions.
+    ``platform_roles`` are the login roles allowed to stay connected. Every
+    refusal is raised together, as ``CheckRefused``.
 
     It reads no grant and starts no app runtime. The installation id comes
     from the approved listing, whose every dataset row carries it, so another
@@ -586,9 +624,20 @@ async def live_listing(target: Target, installation_id: str) -> bytes:
     async with _connected(target.dsn, target.live_schema) as live:
         async with live.transaction() as tx:
             try:
-                await tx.execute(NO_WRITERS_SQL.read_text(encoding="utf-8"))
+                await tx.execute(LOCK_SQL.read_text(encoding="utf-8"))
             except (QueryError, asyncpg.PostgresError) as failed:
-                raise MoveRefused(str(failed.__cause__ or failed)) from failed
+                if isinstance(_postgres_error(failed), asyncpg.LockNotAvailableError):
+                    raise CheckRefused((Refusal("lock_timeout", None, None, None),)) from failed
+                raise
+            await tx.execute(
+                "SELECT set_config('board_move.platform_roles', $1, true)", ",".join(platform_roles)
+            )
+            rows = [
+                *await tx.fetch_all(WRITER_AUTHORITY_SQL.read_text(encoding="utf-8")),
+                *await tx.fetch_all(SESSIONS_SQL.read_text(encoding="utf-8")),
+            ]
+            if rows:
+                raise CheckRefused(tuple(Refusal(**dict(row)) for row in rows))
             return listing(await _read(tx, installation_id, source=False))
 
 

@@ -7,7 +7,8 @@ the registry and grant-read key through which every command that names the
 installation reads the exported team's live grant. Every command reads the
 export the operator loaded into the staging schema. A listing is stored there,
 for the operator to fetch, and the job's log shows only its digest line. Exit
-status 2 is a stop on the export, 3 a step the move refuses.
+status 2 is a stop on the export, 3 a step the move refuses. A refused writer
+check prints one ``refused: code|principal|role|object`` line per refusal.
 """
 
 from __future__ import annotations
@@ -41,9 +42,14 @@ def _parser() -> argparse.ArgumentParser:
     opening.add_argument(
         "--listing-sha256", required=True, help="the SHA-256 of the staging listing the verifier approved"
     )
-    commands.add_parser(
-        "list-live", help="the digest line of the live dataset, once no other session is writing"
-    ).add_argument("--installation-id", required=True, help="the installation the approved listing names")
+    live = commands.add_parser(
+        "list-live", help="the digest line of the live dataset, once the writer check passes"
+    )
+    live.add_argument("--installation-id", required=True, help="the installation the approved listing names")
+    live.add_argument(
+        "--platform-roles", default="",
+        help="comma-separated login roles allowed to stay connected; none unless the platform's evidence names them",
+    )
     commands.add_parser("discard", help="drop the staging schema, export included")
     return parser
 
@@ -72,7 +78,11 @@ async def run(
         print(f"{target.staging_schema} {'dropped' if existed else 'did not exist'}", file=out)
         return 0
     if args.command == "list-live":
-        print(move.digest_line(await move.live_listing(target, args.installation_id)), file=out)
+        platform_roles = tuple(name.strip() for name in args.platform_roles.split(",") if name.strip())
+        # The job log records which sessions the operator allowed.
+        print(f"platform roles: {', '.join(platform_roles) or 'none'}", file=out, flush=True)
+        listed = await move.live_listing(target, args.installation_id, platform_roles=platform_roles)
+        print(move.digest_line(listed), file=out)
         return 0
     if args.command == "list-staged":
         staged = await move.staged_listing(target)
@@ -112,6 +122,10 @@ async def run(
 def main() -> int:
     try:
         return asyncio.run(run(sys.argv[1:], settings=TasksSettings(), out=sys.stdout))
+    except move.CheckRefused as refused:
+        for refusal in refused.refusals:
+            print(f"refused: {refusal.line()}", file=sys.stderr)
+        return 3
     except move.MoveRefused as refused:
         print(f"refused: {refused}", file=sys.stderr)
         return 3

@@ -17,6 +17,7 @@
     button.focus();
   };
   // Revoking narrows authority, so it needs the S4 session and CSRF only, never a passkey.
+  // Enable actions only once their handlers exist, including after a reload.
   for (const button of document.querySelectorAll(".access-revoke")) {
     button.addEventListener("click", async () => {
       if (!window.confirm(button.textContent + "?")) return;
@@ -31,6 +32,7 @@
         failed(button, "The grant could not be revoked. Try again.");
       }
     });
+    button.disabled = false;
   }
   // Removing one agent from an owner-defined role narrows only that agent's access.
   for (const button of document.querySelectorAll(".access-remove-member")) {
@@ -50,5 +52,6 @@
         failed(button, "The agent could not be removed from the role. Try again.");
       }
     });
+    button.disabled = false;
   }
 })();

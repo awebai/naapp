@@ -169,6 +169,24 @@ Then grant `tasks.write` and `tasks.override`; our agents switch to `aw tasks`.
 
    The installation stays read-only.
 
+## The write-authority preflight
+
+`writer_authority.sql` proves that no role but the dataset's owner can write the seven dataset tables. It checks two things:
+- **S, the dataset's shape.** Each table is an ordinary table owned by the owner, with no inheritance parent or child. No foreign key leads from it to a table outside the seven with an ON DELETE or ON UPDATE action that writes.
+- **A3, every principal's write authority.** The principals are every login role that is neither the owner nor a superuser, and every subscription owner in the database. No role a principal reaches through any membership may be the owner, a superuser or `pg_write_all_data`, own a dataset table, or hold a write privilege on one. And the owner owns no view, no SECURITY DEFINER function or procedure, and no rule but a view's.
+
+It is one read-only statement. Each row it returns is a refusal: `code`, `principal`, `role` (the role the principal reaches) and `object`. No row means nothing refuses. It returns only codes and the names of roles and database objects, never a secret.
+
+**The operator runs it on the Tasks database as the owner,** once its exact text and sha256 are approved:
+
+    shasum -a 256 naapp/tasks/src/aweb_tasks/board_move/writer_authority.sql
+    PGOPTIONS='-c search_path=<TASKS_DB_SCHEMA>' psql "service=tasks" -X -At -v ON_ERROR_STOP=1 \
+      -c 'BEGIN READ ONLY' -f naapp/tasks/src/aweb_tasks/board_move/writer_authority.sql -c 'ROLLBACK'
+
+- psql reads the SQL from the file, so none of it is on the command line.
+- A pass prints `BEGIN` and `ROLLBACK` and nothing between them, with exit status 0.
+- A refusal prints one `code|principal|role|object` line for each refusal between them.
+
 ## What the move carries
 
 - **Numbers and the saved task counter** (`task_counters`) are kept. Each task's old id and ref go into its first history entry, `imported`.

@@ -570,6 +570,9 @@ async def discard(target: Target) -> bool:
 
 
 NO_WRITERS_SQL = Path(__file__).with_name("no_writers.sql")
+# The dataset's shape and every principal's write authority: one read-only
+# statement whose rows are refusals. The operator's preflight runs this file.
+WRITER_AUTHORITY_SQL = Path(__file__).with_name("writer_authority.sql")
 
 
 async def live_listing(target: Target, installation_id: str) -> bytes:

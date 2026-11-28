@@ -12,7 +12,7 @@ import hashlib
 import json
 import re
 from collections import Counter
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime
@@ -591,15 +591,31 @@ async def discard(target: Target) -> bool:
         return existed
 
 
-NO_WRITERS_SQL = Path(__file__).with_name("no_writers.sql")
 # The dataset's shape and every principal's write authority: one read-only
 # statement whose rows are refusals. The operator's preflight runs this file.
 WRITER_AUTHORITY_SQL = Path(__file__).with_name("writer_authority.sql")
+# P and C3: the prepared transactions and the other sessions attached to the database.
+SESSIONS_SQL = Path(__file__).with_name("sessions.sql")
+# How long the check waits for a transaction that holds the dataset.
+LOCK_TIMEOUT = "10s"
 
 
-async def live_listing(target: Target, installation_id: str) -> bytes:
-    """The installation's live dataset, listed as its staging was, once
-    ``no_writers.sql`` has shown that no other session is writing.
+def _postgres_error(failed: Exception) -> BaseException:
+    return failed.__cause__ if isinstance(failed, QueryError) and failed.__cause__ else failed
+
+
+async def live_listing(
+    target: Target, installation_id: str, *, platform_roles: Sequence[str] = (),
+) -> bytes:
+    """The installation's live dataset, listed as its staging was, once the
+    writer check has shown that nothing but the dataset's owner can write it.
+
+    The check runs in the listing's transaction, as the owner. It takes the
+    dataset's EXCLUSIVE locks first, waiting at most ``LOCK_TIMEOUT``, and then
+    reads the shape and write authority (``writer_authority.sql``) and the
+    prepared transactions and sessions (``sessions.sql``). ``platform_roles``
+    are the login roles allowed to stay connected. Every refusal is raised
+    together, as ``CheckRefused``.
 
     It reads no grant and starts no app runtime. The installation id comes
     from the approved listing, whose every dataset row carries it, so another
@@ -607,10 +623,27 @@ async def live_listing(target: Target, installation_id: str) -> bytes:
     comparison."""
     async with _connected(target.dsn, target.live_schema) as live:
         async with live.transaction() as tx:
-            try:
-                await tx.execute(NO_WRITERS_SQL.read_text(encoding="utf-8"))
-            except (QueryError, asyncpg.PostgresError) as failed:
-                raise MoveRefused(str(failed.__cause__ or failed)) from failed
+            await tx.execute(f"SET LOCAL lock_timeout = '{LOCK_TIMEOUT}'")
+            # A dataset table that is missing, or is not a table, is the shape check's refusal.
+            present = {row["relname"] for row in await tx.fetch_all(
+                "SELECT relname FROM pg_class WHERE relkind IN ('r', 'p') AND relname = ANY($1::text[])"
+                " AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema())",
+                list(TABLES),
+            )}
+            locked = ", ".join(f"{{{{tables.{table}}}}}" for table in TABLES if table in present)
+            if locked:
+                try:
+                    await tx.execute(f"LOCK TABLE {locked} IN EXCLUSIVE MODE")
+                except (QueryError, asyncpg.PostgresError) as failed:
+                    if isinstance(_postgres_error(failed), asyncpg.LockNotAvailableError):
+                        raise CheckRefused((Refusal("lock_timeout", None, None, None),)) from failed
+                    raise
+            rows = [
+                *await tx.fetch_all(WRITER_AUTHORITY_SQL.read_text(encoding="utf-8")),
+                *await tx.fetch_all(SESSIONS_SQL.read_text(encoding="utf-8"), list(platform_roles)),
+            ]
+            if rows:
+                raise CheckRefused(tuple(Refusal(**dict(row)) for row in rows))
             return listing(await _read(tx, installation_id, source=False))
 
 

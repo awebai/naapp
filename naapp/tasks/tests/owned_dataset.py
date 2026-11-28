@@ -55,9 +55,13 @@ class Dataset:
     database: str
     schema: str
     owner: str
-    owner_dsn: str
+    owner_config: DatabaseConfig
     role: Callable[..., Awaitable[str]]
     login: Callable[[], Awaitable[tuple[str, str]]]
+
+    @property
+    def owner_dsn(self) -> str:
+        return self.owner_config.get_dsn()
 
     @property
     def target(self) -> move.Target:
@@ -122,10 +126,11 @@ async def dataset(test_db_factory: Any) -> AsyncIterator[Dataset]:
         # pgdbm's connect runs CREATE SCHEMA IF NOT EXISTS, which needs CREATE.
         await admin.execute(f'GRANT CONNECT, CREATE ON DATABASE "{database}" TO {owner}')
         await admin.execute(f'ALTER SCHEMA "{schema}" OWNER TO {owner}')
-        owner_dsn = dsn(config, owner, password, database)
-        migrator = AsyncDatabaseManager(DatabaseConfig(
-            connection_string=owner_dsn, schema=schema, min_connections=1, max_connections=1,
-        ))
+        owner_config = DatabaseConfig(
+            host=config.host, port=config.port, database=database, user=owner, password=password,
+            schema=schema, min_connections=1, max_connections=1,
+        )
+        migrator = AsyncDatabaseManager(owner_config)
         await migrator.connect()
         try:
             await AsyncMigrationManager(
@@ -134,10 +139,12 @@ async def dataset(test_db_factory: Any) -> AsyncIterator[Dataset]:
         finally:
             await migrator.disconnect()
         yield Dataset(admin=admin, database=database, schema=schema, owner=owner,
-                      owner_dsn=owner_dsn, role=role, login=login)
+                      owner_config=owner_config, role=role, login=login)
     finally:
         for name in reversed(created):
-            await admin.execute(f"DROP OWNED BY {name} CASCADE")
-            await admin.execute(f"DROP ROLE {name}")
+            # A test may drop a role itself, to leave a session whose role is gone.
+            if await admin.fetch_value("SELECT 1 FROM pg_roles WHERE rolname = $1", name):
+                await admin.execute(f"DROP OWNED BY {name} CASCADE")
+                await admin.execute(f"DROP ROLE {name}")
         # The factory disconnects its pool again before it drops the database.
         await factory_db.connect()

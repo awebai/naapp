@@ -24,7 +24,6 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-import asyncpg
 import httpx
 import pytest
 from aweb.app_manifests import FetchedManifest
@@ -34,9 +33,9 @@ from aweb_naapp.outbox import RetryPolicy
 from aweb_naapp.runtime.event_emit import AppEvents
 from awid.team_ids import team_slug
 from awid_service.testing import REGISTRY_URL, SERVICE_TOKEN, dns_naming
-from pgdbm import AsyncMigrationManager
+from pgdbm import AsyncDatabaseManager
 
-from aweb_tasks.app import MIGRATIONS_PATH, create_app
+from aweb_tasks.app import create_app
 from aweb_tasks.board_move import __main__ as cli
 from aweb_tasks.board_move import move
 from aweb_tasks.config import TasksSettings
@@ -44,6 +43,7 @@ from aweb_tasks.store import TaskStore
 
 from .deployment import TEST_APP_ID, served_manifest, write_key_files
 from .old_board import DOMAIN, NAMESPACE_KEY, OldBoard, old_board
+from .owned_dataset import Dataset
 from .test_store import principal, waiting_on_locks
 
 ORIGIN = "https://tasks.example.test"
@@ -367,12 +367,15 @@ class Deployment:
 
 
 @pytest.fixture
-async def live(tasks_db: Any) -> Any:
-    """The installation's live Tasks tables, as the app's own migrations build them."""
-    await AsyncMigrationManager(
-        tasks_db, migrations_path=str(MIGRATIONS_PATH), module_name="tasks"
-    ).apply_pending_migrations()
-    return tasks_db
+async def live(dataset: Dataset) -> AsyncIterator[AsyncDatabaseManager]:
+    """The installation's live Tasks tables, as the app's own migrations build them:
+    in their own database, apart from the old board's, and run as their non-superuser owner."""
+    db = AsyncDatabaseManager(dataset.owner_config.model_copy(update={"max_connections": 4}))
+    await db.connect()
+    try:
+        yield db
+    finally:
+        await db.disconnect()
 
 
 @pytest.fixture
@@ -796,8 +799,9 @@ async def test_the_rollback_compare_refuses_while_another_session_is_in_a_transa
     async with live.transaction() as other:
         # Inside a transaction that has not touched the dataset tables yet.
         await other.fetch_value("SELECT 1")
-        with pytest.raises(move.MoveRefused, match="other sessions are inside a transaction"):
+        with pytest.raises(move.CheckRefused) as refused:
             await move.live_listing(target(live), installed["installation_id"])
+    assert {refusal.code for refusal in refused.value.refusals} == {"session_owner_in_transaction"}
 
 
 async def test_the_rollback_compare_refuses_while_a_writer_holds_the_dataset(
@@ -811,58 +815,9 @@ async def test_the_rollback_compare_refuses_while_a_writer_holds_the_dataset(
             "UPDATE {{tables.tasks}} SET title = 'Being written' WHERE installation_id = $1",
             installed["installation_id"],
         )
-        with pytest.raises(move.MoveRefused, match="lock timeout"):
+        with pytest.raises(move.CheckRefused) as refused:
             await move.live_listing(target(live), installed["installation_id"])
-
-
-@pytest.mark.parametrize(("membership", "refusal"), [
-    # No statistics privilege at all.
-    ("", "cannot see other sessions"),
-    # A member that does not inherit the privilege sees other users' xact_start as NULL.
-    ("NOINHERIT", "cannot see other sessions"),
-    # An inheriting member sees the other login's transaction.
-    ("INHERIT", "other sessions are inside a transaction"),
-])
-async def test_the_rollback_compare_refuses_unless_it_sees_another_logins_transaction(
-    board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path,
-    membership: str, refusal: str,
-) -> None:
-    await board.create("alice", title="Old")
-    await opened(board, live, deployment, tmp_path)
-    database = await live.fetch_value("SELECT current_database()")
-    config = live.config
-    roles = []
-
-    async def login(options: str = "") -> str:
-        role, password = f"board_move_probe_{uuid4().hex[:10]}", uuid4().hex
-        await live.execute(f"CREATE ROLE {role} LOGIN {options} PASSWORD '{password}'")
-        roles.append(role)
-        # pgdbm's connect runs CREATE SCHEMA IF NOT EXISTS, which needs CREATE.
-        await live.execute(f'GRANT CONNECT, CREATE ON DATABASE "{database}" TO {role}')
-        await live.execute(f'GRANT USAGE ON SCHEMA "{live.schema}" TO {role}')
-        await live.execute(f'GRANT SELECT, UPDATE ON ALL TABLES IN SCHEMA "{live.schema}" TO {role}')
-        return f"postgresql://{role}:{password}@{config.host}:{config.port}/{database}"
-
-    try:
-        observer = await login(membership)
-        if membership:
-            await live.execute(f"GRANT pg_read_all_stats TO {roles[0]}")
-        other = await asyncpg.connect(await login())
-        try:
-            # Another login, inside a transaction that has not touched the dataset tables.
-            pending = other.transaction()
-            await pending.start()
-            await other.fetchval("SELECT 1")
-
-            with pytest.raises(move.MoveRefused, match=refusal):
-                await move.live_listing(move.Target(dsn=observer, live_schema=live.schema), installed["installation_id"])
-            await pending.rollback()
-        finally:
-            await other.close()
-    finally:
-        for role in roles:
-            await live.execute(f"DROP OWNED BY {role}")
-            await live.execute(f"DROP ROLE {role}")
+    assert {refusal.code for refusal in refused.value.refusals} == {"lock_timeout"}
 
 
 async def test_open_refuses_staging_that_changed_after_its_listing_was_approved(

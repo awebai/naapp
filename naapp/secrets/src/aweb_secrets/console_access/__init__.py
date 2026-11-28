@@ -425,7 +425,7 @@ def _conditions(conditions: Conditions | None) -> str:
 def _remove_member(view: AccessView, agent: AgentAccess, role: str) -> str:
     """Containment's remove-role-member: this agent leaves an owner-defined role, others stay."""
     return (
-        '<button type="button" class="access-remove-member secondary" disabled'
+        '<button type="button" class="access-remove-member secondary" autocomplete="off" disabled'
         f' data-role="{escape(role, quote=True)}"'
         f' data-principal-did="{escape(agent.principal_did, quote=True)}"'
         f' data-installation-id="{escape(view.installation_id, quote=True)}">'
@@ -461,7 +461,7 @@ def _grant(view: AccessView, agent: AgentAccess, grant: GrantAccess, *, removabl
         + "</ul>"
         + _conditions(grant.conditions)
         + '<div class="access-actions">'
-        + f'<button type="button" class="access-revoke secondary" disabled'
+        + f'<button type="button" class="access-revoke secondary" autocomplete="off" disabled'
         f' data-grant-id="{escape(grant.grant_id, quote=True)}"'
         f' data-installation-id="{escape(view.installation_id, quote=True)}">'
         f"{escape(revoke_label)}</button>"

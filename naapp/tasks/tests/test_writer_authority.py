@@ -533,8 +533,10 @@ async def test_a_schema_owner_reindexing_a_writers_table_refuses(dataset: Datase
     await _writes(dsn, dataset.schema, "REINDEX SCHEMA maintained")
     assert await dataset.admin.fetch_value("SELECT array_agg(DISTINCT role) FROM maintained.seen") == [writer]
 
+    # The writer's table names a function in its index, which refuses on its own.
     assert await dataset.refusals() == {
         Refusal("write_authority_maintenance_scope", login, login, "maintained"),
+        Refusal("indirection_index_expression", None, writer, "maintained.callback_indexed_idx"),
     }
 
 
@@ -573,6 +575,7 @@ async def test_a_security_definer_function_owned_by_a_maintainer_of_a_writers_ta
 
     assert await dataset.refusals() == {
         Refusal("indirection_security_definer", None, maintainer, "rebuild()"),
+        Refusal("indirection_index_expression", None, dataset.owner, "callback_indexed_idx"),
     }
 
 
@@ -697,7 +700,7 @@ async def test_maintaining_a_parent_of_a_writers_partition_refuses(dataset: Data
 
     refusals = await dataset.refusals()
     assert Refusal("write_authority_maintain_privilege", login, login, "maintained.parent") in refusals
-    assert {refusal.principal for refusal in refusals} == {login}
+    assert {refusal.principal for refusal in refusals} - {None} == {login}
 
 
 async def test_owning_a_parent_of_a_writers_partition_refuses(dataset: Dataset) -> None:
@@ -710,6 +713,8 @@ async def test_owning_a_parent_of_a_writers_partition_refuses(dataset: Dataset) 
 
     assert await dataset.refusals() == {
         Refusal("write_authority_maintenance_owner", login, login, "maintained.parent"),
+        Refusal("indirection_index_expression", None, login, "maintained.parent_indexed_idx"),
+        Refusal("indirection_index_expression", None, writer, "maintained.leaf_indexed_idx"),
     }
 
 
@@ -728,6 +733,8 @@ async def test_a_security_definer_function_owned_by_a_parent_maintainer_refuses(
     # The parent's owner is a writer too, so its routine would refuse as well.
     assert await dataset.refusals() == {
         Refusal("indirection_security_definer", None, maintainer, "maintained.noop()"),
+        Refusal("indirection_index_expression", None, parent_owner, "maintained.parent_indexed_idx"),
+        Refusal("indirection_index_expression", None, writer, "maintained.leaf_indexed_idx"),
     }
 
 
@@ -736,5 +743,175 @@ async def test_maintaining_a_parent_with_no_writers_partition_passes(dataset: Da
     login = await dataset.role("LOGIN")
     await _partitioned_callback(dataset, neighbour, neighbour)
     await dataset.admin.execute(f"GRANT MAINTAIN ON maintained.parent TO {login}")
+
+    assert await dataset.refusals() == set()
+
+
+# --- what maintenance runs as a writer ----------------------------------------
+# ANALYZE, which autovacuum runs with no principal at any time, switches to each
+# relation's owner and evaluates what the relation's definition names. So no
+# writer-owned relation may name code or support outside PostgreSQL's own.
+
+
+async def _maintained_schema(dataset: Dataset) -> None:
+    """Schema maintained, which the owner can use, with maintained.indexed(integer)
+    and maintained.diff(float8, float8): each records the role it runs as in
+    maintained.seen, owned by the owner, and deletes the dataset's tasks."""
+    live = f'"{dataset.schema}"'
+    await dataset.admin.execute("CREATE SCHEMA maintained")
+    await dataset.admin.execute(f"GRANT USAGE ON SCHEMA maintained TO {dataset.owner}")
+    await dataset.admin.execute("CREATE TABLE maintained.seen (role TEXT)")
+    await dataset.admin.execute(f"ALTER TABLE maintained.seen OWNER TO {dataset.owner}")
+    await dataset.admin.execute(
+        "CREATE FUNCTION maintained.record() RETURNS void LANGUAGE plpgsql AS"
+        f" 'BEGIN INSERT INTO maintained.seen VALUES (current_user); DELETE FROM {live}.tasks; END'"
+    )
+    await dataset.admin.execute(
+        "CREATE FUNCTION maintained.indexed(integer) RETURNS integer LANGUAGE plpgsql IMMUTABLE AS"
+        " 'BEGIN PERFORM maintained.record(); RETURN $1; END'"
+    )
+    await dataset.admin.execute(
+        "CREATE FUNCTION maintained.diff(float8, float8) RETURNS float8 LANGUAGE plpgsql IMMUTABLE AS"
+        " 'BEGIN PERFORM maintained.record(); RETURN $1 - $2; END'"
+    )
+
+
+@pytest.mark.parametrize(("table", "named", "code", "object"), [
+    pytest.param(
+        "CREATE TABLE maintained.analysed (id integer)",
+        "CREATE INDEX analysed_expression ON maintained.analysed (maintained.indexed(id))",
+        "indirection_index_expression", "maintained.analysed_expression", id="index expression",
+    ),
+    pytest.param(
+        "CREATE TABLE maintained.analysed (id integer)",
+        "CREATE INDEX analysed_predicate ON maintained.analysed (id) WHERE maintained.indexed(id) > 0",
+        "indirection_index_expression", "maintained.analysed_predicate", id="index predicate",
+    ),
+    pytest.param(
+        "CREATE TABLE maintained.analysed (id integer)",
+        "CREATE STATISTICS maintained.analysed_statistics ON (maintained.indexed(id)) FROM maintained.analysed",
+        "indirection_statistics_expression", "maintained.analysed_statistics", id="statistics expression",
+    ),
+    pytest.param(
+        "CREATE TYPE maintained.span AS RANGE (subtype = float8, subtype_diff = maintained.diff);"
+        " CREATE TABLE maintained.analysed (id integer, span maintained.span)",
+        "UPDATE maintained.analysed SET span = maintained.span(id, id + 1)",
+        "indirection_column_type", "maintained.analysed.span", id="range subtype",
+    ),
+])
+async def test_analyze_runs_what_a_writers_relation_names_as_its_owner_and_refuses(
+    dataset: Dataset, table: str, named: str, code: str, object: str,
+) -> None:
+    await _maintained_schema(dataset)
+    await dataset.admin.execute(table)
+    await dataset.admin.execute("INSERT INTO maintained.analysed (id) SELECT generate_series(1, 100)")
+    await dataset.admin.execute(named)
+    await dataset.admin.execute(f"ALTER TABLE maintained.analysed OWNER TO {dataset.owner}")
+    await dataset.admin.execute("TRUNCATE maintained.seen")
+
+    # Run by the superuser, as autovacuum's is, ANALYZE runs the named code as the table's owner.
+    await dataset.admin.execute("ANALYZE maintained.analysed")
+    assert await dataset.admin.fetch_value("SELECT array_agg(DISTINCT role) FROM maintained.seen") == [
+        dataset.owner
+    ]
+
+    assert await dataset.refusals() == {Refusal(code, None, dataset.owner, object)}
+
+
+@pytest.mark.parametrize(("statements", "code", "object"), [
+    pytest.param(
+        ["CREATE TYPE maintained.mood AS ENUM ('calm')",
+         "CREATE TABLE maintained.analysed (mood maintained.mood)"],
+        "indirection_column_type", "maintained.analysed.mood", id="column type",
+    ),
+    pytest.param(
+        ['CREATE COLLATION maintained.ordered FROM "C"',
+         "CREATE TABLE maintained.analysed (label text COLLATE maintained.ordered)"],
+        "indirection_collation", "maintained.analysed.label", id="column collation",
+    ),
+    pytest.param(
+        ['CREATE COLLATION maintained.ordered FROM "C"',
+         "CREATE TABLE maintained.analysed (label text)",
+         "CREATE INDEX analysed_ordered ON maintained.analysed (label COLLATE maintained.ordered)"],
+        "indirection_collation", "maintained.analysed_ordered", id="index collation",
+    ),
+    pytest.param(
+        ["CREATE OPERATOR CLASS maintained.int4_order FOR TYPE int4 USING btree AS"
+         " OPERATOR 1 <, OPERATOR 2 <=, OPERATOR 3 =, OPERATOR 4 >=, OPERATOR 5 >,"
+         " FUNCTION 1 btint4cmp(int4, int4)",
+         "CREATE TABLE maintained.analysed (id integer)",
+         "CREATE INDEX analysed_ordered ON maintained.analysed (id maintained.int4_order)"],
+        "indirection_operator_class", "maintained.analysed_ordered", id="operator class",
+    ),
+    pytest.param(
+        ["CREATE ACCESS METHOD writer_check_heap TYPE TABLE HANDLER heap_tableam_handler",
+         "CREATE TABLE maintained.analysed (id integer) USING writer_check_heap"],
+        "indirection_access_method", "maintained.analysed", id="table access method",
+    ),
+])
+async def test_a_writers_relation_naming_support_outside_postgresql_refuses(
+    dataset: Dataset, statements: list[str], code: str, object: str,
+) -> None:
+    await _maintained_schema(dataset)
+    for statement in statements:
+        await dataset.admin.execute(statement)
+    await dataset.admin.execute(f"ALTER TABLE maintained.analysed OWNER TO {dataset.owner}")
+
+    assert await dataset.refusals() == {Refusal(code, None, dataset.owner, object)}
+
+
+async def test_a_writers_index_on_an_access_method_outside_postgresql_refuses(dataset: Dataset) -> None:
+    await _maintained_schema(dataset)
+    # contrib's bloom, an index access method an extension adds.
+    await dataset.admin.execute("CREATE EXTENSION bloom SCHEMA maintained")
+    await dataset.admin.execute("CREATE TABLE maintained.analysed (id integer)")
+    await dataset.admin.execute("CREATE INDEX analysed_custom ON maintained.analysed USING bloom (id)")
+    await dataset.admin.execute(f"ALTER TABLE maintained.analysed OWNER TO {dataset.owner}")
+
+    # The extension's operator class for it is outside pg_catalog too.
+    assert await dataset.refusals() == {
+        Refusal("indirection_access_method", None, dataset.owner, "maintained.analysed_custom"),
+        Refusal("indirection_operator_class", None, dataset.owner, "maintained.analysed_custom"),
+    }
+
+
+@pytest.mark.parametrize("descent", ["partition", "inheritance grandchild"])
+async def test_a_foreign_table_below_a_writers_relation_refuses(dataset: Dataset, descent: str) -> None:
+    # ANALYZE of the writer's relation samples it through its wrapper, as the writer.
+    await _maintained_schema(dataset)
+    await dataset.admin.execute("CREATE FOREIGN DATA WRAPPER writer_check_wrapper")
+    await dataset.admin.execute("CREATE SERVER writer_check_server FOREIGN DATA WRAPPER writer_check_wrapper")
+    if descent == "partition":
+        await dataset.admin.execute("CREATE TABLE maintained.parent (id integer) PARTITION BY RANGE (id)")
+        await dataset.admin.execute(
+            "CREATE FOREIGN TABLE maintained.remote PARTITION OF maintained.parent"
+            " FOR VALUES FROM (0) TO (10) SERVER writer_check_server"
+        )
+    else:
+        # The child between them is no writer's, so only the descent from the parent finds it.
+        bystander = await dataset.role("NOLOGIN")
+        await dataset.admin.execute("CREATE TABLE maintained.parent (id integer)")
+        await dataset.admin.execute("CREATE TABLE maintained.child () INHERITS (maintained.parent)")
+        await dataset.admin.execute(f"ALTER TABLE maintained.child OWNER TO {bystander}")
+        await dataset.admin.execute(
+            "CREATE FOREIGN TABLE maintained.remote () INHERITS (maintained.child) SERVER writer_check_server"
+        )
+    await dataset.admin.execute(f"ALTER TABLE maintained.parent OWNER TO {dataset.owner}")
+
+    assert await dataset.refusals() == {
+        Refusal("indirection_foreign_descendant", None, dataset.owner, "maintained.remote"),
+    }
+
+
+async def test_a_writers_plain_indexes_and_statistics_on_built_in_types_pass(dataset: Dataset) -> None:
+    await _maintained_schema(dataset)
+    await dataset.admin.execute("CREATE TABLE maintained.plain (id integer, label text, at timestamptz)")
+    await dataset.admin.execute("CREATE INDEX ON maintained.plain (id)")
+    await dataset.admin.execute("CREATE INDEX ON maintained.plain (label, at)")
+    await dataset.admin.execute("CREATE STATISTICS maintained.plain_statistics (dependencies) ON id, label FROM maintained.plain")
+    await dataset.admin.execute("CREATE TABLE maintained.parted (id integer) PARTITION BY RANGE (id)")
+    await dataset.admin.execute("CREATE TABLE maintained.part PARTITION OF maintained.parted FOR VALUES FROM (0) TO (10)")
+    for table in ("plain", "parted", "part"):
+        await dataset.admin.execute(f"ALTER TABLE maintained.{table} OWNER TO {dataset.owner}")
 
     assert await dataset.refusals() == set()

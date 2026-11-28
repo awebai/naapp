@@ -36,10 +36,22 @@
 -- a writer, in any mode, and every role that can maintain a relation a writer
 -- owns, as above. No writer may own a view or materialized
 -- view, a SECURITY DEFINER function or procedure, or a rule but a view's
--- _RETURN: each lets whoever can use it act with its owner's rights. Objects
--- in pg_catalog and information_schema are not checked: the trust assumption
--- is that PostgreSQL's shipped objects there write no dataset row. Every other
--- object, an extension's included, is.
+-- _RETURN: each lets whoever can use it act with its owner's rights.
+--
+-- Nor may a writer own a relation whose maintenance runs anything but
+-- PostgreSQL's own code. ANALYZE, which autovacuum runs at any time with no
+-- principal, acts as the relation's owner: it evaluates the index expressions
+-- and predicates and the statistics expressions, uses the columns' types and
+-- collations and the indexes' operator classes and collations, calls the
+-- access methods, and samples any foreign table below the relation through its
+-- wrapper. So a writer's relation may have no expression or partial index and
+-- no expression statistics; no column type, collation or operator class
+-- outside pg_catalog; no table or index access method PostgreSQL does not
+-- ship; and no foreign partition or inheritance descendant.
+--
+-- Objects in pg_catalog and information_schema are not checked: the trust
+-- assumption is that PostgreSQL's shipped objects there write no dataset row.
+-- Every other object, an extension's included, is.
 
 WITH RECURSIVE
 dataset (name) AS (
@@ -107,6 +119,13 @@ maintained (oid, relnamespace, relowner) AS (
     WHERE relkind IN ('r', 'p', 'm')
       AND relnamespace IN (SELECT oid FROM checked)
       AND relowner IN (SELECT role FROM writers)
+),
+-- Every relation below a maintained one, through partitions and inheritance.
+descendants (root, oid) AS (
+    SELECT oid, oid FROM maintained
+    UNION
+    SELECT descendants.root, pg_inherits.inhrelid
+    FROM descendants JOIN pg_inherits ON pg_inherits.inhparent = descendants.oid
 ),
 reach (principal, role) AS (
     SELECT oid, oid FROM principals
@@ -189,6 +208,67 @@ refusals (code, principal, role, object) AS (
     WHERE relation.relnamespace IN (SELECT oid FROM checked)
       AND relation.relowner IN (SELECT role FROM writers)
       AND NOT (relation.relkind IN ('v', 'm') AND rule.rulename = '_RETURN')
+    -- A3, through what maintenance runs as a writer
+    UNION ALL
+    SELECT 'indirection_index_expression', NULL, maintained.relowner, idx.indexrelid::regclass::text
+    FROM maintained JOIN pg_index idx ON idx.indrelid = maintained.oid
+    WHERE idx.indexprs IS NOT NULL OR idx.indpred IS NOT NULL
+    UNION ALL
+    SELECT 'indirection_statistics_expression', NULL, maintained.relowner,
+           format('%I.%I', namespace.nspname, statistics.stxname)
+    FROM maintained
+    JOIN pg_statistic_ext statistics ON statistics.stxrelid = maintained.oid
+    JOIN pg_namespace namespace ON namespace.oid = statistics.stxnamespace
+    WHERE statistics.stxexprs IS NOT NULL
+    UNION ALL
+    SELECT 'indirection_column_type', NULL, maintained.relowner,
+           format('%s.%I', maintained.oid::regclass, attribute.attname)
+    FROM maintained
+    JOIN pg_attribute attribute
+        ON attribute.attrelid = maintained.oid AND attribute.attnum > 0 AND NOT attribute.attisdropped
+    JOIN pg_type column_type ON column_type.oid = attribute.atttypid
+    WHERE column_type.typnamespace <> 'pg_catalog'::regnamespace
+    UNION ALL
+    SELECT 'indirection_collation', NULL, maintained.relowner,
+           format('%s.%I', maintained.oid::regclass, attribute.attname)
+    FROM maintained
+    JOIN pg_attribute attribute
+        ON attribute.attrelid = maintained.oid AND attribute.attnum > 0 AND NOT attribute.attisdropped
+    JOIN pg_collation named ON named.oid = attribute.attcollation
+    WHERE named.collnamespace <> 'pg_catalog'::regnamespace
+    UNION ALL
+    SELECT 'indirection_collation', NULL, maintained.relowner, idx.indexrelid::regclass::text
+    FROM maintained JOIN pg_index idx ON idx.indrelid = maintained.oid
+    WHERE EXISTS (
+        SELECT 1 FROM unnest(idx.indcollation) used (oid)
+        JOIN pg_collation named ON named.oid = used.oid
+        WHERE named.collnamespace <> 'pg_catalog'::regnamespace
+    )
+    UNION ALL
+    SELECT 'indirection_operator_class', NULL, maintained.relowner, idx.indexrelid::regclass::text
+    FROM maintained JOIN pg_index idx ON idx.indrelid = maintained.oid
+    WHERE EXISTS (
+        SELECT 1 FROM unnest(idx.indclass) used (oid)
+        JOIN pg_opclass opclass ON opclass.oid = used.oid
+        WHERE opclass.opcnamespace <> 'pg_catalog'::regnamespace
+    )
+    UNION ALL
+    SELECT 'indirection_access_method', NULL, maintained.relowner, relation.oid::regclass::text
+    FROM maintained
+    CROSS JOIN LATERAL (
+        SELECT maintained.oid
+        UNION ALL
+        SELECT indexrelid FROM pg_index WHERE indrelid = maintained.oid
+    ) used (oid)
+    JOIN pg_class relation ON relation.oid = used.oid
+    JOIN pg_am method ON method.oid = relation.relam
+    WHERE method.amname NOT IN ('heap', 'btree', 'hash', 'gist', 'gin', 'spgist', 'brin')
+    UNION ALL
+    SELECT 'indirection_foreign_descendant', NULL, maintained.relowner, relation.oid::regclass::text
+    FROM maintained
+    JOIN descendants ON descendants.root = maintained.oid
+    JOIN pg_class relation ON relation.oid = descendants.oid
+    WHERE relation.relkind = 'f'
 )
 SELECT refusals.code, principal.rolname AS principal, reached.rolname AS role, refusals.object
 FROM refusals

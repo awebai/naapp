@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 import os
-import secrets
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -34,6 +33,7 @@ from aweb_naapp_testing.lane_team import (
     install_app,
     prepare_namespace,
 )
+from manifest_config import TEST_EMIT_SEED_HEX, TEST_GRANT_SEED_HEX
 from playwright.sync_api import Error, sync_playwright
 
 # The Playwright server the lane's browser container runs: the driver of the
@@ -120,16 +120,15 @@ def folio_env(lane: ComposeLane, deployment: Deployment) -> dict[str, str]:
 def write_folio_files(lane: ComposeLane) -> None:
     """Each deployment's env file and app keys. Compose checks every service's
     env file when any service starts, so they are written before the lane's
-    first service."""
+    first service. The keys are the suite's test seeds, whose public keys
+    manifest_config.served_manifest expects in the served manifest."""
     keys = lane.runtime / "folio-keys"
     keys.mkdir()
     keys.chmod(0o755)  # mkdir's mode is masked by the launching umask
     for deployment in DEPLOYMENTS:
-        for purpose in ("emit", "grant-read"):
-            key = secrets.token_hex(32)
-            lane.redact(key)
+        for purpose, seed in (("emit", TEST_EMIT_SEED_HEX), ("grant-read", TEST_GRANT_SEED_HEX)):
             path = keys / f"{deployment.service}-{purpose}.hex"
-            path.write_text(key)
+            path.write_text(seed)
             path.chmod(0o644)
         (lane.runtime / f"{deployment.service}.env").write_text(
             "".join(f"{k}={v}\n" for k, v in folio_env(lane, deployment).items())

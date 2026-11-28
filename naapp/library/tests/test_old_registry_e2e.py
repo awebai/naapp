@@ -13,7 +13,7 @@ from aweb_naapp_testing.lane_team import (
     assert_aw_success,
     aw_request,
 )
-from test_e2e_smoke import PRE_STATUS_REGISTRY, installed_team
+from library_lane import PRE_STATUS_REGISTRY, installed_team
 
 pytestmark = pytest.mark.e2e
 

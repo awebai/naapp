@@ -24,8 +24,8 @@ from aweb_naapp_testing.lane_team import (
     team_key_seed,
     uninstall_app,
 )
+from library_lane import connected_team, installed_team
 from nacl.signing import SigningKey
-from test_e2e_smoke import connected_team, installed_team
 from test_library_contract_e2e import _blueprint_payload
 
 pytestmark = pytest.mark.e2e

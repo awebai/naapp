@@ -13,16 +13,16 @@ import pytest_asyncio
 from aweb_naapp.runtime.team_auth import Principal, record_observed_principal
 from aweb_naapp_testing.databases import TEST_SCHEMA, SchemaDatabases
 from fastapi.testclient import TestClient
-from manifest_config import TEST_GRANT_SEED_HEX
-from pgdbm import AsyncDatabaseManager, AsyncMigrationManager, DatabaseConfig
-from pgdbm.testing import AsyncTestDatabase, DatabaseTestConfig
-from test_e2e_smoke import (  # noqa: F401
+from library_lane import (  # noqa: F401
     library,
     library_lane,
     library_on_pre_status_registry,
     library_without_awid_service_token,
     namespace,
 )
+from manifest_config import TEST_GRANT_SEED_HEX
+from pgdbm import AsyncDatabaseManager, AsyncMigrationManager, DatabaseConfig
+from pgdbm.testing import AsyncTestDatabase, DatabaseTestConfig
 
 _MIGRATIONS = Path(__file__).resolve().parent.parent / "src" / "library" / "migrations"
 

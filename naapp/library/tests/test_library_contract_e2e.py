@@ -18,7 +18,7 @@ from aweb_naapp_testing.lane_team import (
     aw_request,
     found_team,
 )
-from test_e2e_smoke import LibraryLane, installed_team
+from library_lane import LibraryLane, installed_team
 
 from library.blueprint import (
     ParsedBlueprint,

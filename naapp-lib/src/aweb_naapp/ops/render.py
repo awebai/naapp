@@ -14,13 +14,16 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import subprocess
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, fields
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 API_BASE = "https://api.render.com/v1"
@@ -38,6 +41,13 @@ FAILURE_STATUSES = {"build_failed", "update_failed", "pre_deploy_failed", "cance
 TERMINAL_STATUSES = {"live", "deactivated", *FAILURE_STATUSES}
 KNOWN_STATUSES = {*IN_PROGRESS_STATUSES, *TERMINAL_STATUSES}
 ROLLBACK_ARTIFACT_STATUSES = {"live", "deactivated"}
+SUSPENDED_STATES = {"suspended", "not_suspended"}
+JOB_RE = re.compile(r"^job-[0-9a-z]{20}$")
+JOB_TERMINAL_STATUSES = {"succeeded", "failed", "canceled"}
+JOB_STATUSES = {"pending", "running", *JOB_TERMINAL_STATUSES}
+# Render indexes a job's log after the job ends; an empty first read is retried.
+JOB_LOG_ATTEMPTS = 6
+JOB_LOG_MAX_PAGES = 50
 HEALTH_TIMEOUT_SECONDS = 20.0
 # The deploy check names itself: Cloudflare on a public zone refuses Python's default
 # User-Agent with its browser-signature 403, which would hide a healthy service and
@@ -51,6 +61,25 @@ GIT_REPOSITORY_ENV = frozenset(
 
 class OpsError(RuntimeError):
     pass
+
+
+class RenderAPIError(OpsError):
+    """The Render API answered with an HTTP error status."""
+
+    def __init__(self, method: str, path: str, status: int, message: str) -> None:
+        super().__init__(f"Render API {method} {path} failed with HTTP {status}")
+        self.status = status
+        self.message = message
+
+
+def _error_message(exc: HTTPError) -> str:
+    """Render's own error message, if its error body carries one."""
+    try:
+        body = json.loads(exc.read().decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return ""
+    message = body.get("message") if isinstance(body, dict) else None
+    return message[:500] if isinstance(message, str) else ""
 
 
 def _relative_inside_repository(value: str, *, allow_root: bool) -> bool:
@@ -142,11 +171,13 @@ class RenderClient:
         )
         try:
             with urlopen(request, timeout=self._timeout) as response:
-                return json.loads(response.read().decode("utf-8"))
+                body = response.read()
         except HTTPError as exc:
-            raise OpsError(f"Render API {method} {path} failed with HTTP {exc.code}") from exc
+            raise RenderAPIError(method, path, exc.code, _error_message(exc)) from exc
         except (URLError, TimeoutError) as exc:
             raise OpsError(f"Render API {method} {path} failed: {type(exc).__name__}") from exc
+        # Suspend and resume answer 202 with no body.
+        return json.loads(body.decode("utf-8")) if body.strip() else None
 
     def service(self, service_id: str) -> dict[str, Any]:
         return _unwrap(self.request("GET", f"/services/{service_id}"), "service")
@@ -174,6 +205,34 @@ class RenderClient:
             "deploy",
         )
 
+    def suspend(self, service_id: str) -> None:
+        self.request("POST", f"/services/{service_id}/suspend")
+
+    def resume(self, service_id: str) -> None:
+        self.request("POST", f"/services/{service_id}/resume")
+
+    def create_job(self, service_id: str, start_command: str) -> dict[str, Any]:
+        return self.request("POST", f"/services/{service_id}/jobs", {"startCommand": start_command})
+
+    def job(self, service_id: str, job_id: str) -> dict[str, Any]:
+        return self.request("GET", f"/services/{service_id}/jobs/{job_id}")
+
+    def cancel_job(self, service_id: str, job_id: str) -> dict[str, Any]:
+        return self.request("POST", f"/services/{service_id}/jobs/{job_id}/cancel")
+
+    def logs(self, owner_id: str, resource: str, *, start_time: str, end_time: str) -> dict[str, Any]:
+        query = urlencode(
+            {
+                "ownerId": owner_id,
+                "resource": resource,
+                "startTime": start_time,
+                "endTime": end_time,
+                "direction": "forward",
+                "limit": 100,
+            }
+        )
+        return self.request("GET", f"/logs?{query}")
+
 
 def _unwrap(value: Any, key: str) -> Any:
     if isinstance(value, dict) and key in value:
@@ -199,7 +258,10 @@ def safe_deploy(deploy: dict[str, Any]) -> dict[str, Any]:
 _ABSENT = object()
 
 
-def validate_service(service: dict[str, Any], config: ProductionConfig) -> None:
+def validate_service(
+    service: dict[str, Any], config: ProductionConfig, *, suspended: str | None = "not_suspended"
+) -> None:
+    """Fail closed unless the service is the pinned one; ``suspended=None`` accepts either state."""
     details = service.get("serviceDetails") or {}
     docker = details.get("envSpecificDetails") or {}
     # An absent rootDir and an empty one both mean the repository root; null does not.
@@ -230,6 +292,12 @@ def validate_service(service: dict[str, Any], config: ProductionConfig) -> None:
         "suspended": "not_suspended",
         "autoDeploy": "no",
     }
+    if suspended is None:
+        if observed["suspended"] not in SUSPENDED_STATES:
+            raise OpsError(f"Render service has an unknown suspended state {observed['suspended']!r}")
+        del expected["suspended"]
+    else:
+        expected["suspended"] = suspended
     mismatches = [
         f"{key} (observed {observed[key]!r}, expected {expected[key]!r})"
         for key in expected
@@ -412,20 +480,11 @@ def wait_for_deploy(
 def check_health(config: ProductionConfig) -> dict[str, int]:
     """GET the health path on the service's origin and public URLs; each must answer 200."""
     results: dict[str, int] = {}
-    for base in dict.fromkeys((config.origin_url, config.public_url)):
-        url = f"{base.rstrip('/')}{config.health_path}"
-        try:
-            request = Request(
-                url,
-                method="GET",
-                headers={"Accept": "application/json", "User-Agent": HEALTH_USER_AGENT},
-            )
-            with urlopen(request, timeout=HEALTH_TIMEOUT_SECONDS) as response:
-                status = response.status
-        except HTTPError as exc:
-            status = exc.code
-        except (URLError, TimeoutError, OSError) as exc:
-            raise OpsError(f"health request to {url} failed: {type(exc).__name__}") from exc
+    for url in _service_urls(config):
+        answer = probe(url)
+        status = answer["status"]
+        if status is None:
+            raise OpsError(f"health request to {url} failed: {answer['error']}")
         if status != 200:
             raise OpsError(f"health at {url} answered HTTP {status}")
         results[url] = status
@@ -569,3 +628,273 @@ def rollback(
         current_live(client.deploys(config.service_id)), deploy_id=created_id, commit=rollback_commit
     )
     return {"rollback_deploy": safe_deploy(finished), "health": check_health(config)}
+
+
+def probe(url: str) -> dict[str, Any]:
+    """What ``url`` answers: its status, content type and, if JSON, its body."""
+    request = Request(
+        url, method="GET", headers={"Accept": "application/json", "User-Agent": HEALTH_USER_AGENT}
+    )
+    try:
+        with urlopen(request, timeout=HEALTH_TIMEOUT_SECONDS) as response:
+            status, headers, data = response.status, response.headers, response.read()
+    except HTTPError as exc:
+        status, headers, data = exc.code, exc.headers, exc.read()
+    except (URLError, TimeoutError, OSError) as exc:
+        return {"status": None, "content_type": "", "body": None, "error": type(exc).__name__}
+    content_type = (headers.get("Content-Type") or "").split(";", 1)[0].strip()
+    body = None
+    if content_type == "application/json":
+        try:
+            body = json.loads(data.decode("utf-8"))
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            body = None
+    return {"status": status, "content_type": content_type, "body": body}
+
+
+def app_identity(answer: dict[str, Any], config: ProductionConfig) -> dict[str, Any] | None:
+    """The pinned service's identity in a /live answer, or None when the answer is not the app.
+
+    A page Render serves in the app's place, whatever its status, carries no
+    deployment naming the pinned service, so it is never taken for the app."""
+    body = answer.get("body")
+    if answer.get("status") != 200 or not isinstance(body, dict):
+        return None
+    deployment, build = body.get("deployment"), body.get("build")
+    if not isinstance(deployment, dict) or not isinstance(build, dict):
+        return None
+    if deployment.get("service_id") != config.service_id or not isinstance(build.get("git_sha"), str):
+        return None
+    return {"status": 200, "service_id": config.service_id, "git_sha": build["git_sha"]}
+
+
+def _service_urls(config: ProductionConfig) -> list[str]:
+    bases = dict.fromkeys((config.origin_url, config.public_url))
+    return [f"{base.rstrip('/')}{config.health_path}" for base in bases]
+
+
+def _safe_service(service: dict[str, Any]) -> dict[str, Any]:
+    return {"id": service.get("id"), "name": service.get("name"), "suspended": service.get("suspended")}
+
+
+def _await_suspended_state(
+    client: RenderClient,
+    config: ProductionConfig,
+    state: str,
+    *,
+    timeout_seconds: float,
+    interval_seconds: float,
+    sleep: Callable[[float], None],
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        service = client.service(config.service_id)
+        validate_service(service, config, suspended=None)
+        if service.get("suspended") == state:
+            return service
+        if time.monotonic() >= deadline:
+            raise OpsError(f"Render service did not read back {state!r} within {timeout_seconds}s")
+        sleep(interval_seconds)
+
+
+def suspend(
+    client: RenderClient,
+    config: ProductionConfig,
+    *,
+    timeout_seconds: float = 300,
+    interval_seconds: float = 5.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Suspend the pinned service, read it back, and record what its URLs then serve."""
+    validate_service(client.service(config.service_id), config)
+    live = current_live(client.deploys(config.service_id))
+    client.suspend(config.service_id)
+    service = _await_suspended_state(
+        client, config, "suspended",
+        timeout_seconds=timeout_seconds, interval_seconds=interval_seconds, sleep=sleep,
+    )
+    while_suspended = {}
+    for url in _service_urls(config):
+        answer = probe(url)
+        while_suspended[url] = {
+            "status": answer["status"],
+            "content_type": answer["content_type"],
+            "serves_app": app_identity(answer, config) is not None,
+        }
+    return {
+        "service": _safe_service(service),
+        "live_deploy": safe_deploy(live),
+        "while_suspended": while_suspended,
+    }
+
+
+def _resumed(
+    client: RenderClient, config: ProductionConfig, commit: str
+) -> tuple[dict[str, Any], list[dict[str, Any]], dict[str, Any]] | str:
+    """The resumed service, its deploys and the app's answers, or what is not yet true."""
+    service = client.service(config.service_id)
+    validate_service(service, config, suspended=None)
+    if service.get("suspended") != "not_suspended":
+        return "Render service did not read back 'not_suspended'"
+    deploys = client.deploys(config.service_id)
+    try:
+        live = current_live(deploys)
+    except OpsError as exc:
+        return str(exc)
+    if deploy_commit(live) != commit:
+        return f"Render's live deploy {live.get('id')} is commit {deploy_commit(live)}, expected {commit}"
+    app = {}
+    for url in _service_urls(config):
+        identity = app_identity(probe(url), config)
+        if identity is None:
+            return f"{url} does not serve the app"
+        if identity["git_sha"] != commit:
+            return f"{url} serves the app at git_sha {identity['git_sha']}, expected {commit}"
+        app[url] = identity
+    return service, deploys, app
+
+
+def resume(
+    client: RenderClient,
+    config: ProductionConfig,
+    *,
+    commit: str,
+    timeout_seconds: float = 900,
+    interval_seconds: float = 10.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Resume the pinned service and wait until it serves the app at ``commit``.
+
+    It records whether Render made a new deploy to resume, rather than assume
+    either way."""
+    require_commit(commit)
+    validate_service(client.service(config.service_id), config, suspended="suspended")
+    before = client.deploys(config.service_id)
+    live_before = next((deploy for deploy in before if deploy.get("status") == "live"), None)
+    client.resume(config.service_id)
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        outcome = _resumed(client, config, commit)
+        if not isinstance(outcome, str):
+            break
+        if time.monotonic() >= deadline:
+            raise OpsError(f"resume did not complete within {timeout_seconds}s: {outcome}")
+        sleep(interval_seconds)
+    service, deploys, app = outcome
+    known = {deploy.get("id") for deploy in before}
+    new_deploys = [safe_deploy(deploy) for deploy in deploys if deploy.get("id") not in known]
+    return {
+        "service": _safe_service(service),
+        "live_deploy_before": safe_deploy(live_before) if live_before else None,
+        "live_deploy": safe_deploy(current_live(deploys)),
+        "redeployed": bool(new_deploys),
+        "new_deploys": new_deploys,
+        "app": app,
+    }
+
+
+def start_command(argv: list[str]) -> str:
+    """The one string Render runs as a job's command; it splits back into ``argv``."""
+    return shlex.join(argv)
+
+
+def _safe_job(job: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": job.get("id"),
+        "status": job.get("status"),
+        "plan_id": job.get("planId"),
+        "created_at": job.get("createdAt"),
+        "started_at": job.get("startedAt"),
+        "finished_at": job.get("finishedAt"),
+    }
+
+
+def _job_status(job: dict[str, Any]) -> str:
+    status = str(job.get("status") or "")
+    if status not in JOB_STATUSES:
+        raise OpsError(f"refusing unknown one-off job status {status!r}")
+    return status
+
+
+def _iso(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def job_log(
+    client: RenderClient, owner_id: str, job_id: str, *, start_time: str
+) -> list[dict[str, Any]]:
+    lines: list[dict[str, Any]] = []
+    start, end = start_time, _iso(datetime.now(UTC) + timedelta(minutes=1))
+    for _page in range(JOB_LOG_MAX_PAGES):
+        page = client.logs(owner_id, job_id, start_time=start, end_time=end)
+        lines.extend(
+            {"timestamp": entry.get("timestamp"), "message": entry.get("message")}
+            for entry in page.get("logs") or []
+        )
+        if not page.get("hasMore"):
+            return lines
+        start, end = page["nextStartTime"], page["nextEndTime"]
+    raise OpsError(f"job log has more than {JOB_LOG_MAX_PAGES} pages")
+
+
+def run_job(
+    client: RenderClient,
+    config: ProductionConfig,
+    argv: list[str],
+    *,
+    timeout_seconds: float = 600,
+    interval_seconds: float = 10.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> dict[str, Any]:
+    """Start a one-off job on the pinned service, follow it to a terminal status, read its log.
+
+    A job still pending or running at the timeout is canceled, so it cannot start
+    later on its own. The outcome is the job's terminal status, ``refused_at_create``,
+    ``pending_at_timeout`` or ``running_at_timeout``."""
+    service = client.service(config.service_id)
+    validate_service(service, config, suspended=None)
+    owner_id = service.get("ownerId")
+    if not isinstance(owner_id, str) or not owner_id:
+        raise OpsError("Render service has no ownerId to read job logs with")
+    command = start_command(argv)
+    result: dict[str, Any] = {
+        "argv": argv,
+        "start_command": command,
+        "service_suspended": service.get("suspended"),
+    }
+    log_start = _iso(datetime.now(UTC) - timedelta(minutes=1))
+    try:
+        created = client.create_job(config.service_id, command)
+    except RenderAPIError as exc:
+        return {
+            **result,
+            "outcome": "refused_at_create",
+            "refusal": {"http_status": exc.status, "message": exc.message},
+            "log": [],
+        }
+    job_id = str(created.get("id") or "")
+    if not JOB_RE.fullmatch(job_id):
+        raise OpsError("Render created a job with an invalid job ID")
+    if created.get("startCommand") != command:
+        raise OpsError("Render created a job for a different command")
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        job = client.job(config.service_id, job_id)
+        status = _job_status(job)
+        if status in JOB_TERMINAL_STATUSES:
+            outcome = status
+            break
+        if time.monotonic() >= deadline:
+            outcome = f"{status}_at_timeout"
+            client.cancel_job(config.service_id, job_id)
+            job = client.job(config.service_id, job_id)
+            _job_status(job)
+            break
+        sleep(interval_seconds)
+    attempts = JOB_LOG_ATTEMPTS if outcome in {"succeeded", "failed", "running_at_timeout"} else 1
+    for attempt in range(attempts):
+        log = job_log(client, owner_id, job_id, start_time=log_start)
+        if log or attempt == attempts - 1:
+            break
+        sleep(interval_seconds)
+    return {**result, "outcome": outcome, "job": _safe_job(job), "log": log}

@@ -1,5 +1,6 @@
 .PHONY: test lint e2e \
-	prod-status prod-deploy prod-wait prod-verify prod-rollback
+	prod-status prod-deploy prod-wait prod-verify prod-rollback \
+	prod-suspend prod-resume prod-job
 
 PROD_CONFIG ?= ops/render-production.json
 
@@ -14,10 +15,12 @@ lint:
 	uv run mypy src
 
 # Production Render operations are Make-only and run the shared aweb_naapp.ops tool
-# against ops/render-production.json. status and verify only read; deploy and
-# rollback need APPLY=1 and CONFIRM_SERVICE_ID. Inputs come from the environment:
+# against ops/render-production.json. status and verify only read; deploy,
+# rollback, suspend, resume and job need APPLY=1 and CONFIRM_SERVICE_ID. job runs
+# only a job listed in ops/one-off-jobs.json. Inputs come from the environment:
 # PROD_COMMIT, PROD_DEPLOY_ID, ROLLBACK_DEPLOY_ID, ROLLBACK_COMMIT,
-# CURRENT_DEPLOY_ID, CURRENT_COMMIT, RENDER_ENV_FILE.
+# CURRENT_DEPLOY_ID, CURRENT_COMMIT, JOB_NAME, JOB_ARGS (slot=value pairs),
+# RENDER_ENV_FILE.
 prod-status:
 	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) status
 
@@ -32,3 +35,12 @@ prod-verify:
 
 prod-rollback:
 	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) rollback
+
+prod-suspend:
+	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) suspend
+
+prod-resume:
+	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) resume
+
+prod-job:
+	uv run python -m aweb_naapp.ops --config $(PROD_CONFIG) job --jobs-file ops/one-off-jobs.json

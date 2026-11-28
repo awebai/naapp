@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 import pytest
+from aweb_naapp.ops.jobs import JobAllowlist
 from aweb_naapp.ops.render import ProductionConfig, canonical_git_repo
 
 _TASKS_ROOT = Path(__file__).resolve().parents[1]
@@ -42,10 +43,29 @@ def test_the_render_template_builds_the_way_the_manifest_does() -> None:
 _MAKEFILE = (_TASKS_ROOT / "Makefile").read_text(encoding="utf-8")
 
 
-@pytest.mark.parametrize("command", ["status", "deploy", "wait", "verify", "rollback"])
+@pytest.mark.parametrize(
+    "command", ["status", "deploy", "wait", "verify", "rollback", "suspend", "resume", "job"]
+)
 def test_each_production_operation_is_a_make_target_running_the_shared_tool(command: str) -> None:
     recipe = re.search(rf"^prod-{command}:\n((?:\t.*\n)+)", _MAKEFILE, re.MULTILINE)
     assert recipe, f"Makefile has no prod-{command} target"
     assert re.search(
         rf"uv run python -m aweb_naapp\.ops --config \$\(PROD_CONFIG\) {command}\b", recipe.group(1)
     ), recipe.group(1)
+
+
+def _image_python() -> str:
+    """The interpreter the image installs the app into; a bare python is the base image's."""
+    dockerfile = (_TASKS_ROOT / "Dockerfile").read_text(encoding="utf-8")
+    match = re.search(r"UV_PROJECT_ENVIRONMENT=(\S+)", dockerfile)
+    assert match, "Dockerfile sets no UV_PROJECT_ENVIRONMENT"
+    return f"{match.group(1)}/bin/python"
+
+
+def test_the_one_off_jobs_are_exactly_the_reviewed_board_move_help() -> None:
+    allowlist = JobAllowlist.load(_TASKS_ROOT / "ops" / "one-off-jobs.json")
+
+    assert sorted(allowlist.jobs) == ["board-move-help"]
+    assert allowlist.argv("board-move-help", {}) == [
+        _image_python(), "-m", "aweb_tasks.board_move", "--help",
+    ]

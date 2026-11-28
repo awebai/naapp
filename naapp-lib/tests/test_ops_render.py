@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 import threading
 from collections.abc import Iterator
@@ -8,10 +9,13 @@ from dataclasses import dataclass, field, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
+from aweb_naapp.ops import __main__ as ops_cli
 from aweb_naapp.ops import render
+from aweb_naapp.ops.jobs import JobAllowlist
 from aweb_naapp.ops.render import OpsError, ProductionConfig, RenderClient
 
 SERVICE_ID = "srv-folio0000000000000000"
@@ -19,6 +23,14 @@ LIVE_COMMIT = "a" * 40
 LIVE_DEPLOY = "dep-live0001"
 EARLIER_COMMIT = "b" * 40
 EARLIER_DEPLOY = "dep-earlier01"
+OWNER_ID = "tea-owner000000000000"
+JOB_ID = "job-" + "0" * 20
+
+
+@dataclass
+class RawBody:
+    content_type: str
+    data: bytes
 
 
 @dataclass
@@ -34,7 +46,25 @@ class FakeRender:
     health_agents: list[str] = field(default_factory=list)
     requests: list[tuple[str, str, Any]] = field(default_factory=list)
     polls_until_live: int = 1
+    # While suspended, what the service's URLs answer instead of the app.
+    suspended_page: tuple[int, RawBody] = (503, RawBody("text/html", b"<html>Service Suspended</html>"))
+    # Service reads of the suspended field before a suspend or resume shows.
+    suspend_reads_before_change: int = 0
+    never_suspends: bool = False
+    resume_redeploys: bool = False
+    # What /health serves as the app's build and deployment identity; None is the live deploy.
+    app_git_sha: str | None = None
+    app_service_id: str = SERVICE_ID
+    # A page that answers the health path in place of the app.
+    health_page: tuple[int, RawBody] | None = None
+    job_create_refusal: tuple[int, dict[str, Any]] | None = None
+    job_statuses: list[str] = field(default_factory=lambda: ["pending", "running", "succeeded"])
+    job: dict[str, Any] | None = None
+    job_logs: list[str] = field(default_factory=lambda: ["usage: board_move [-h]"])
+    log_pages: int = 1
+    log_reads_before_lines: int = 0
     _counter: int = 0
+    _pending_suspend: tuple[str, int] | None = None
 
     def handle(self, method: str, path: str, body: Any, user_agent: str = "") -> tuple[int, Any]:
         self.requests.append((method, path, body))
@@ -43,9 +73,43 @@ class FakeRender:
             self.health_agents.append(user_agent)
             if self.edge_refuses_default_python_agent and user_agent.startswith("Python-urllib/"):
                 return 403, {"error": 1010}
-            return self.health_status, {"status": "ok"}
+            if self.service.get("suspended") == "suspended":
+                return self.suspended_page
+            if self.health_page is not None:
+                return self.health_page
+            return self.health_status, self._app_identity()
         if method == "GET" and path == base:
+            self._advance_suspension()
             return 200, self.service
+        if method == "POST" and path in {f"{base}/suspend", f"{base}/resume"}:
+            target = "suspended" if path.endswith("/suspend") else "not_suspended"
+            if not (self.never_suspends and target == "suspended"):
+                self._pending_suspend = (target, self.suspend_reads_before_change)
+            if target == "not_suspended" and self.resume_redeploys:
+                live = next(deploy for deploy in self.deploys if deploy["status"] == "live")
+                live["status"] = "deactivated"
+                self._counter += 1
+                self.deploys.insert(
+                    0, {"id": f"dep-new{self._counter:04d}", "status": "live", "commit": dict(live["commit"])}
+                )
+            return 202, RawBody("application/json", b"")
+        if method == "POST" and path == f"{base}/jobs":
+            if self.job_create_refusal is not None:
+                return self.job_create_refusal
+            self.job = {
+                "id": JOB_ID, "serviceId": SERVICE_ID, "startCommand": body["startCommand"],
+                "planId": "plan-srv-006", "createdAt": "2026-11-28T10:00:00Z", "status": self.job_statuses[0],
+            }
+            return 201, self.job
+        if method == "GET" and path == f"{base}/jobs/{JOB_ID}" and self.job is not None:
+            if self.job["status"] != "canceled" and self.job_statuses:
+                self.job["status"] = self.job_statuses.pop(0)
+            return 200, self.job
+        if method == "POST" and path == f"{base}/jobs/{JOB_ID}/cancel" and self.job is not None:
+            self.job["status"] = "canceled"
+            return 200, self.job
+        if method == "GET" and path.startswith("/v1/logs?"):
+            return 200, self._logs(path)
         if method == "GET" and path.startswith(f"{base}/deploys?"):
             return 200, [{"deploy": deploy, "cursor": "x"} for deploy in self.deploys]
         if method == "GET" and path.startswith(f"{base}/deploys/"):
@@ -68,6 +132,46 @@ class FakeRender:
                 return 404, {}
             return 201, self._create(target["commit"]["id"])
         return 404, {}
+
+    def _advance_suspension(self) -> None:
+        if self._pending_suspend is None:
+            return
+        target, remaining = self._pending_suspend
+        if remaining > 0:
+            self._pending_suspend = (target, remaining - 1)
+            return
+        self.service["suspended"] = target
+        self._pending_suspend = None
+
+    def _app_identity(self) -> dict[str, Any]:
+        live = next((deploy for deploy in self.deploys if deploy["status"] == "live"), None)
+        sha = self.app_git_sha or (live["commit"]["id"] if live else None)
+        return {
+            "status": "ok",
+            "service": "folio",
+            "build": {"git_sha": sha},
+            "deployment": {"service_id": self.app_service_id, "commit": sha},
+        }
+
+    def _logs(self, path: str) -> dict[str, Any]:
+        query = parse_qs(urlsplit(path).query)
+        assert query["ownerId"] == [OWNER_ID]
+        assert query["resource"] == [JOB_ID]
+        if self.log_reads_before_lines > 0:
+            self.log_reads_before_lines -= 1
+            return {"hasMore": False, "nextStartTime": None, "nextEndTime": None, "logs": []}
+        page = int(query.get("startTime", ["0"])[0] == "page-2")
+        lines = self.job_logs if self.log_pages == 1 else self.job_logs[page::2]
+        more = self.log_pages > 1 and page == 0
+        return {
+            "hasMore": more,
+            "nextStartTime": "page-2" if more else None,
+            "nextEndTime": "page-2-end" if more else None,
+            "logs": [
+                {"id": f"log-{page}-{index}", "message": line, "timestamp": f"2026-11-28T10:00:0{index}Z", "labels": []}
+                for index, line in enumerate(lines)
+            ],
+        }
 
     def _find(self, deploy_id: str) -> dict[str, Any] | None:
         return next((deploy for deploy in self.deploys if deploy["id"] == deploy_id), None)
@@ -93,9 +197,12 @@ def fake() -> Iterator[tuple[FakeRender, str]]:
             status, payload = state.handle(
                 self.command, self.path, body, self.headers.get("User-Agent", "")
             )
-            data = json.dumps(payload).encode()
+            if isinstance(payload, RawBody):
+                content_type, data = payload.content_type, payload.data
+            else:
+                content_type, data = "application/json", json.dumps(payload).encode()
             self.send_response(status)
-            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -140,6 +247,7 @@ def _matching_service(config: ProductionConfig) -> dict[str, Any]:
         "rootDir": config.root_dir,
         "autoDeploy": "no",
         "suspended": "not_suspended",
+        "ownerId": OWNER_ID,
         "serviceDetails": {
             "region": config.region,
             "url": config.origin_url,
@@ -595,7 +703,10 @@ def _cli(*args: str, env: dict[str, str] | None = None) -> subprocess.CompletedP
     clean = {
         key: value
         for key, value in os.environ.items()
-        if key not in {"APPLY", "CONFIRM_SERVICE_ID", "FROM_REPOSITORY", "CONFIRM_FROM_REPOSITORY"}
+        if key not in {
+            "APPLY", "CONFIRM_SERVICE_ID", "FROM_REPOSITORY", "CONFIRM_FROM_REPOSITORY",
+            "PROD_COMMIT", "JOBS_FILE", "JOB_NAME", "JOB_ARGS",
+        }
     }
     clean.update(env or {})
     return subprocess.run(
@@ -625,3 +736,377 @@ def test_cli_reports_a_missing_key_file_as_one_error(tmp_path: Path) -> None:
     result = _cli("--config", str(_write_config(tmp_path)), "--env-file", str(tmp_path / "absent"), "status")
     assert result.returncode == 2
     assert result.stderr.startswith("ERROR: Render env file not found")
+
+
+# Suspend and resume.
+
+
+def _suspended(state: FakeRender) -> None:
+    state.service["suspended"] = "suspended"
+
+
+def test_suspend_reads_back_suspended_and_records_what_the_urls_serve(fake) -> None:
+    state, config, client = _ready(fake)
+    state.suspend_reads_before_change = 2
+
+    result = render.suspend(client, config, timeout_seconds=10, interval_seconds=0)
+
+    assert state.posts() == [(f"/v1/services/{SERVICE_ID}/suspend", None)]
+    assert result["service"]["suspended"] == "suspended"
+    assert result["live_deploy"]["id"] == LIVE_DEPLOY
+    assert result["while_suspended"] == {
+        config.origin_url + "/health": {"status": 503, "content_type": "text/html", "serves_app": False},
+    }
+
+
+def test_a_page_served_with_200_while_suspended_is_never_taken_for_the_app(fake) -> None:
+    state, config, client = _ready(fake)
+    state.suspended_page = (200, RawBody("application/json", json.dumps({"status": "ok"}).encode()))
+
+    result = render.suspend(client, config, timeout_seconds=10, interval_seconds=0)
+
+    assert result["while_suspended"][config.origin_url + "/health"]["serves_app"] is False
+
+
+def test_suspend_refuses_a_service_that_differs_from_the_manifest(fake) -> None:
+    state, config, client = _ready(fake)
+    state.service["autoDeploy"] = "yes"
+    with pytest.raises(OpsError, match="autoDeploy"):
+        render.suspend(client, config, timeout_seconds=10, interval_seconds=0)
+    assert state.posts() == []
+
+
+def test_suspend_refuses_a_service_that_is_already_suspended(fake) -> None:
+    state, config, client = _ready(fake)
+    _suspended(state)
+    with pytest.raises(OpsError, match="suspended"):
+        render.suspend(client, config, timeout_seconds=10, interval_seconds=0)
+    assert state.posts() == []
+
+
+def test_suspend_fails_when_the_service_never_reads_back_suspended(fake) -> None:
+    state, config, client = _ready(fake)
+    state.never_suspends = True
+    with pytest.raises(OpsError, match="did not read back 'suspended'"):
+        render.suspend(client, config, timeout_seconds=0.2, interval_seconds=0.05)
+
+
+def test_resume_reads_back_not_suspended_and_the_app_at_the_expected_commit(fake) -> None:
+    state, config, client = _ready(fake)
+    _suspended(state)
+    state.suspend_reads_before_change = 1
+
+    result = render.resume(client, config, commit=LIVE_COMMIT, timeout_seconds=10, interval_seconds=0)
+
+    assert state.posts() == [(f"/v1/services/{SERVICE_ID}/resume", None)]
+    assert result["service"]["suspended"] == "not_suspended"
+    assert result["live_deploy"]["id"] == LIVE_DEPLOY
+    assert result["redeployed"] is False
+    assert result["new_deploys"] == []
+    assert result["app"] == {
+        config.origin_url + "/health": {"status": 200, "service_id": SERVICE_ID, "git_sha": LIVE_COMMIT},
+    }
+
+
+def test_resume_records_a_redeploy_when_render_makes_one(fake) -> None:
+    state, config, client = _ready(fake)
+    _suspended(state)
+    state.resume_redeploys = True
+
+    result = render.resume(client, config, commit=LIVE_COMMIT, timeout_seconds=10, interval_seconds=0)
+
+    assert result["redeployed"] is True
+    assert [deploy["commit"] for deploy in result["new_deploys"]] == [LIVE_COMMIT]
+    assert result["live_deploy"]["id"] == result["new_deploys"][0]["id"]
+
+
+def test_resume_refuses_a_service_that_is_not_suspended(fake) -> None:
+    state, config, client = _ready(fake)
+    with pytest.raises(OpsError, match="suspended"):
+        render.resume(client, config, commit=LIVE_COMMIT, timeout_seconds=10, interval_seconds=0)
+    assert state.posts() == []
+
+
+def test_resume_requires_the_expected_commit_in_full(fake) -> None:
+    state, config, client = _ready(fake)
+    _suspended(state)
+    with pytest.raises(OpsError, match="40-character"):
+        render.resume(client, config, commit=LIVE_COMMIT[:12], timeout_seconds=10, interval_seconds=0)
+    assert state.posts() == []
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        (200, RawBody("text/html", b"<html>Service Suspended</html>")),
+        (200, RawBody("application/json", json.dumps({"status": "ok"}).encode())),
+        (503, RawBody("application/json", b"{}")),
+        (503, RawBody("application/json", json.dumps({
+            "build": {"git_sha": LIVE_COMMIT}, "deployment": {"service_id": SERVICE_ID},
+        }).encode())),
+    ],
+    ids=["html-200", "json-without-identity", "503", "503-with-identity"],
+)
+def test_resume_never_passes_a_page_that_is_not_the_app(fake, page) -> None:
+    state, config, client = _ready(fake)
+    _suspended(state)
+    state.health_page = page
+    with pytest.raises(OpsError, match="does not serve the app"):
+        render.resume(client, config, commit=LIVE_COMMIT, timeout_seconds=0.2, interval_seconds=0.05)
+
+
+def test_resume_fails_when_the_app_serves_another_service(fake) -> None:
+    state, config, client = _ready(fake)
+    _suspended(state)
+    state.app_service_id = "srv-other0000000000000"
+    with pytest.raises(OpsError, match="does not serve the app"):
+        render.resume(client, config, commit=LIVE_COMMIT, timeout_seconds=0.2, interval_seconds=0.05)
+
+
+def test_resume_fails_when_the_app_serves_another_commit(fake) -> None:
+    state, config, client = _ready(fake)
+    _suspended(state)
+    state.app_git_sha = EARLIER_COMMIT
+    with pytest.raises(OpsError, match="git_sha"):
+        render.resume(client, config, commit=LIVE_COMMIT, timeout_seconds=0.2, interval_seconds=0.05)
+
+
+def test_resume_fails_when_render_names_another_live_commit(fake) -> None:
+    state, config, client = _ready(fake)
+    _suspended(state)
+    with pytest.raises(OpsError, match="live deploy"):
+        render.resume(client, config, commit=EARLIER_COMMIT, timeout_seconds=0.2, interval_seconds=0.05)
+
+
+# The one-off job allowlist.
+
+HELP_ARGV = ["python", "-m", "aweb_tasks.board_move", "--help"]
+LISTING_SHA = "c" * 64
+INSTALLATION = "0b5e2a4e-7c1d-4f7a-9a3e-2b8f6c1d9e0a"
+
+
+def _jobs(tmp_path: Path, entries: Any = None) -> Path:
+    path = tmp_path / "one-off-jobs.json"
+    path.write_text(json.dumps(entries if entries is not None else {
+        "board-move-help": HELP_ARGV,
+        "fixture-open": [
+            "python", "-m", "fixture", "open",
+            "--listing-sha256", {"slot": "listing_sha256", "type": "sha256"},
+            "--installation-id", {"slot": "installation_id", "type": "uuid"},
+        ],
+    }))
+    return path
+
+
+def test_a_listed_job_builds_its_exact_argv(tmp_path: Path) -> None:
+    allowlist = JobAllowlist.load(_jobs(tmp_path))
+    assert allowlist.argv("board-move-help", {}) == HELP_ARGV
+
+
+def test_typed_slots_are_filled_in_place(tmp_path: Path) -> None:
+    allowlist = JobAllowlist.load(_jobs(tmp_path))
+    argv = allowlist.argv("fixture-open", {"listing_sha256": LISTING_SHA, "installation_id": INSTALLATION})
+    assert argv == [
+        "python", "-m", "fixture", "open", "--listing-sha256", LISTING_SHA, "--installation-id", INSTALLATION,
+    ]
+    assert shlex.split(render.start_command(argv)) == argv
+
+
+@pytest.mark.parametrize(
+    ("name", "args", "message"),
+    [
+        ("unlisted", {}, "not a listed job"),
+        ("board-move-help", {"extra": "x"}, "takes exactly"),
+        ("fixture-open", {"listing_sha256": LISTING_SHA}, "takes exactly"),
+        ("fixture-open", {"listing_sha256": "C" * 64, "installation_id": INSTALLATION}, "sha256"),
+        ("fixture-open", {"listing_sha256": "c" * 63, "installation_id": INSTALLATION}, "sha256"),
+        ("fixture-open", {"listing_sha256": LISTING_SHA + "; rm -rf /", "installation_id": INSTALLATION}, "sha256"),
+        ("fixture-open", {"listing_sha256": LISTING_SHA, "installation_id": INSTALLATION.upper()}, "uuid"),
+        ("fixture-open", {"listing_sha256": LISTING_SHA, "installation_id": "$(id)"}, "uuid"),
+    ],
+)
+def test_a_job_refuses_anything_its_entry_does_not_type(tmp_path: Path, name, args, message) -> None:
+    allowlist = JobAllowlist.load(_jobs(tmp_path))
+    with pytest.raises(OpsError, match=message):
+        allowlist.argv(name, args)
+
+
+@pytest.mark.parametrize(
+    "entries",
+    [
+        [],
+        {"Bad Name": HELP_ARGV},
+        {"empty": []},
+        {"spaces": ["python", "-m", "x y"]},
+        {"shell": ["python", "-c", "import os;os.system('id')"]},
+        {"substitution": ["echo", "$(id)"]},
+        {"assignment": ["PYTHONPATH=/tmp", "python", "-m", "x"]},
+        {"home": ["python", "~/x.py"]},
+        {"untyped": ["python", {"slot": "x", "type": "string"}]},
+        {"twice": ["python", {"slot": "x", "type": "uuid"}, {"slot": "x", "type": "uuid"}]},
+        {"extra-key": ["python", {"slot": "x", "type": "uuid", "default": "y"}]},
+        {"number": ["python", 3]},
+    ],
+)
+def test_the_allowlist_file_refuses_an_entry_that_is_not_a_typed_argv(tmp_path: Path, entries) -> None:
+    with pytest.raises(OpsError, match="one-off job"):
+        JobAllowlist.load(_jobs(tmp_path, entries))
+
+
+# Running a one-off job.
+
+
+def _run_job(client, config, argv=HELP_ARGV, **kwargs):
+    kwargs.setdefault("timeout_seconds", 10)
+    kwargs.setdefault("interval_seconds", 0)
+    return render.run_job(client, config, argv, **kwargs)
+
+
+def test_a_job_runs_to_its_terminal_status_and_returns_its_log(fake) -> None:
+    state, config, client = _ready(fake)
+
+    result = _run_job(client, config)
+
+    assert state.posts() == [(f"/v1/services/{SERVICE_ID}/jobs", {"startCommand": "python -m aweb_tasks.board_move --help"})]
+    assert result["outcome"] == "succeeded"
+    assert result["argv"] == HELP_ARGV
+    assert result["start_command"] == "python -m aweb_tasks.board_move --help"
+    assert result["service_suspended"] == "not_suspended"
+    assert result["job"]["id"] == JOB_ID
+    assert result["job"]["status"] == "succeeded"
+    assert [line["message"] for line in result["log"]] == ["usage: board_move [-h]"]
+
+
+def test_a_job_is_started_on_a_suspended_service(fake) -> None:
+    state, config, client = _ready(fake)
+    _suspended(state)
+
+    result = _run_job(client, config)
+
+    assert result["service_suspended"] == "suspended"
+    assert result["outcome"] == "succeeded"
+
+
+def test_a_job_refused_at_create_is_recorded_with_render_s_answer(fake) -> None:
+    state, config, client = _ready(fake)
+    _suspended(state)
+    state.job_create_refusal = (400, {"id": "invalid", "message": "service is suspended"})
+
+    result = _run_job(client, config)
+
+    assert result["outcome"] == "refused_at_create"
+    assert result["refusal"] == {"http_status": 400, "message": "service is suspended"}
+    assert "job" not in result
+    assert result["log"] == []
+
+
+def test_a_job_that_stays_pending_is_canceled_at_the_timeout(fake) -> None:
+    state, config, client = _ready(fake)
+    state.job_statuses = ["pending"] * 1000
+
+    result = _run_job(client, config, timeout_seconds=0.2, interval_seconds=0.05)
+
+    assert result["outcome"] == "pending_at_timeout"
+    assert (f"/v1/services/{SERVICE_ID}/jobs/{JOB_ID}/cancel", None) in state.posts()
+    assert result["job"]["status"] == "canceled"
+
+
+def test_a_job_still_running_at_the_timeout_is_canceled(fake) -> None:
+    state, config, client = _ready(fake)
+    state.job_statuses = ["running"] * 1000
+
+    result = _run_job(client, config, timeout_seconds=0.2, interval_seconds=0.05)
+
+    assert result["outcome"] == "running_at_timeout"
+    assert result["job"]["status"] == "canceled"
+
+
+def test_a_failed_job_is_reported_as_failed(fake) -> None:
+    state, config, client = _ready(fake)
+    state.job_statuses = ["pending", "running", "failed"]
+    assert _run_job(client, config)["outcome"] == "failed"
+
+
+def test_a_job_refuses_unknown_job_statuses(fake) -> None:
+    state, config, client = _ready(fake)
+    state.job_statuses = ["pending", "paused"]
+    with pytest.raises(OpsError, match="unknown one-off job status"):
+        _run_job(client, config)
+
+
+def test_a_job_log_is_read_across_pages(fake) -> None:
+    state, config, client = _ready(fake)
+    state.job_logs = ["one", "two", "three", "four"]
+    state.log_pages = 2
+
+    result = _run_job(client, config)
+
+    assert sorted(line["message"] for line in result["log"]) == ["four", "one", "three", "two"]
+
+
+def test_a_job_log_is_read_again_while_render_has_not_indexed_it(fake) -> None:
+    state, config, client = _ready(fake)
+    state.log_reads_before_lines = 2
+
+    result = _run_job(client, config)
+
+    assert [line["message"] for line in result["log"]] == ["usage: board_move [-h]"]
+
+
+def test_a_job_refuses_a_service_that_differs_from_the_manifest(fake) -> None:
+    state, config, client = _ready(fake)
+    state.service["branch"] = "other"
+    with pytest.raises(OpsError, match="branch"):
+        _run_job(client, config)
+    assert state.posts() == []
+
+
+@pytest.mark.parametrize(
+    ("result", "status"),
+    [
+        ({"outcome": "succeeded"}, 0),
+        ({"outcome": "failed"}, 3),
+        ({"outcome": "refused_at_create"}, 3),
+        ({"outcome": "pending_at_timeout"}, 3),
+        ({"live_deploy": {}}, 0),
+    ],
+)
+def test_only_a_succeeded_job_exits_zero(result, status) -> None:
+    assert ops_cli.exit_status(result) == status
+
+
+@pytest.mark.parametrize("command", ["suspend", "resume", "job"])
+def test_cli_refuses_suspend_resume_and_jobs_without_apply_before_reading_any_key(tmp_path: Path, command) -> None:
+    jobs = _jobs(tmp_path)
+    result = _cli(
+        "--config", str(_write_config(tmp_path)), "--env-file", str(tmp_path / "absent"), command,
+        env={"JOBS_FILE": str(jobs), "JOB_NAME": "board-move-help", "PROD_COMMIT": LIVE_COMMIT},
+    )
+    assert result.returncode == 2
+    assert "--apply" in result.stderr
+    assert result.stdout == ""
+
+
+def test_cli_refuses_an_unlisted_job_before_reading_any_key(tmp_path: Path) -> None:
+    result = _cli(
+        "--config", str(_write_config(tmp_path)), "--env-file", str(tmp_path / "absent"), "job",
+        env={
+            "APPLY": "1", "CONFIRM_SERVICE_ID": SERVICE_ID, "JOBS_FILE": str(_jobs(tmp_path)),
+            "JOB_NAME": "rm-everything",
+        },
+    )
+    assert result.returncode == 2
+    assert "not a listed job" in result.stderr
+    assert result.stdout == ""
+
+
+def test_cli_takes_job_slots_as_name_value_pairs(tmp_path: Path) -> None:
+    result = _cli(
+        "--config", str(_write_config(tmp_path)), "--env-file", str(tmp_path / "absent"), "job",
+        env={
+            "APPLY": "1", "CONFIRM_SERVICE_ID": SERVICE_ID, "JOBS_FILE": str(_jobs(tmp_path)),
+            "JOB_NAME": "fixture-open", "JOB_ARGS": f"listing_sha256={LISTING_SHA} installation_id=$(id)",
+        },
+    )
+    assert result.returncode == 2
+    assert "uuid" in result.stderr

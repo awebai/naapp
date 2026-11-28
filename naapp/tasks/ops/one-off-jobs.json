@@ -1,0 +1,3 @@
+{
+  "board-move-help": ["/app/.venv/bin/python", "-m", "aweb_tasks.board_move", "--help"]
+}

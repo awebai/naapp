@@ -73,21 +73,27 @@ async def test_owner_confirms_a_graph_mailbox_draft_in_the_browser(world, servic
     }
 
 
-async def test_mailbox_confirmation_cannot_expand_an_existing_open_use_grant(world):
+@pytest.mark.parametrize("grant_state", ["open-use", "run", "revoked-use"])
+async def test_mailbox_confirmation_refuses_a_secret_with_any_prior_grant(world, grant_state):
     from tests.test_admission import BOB
     from tests.test_use_approvals import POLICY_BODY
 
     record = graph_secret()
-    policy = Policy.from_body({**POLICY_BODY, "open_request": True})
+    is_run = grant_state == "run"
+    policy = Policy.from_body({**POLICY_BODY, "open_request": not is_run})
     existing = GrantRecord.from_after({
-        "v": 1, "grant_id": "grt_existing_open", "secret_id": record.secret_id,
-        "subject": {"role": "secrets.role.finance"}, "capability": "use",
-        "operations": [], "open_request": True, "jobs": [], "policy_digest": policy.digest,
+        "v": 1, "grant_id": "grt_existing", "secret_id": record.secret_id,
+        "subject": {"role": "secrets.role.finance"}, "capability": "run" if is_run else "use",
+        "operations": [], "open_request": not is_run,
+        "jobs": [{"job_id": "deploy", "digest": "a" * 64}] if is_run else [],
+        "policy_digest": policy.digest,
     })
     async with world.db.transaction() as tx:
         await records.create_secret(tx, INSTALLATION_ID, TEAM, record)
         await records.create_policy(tx, INSTALLATION_ID, policy, team_id=TEAM)
         await records.create_grant(tx, INSTALLATION_ID, TEAM, existing)
+        if grant_state == "revoked-use":
+            await records.revoke_grant(tx, INSTALLATION_ID, existing.grant_id)
 
     scope = await enrol_owner(world, ALICE, "alice@acme.com")
     async with clients(world, forms=True) as (human, _):

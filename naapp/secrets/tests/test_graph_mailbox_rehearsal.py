@@ -253,7 +253,22 @@ async def approve_operation(root, holder, expected_params, since):
     assert decided.status_code == 200 and decided.json()["state"] == "approved", decided.text
 
 
-@pytest.mark.parametrize("transport", ["signed-http", pytest.param("aw", marks=pytest.mark.e2e)])
+@pytest.mark.parametrize(
+    "transport",
+    [
+        "signed-http",
+        pytest.param(
+            "aw",
+            marks=[
+                pytest.mark.e2e,
+                pytest.mark.skipif(
+                    not os.getenv("NAAPP_AW_BINARY"),
+                    reason="set NAAPP_AW_BINARY to the pinned aw executable for the CLI rehearsal",
+                ),
+            ],
+        ),
+    ],
+)
 async def test_staged_vault_member_reads_and_replies_after_owner_approval(
     root, registry, graph_stand_in, tmp_path, console_listener, console_tls, transport,
 ):

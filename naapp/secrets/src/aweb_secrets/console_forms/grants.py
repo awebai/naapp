@@ -260,9 +260,10 @@ def _graph_form(installation_id: str) -> str:
     installation = escape(installation_id, quote=True)
     return (
         "<h1>Grant access to a Microsoft 365 mailbox</h1>"
-        "<p>Choose an active Graph certificate secret dedicated to this mailbox, with no existing use grants. "
-        "Only the listed vault-team identities "
-        "can use this mailbox. You approve each send, reply and archive with your passkey.</p>"
+        "<p>Choose an active Graph certificate secret with no prior grants. "
+        "This setup grants mailbox access to the listed vault-team identities. "
+        "Later grants require a separate owner confirmation. "
+        "You approve each send, reply and archive with your passkey.</p>"
         f'<form id="graph-mailbox" class="form" method="post" data-installation="{installation}" '
         f'action="/installations/{installation}/grants/graph-mailbox/drafts">'
         + _input("secret_ref", "Certificate secret name", extra='maxlength="64" autocomplete="off"')

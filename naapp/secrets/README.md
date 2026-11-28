@@ -194,8 +194,9 @@ the mailbox scope. See
    matching RSA key file. Set both token endpoint and assertion audience
    to `https://login.microsoftonline.com/<tenant-object-id>/oauth2/v2.0/token`.
    Set the scope to `https://graph.microsoft.com/.default` and choose
-   **PS256**. Save and confirm the native secret draft. Dedicate this secret
-   to the mailbox. The mailbox draft refuses a secret with existing use grants.
+   **PS256**. Save and confirm the native secret draft. Use a certificate
+   secret that has never had grants. Confirmation checks all prior grants,
+   including revoked grants. Later grants require a separate owner confirmation.
 3. From **Grant access to a role**, follow **Grant access to a Microsoft
    365 mailbox**. Enter the secret name, the mailbox’s Microsoft object ID
    and email address, and the DIDs from the staged members’ team certificates.

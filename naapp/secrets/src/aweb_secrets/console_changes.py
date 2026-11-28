@@ -185,7 +185,8 @@ class ConsoleChanges:
             raise HTTPException(401, "console_session_required")
 
     async def draft(
-        self, current: ConsoleSession, installation_id: str, body: dict[str, Any]
+        self, current: ConsoleSession, installation_id: str, body: dict[str, Any],
+        *, require_unused_broker_secret: str | None = None,
     ) -> dict[str, Any]:
         admitted = await self._installation(current, installation_id)
         self._supported(body["changes"])
@@ -218,7 +219,8 @@ class ConsoleChanges:
             ):
                 raise HTTPException(401, "console_session_required")
             change_id, pending = await self._record_draft(
-                tx, current, admitted, items=body["changes"], sealed=sealed, reason=body["reason"]
+                tx, current, admitted, items=body["changes"], sealed=sealed, reason=body["reason"],
+                require_unused_broker_secret=require_unused_broker_secret,
             )
         await self.approvals.deliver(pending)
         return {
@@ -236,6 +238,7 @@ class ConsoleChanges:
         items: list[dict[str, Any]],
         sealed: Sequence[SealContext],
         reason: str,
+        require_unused_broker_secret: str | None = None,
     ) -> tuple[str, PendingApproval]:
         """Record a draft under the caller's held owner and session authority."""
         issued = datetime.now(UTC).replace(microsecond=0)
@@ -256,6 +259,8 @@ class ConsoleChanges:
             "issued_at": issued.strftime("%Y-%m-%dT%H:%M:%SZ"),
             "expires_at": (issued + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
+        if require_unused_broker_secret is not None:
+            change["require_unused_broker_secret"] = require_unused_broker_secret
         pending = await self.changes.draft(
             tx, change, sealed=sealed, confirm_in_aw=isinstance(current, KeyBoundConsoleSession)
         )

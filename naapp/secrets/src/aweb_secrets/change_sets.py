@@ -1012,6 +1012,17 @@ class ChangeSets:
         revision = await claim_config_revision(
             tx, installation_id, change["base_revision"], team_id=admitted.team_id
         )
+        unused_secret = change.get("require_unused_broker_secret")
+        if unused_secret is not None and await tx.fetch_value(
+            "SELECT EXISTS (SELECT 1 FROM {{tables.grants}}"
+            " WHERE installation_id=$1 AND team_id=$2 AND secret_id=$3)",
+            installation_id,
+            admitted.team_id,
+            unused_secret,
+        ):
+            raise ChangeRefused(
+                "the secret already has grants", code="broker_secret_in_use"
+            )
         authority = (
             None if self._integrity_key is None else AuthorityRecords(self._integrity_key, admitted)
         )

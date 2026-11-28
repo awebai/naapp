@@ -63,7 +63,10 @@ async def envelopes(db, team_id):
 
 
 @pytest.fixture
-async def root(production_database, authority_database, registry, tmp_path, request, monkeypatch):
+async def root(
+    production_database, authority_database, registry, tmp_path, request, monkeypatch,
+    root_broker_network,
+):
     member = Member(team_id="root:example.com", member_key=member_key("alice"))
     options = getattr(request, "param", {})
 
@@ -87,6 +90,14 @@ async def root(production_database, authority_database, registry, tmp_path, requ
                     "awid_service_token": SERVICE_TOKEN,
                 }
             )
+            if root_broker_network is not None:
+                origin, ca_file, broker_resolver = root_broker_network
+                configured = configured.model_copy(update={
+                    "public_origin": origin,
+                    "internal_destinations": InternalDestinations.ALLOWED,
+                    "egress_ca_file": ca_file,
+                })
+                monkeypatch.setattr("aweb_secrets.composition.DnsResolver", lambda: broker_resolver)
             service_member = None
             if private:
                 # An ordinary, separate service seat reads this private team.
@@ -150,7 +161,7 @@ async def root(production_database, authority_database, registry, tmp_path, requ
                         client.owner_fixture_registry = registry
                         client.service_fixture_member = service_member
                         version = getattr(request, "param", {}).get("manifest_version", 2)
-                        manifest = await client.get(AUDIENCE + f"/manifests/v{version}.json")
+                        manifest = await client.get(configured.public_origin + f"/manifests/v{version}.json")
                         assert manifest.status_code == 200
                         installed = await install(
                             aweb_db,

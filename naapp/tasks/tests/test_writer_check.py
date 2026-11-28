@@ -339,3 +339,32 @@ async def test_a_missing_dataset_table_refuses_as_the_shape_not_at_the_lock(data
     await dataset.as_owner("DROP TABLE dependencies")
 
     assert await check(dataset) == {Refusal("shape_missing_table", None, None, "dependencies")}
+
+
+@pytest.mark.parametrize(("replacement", "refused"), [
+    pytest.param("CREATE SEQUENCE dependencies", "shape_not_ordinary_table", id="a sequence in its place"),
+    pytest.param("CREATE SCHEMA elsewhere; CREATE TABLE elsewhere.dependencies (id integer)",
+                 "shape_missing_table", id="a table of its name in another schema"),
+])
+async def test_a_dataset_table_replaced_by_another_relation_refuses_as_the_shape(
+    dataset: Dataset, replacement: str, refused: str,
+) -> None:
+    await dataset.as_owner(f"DROP TABLE dependencies; {replacement}")
+
+    assert refused in {refusal.code for refusal in await check(dataset)}
+
+
+async def test_a_prepared_transaction_in_another_database_passes(dataset: Dataset, test_db_factory: Any) -> None:
+    other = await test_db_factory.create_db(suffix="writer_check_other")
+    gid = f"writer_check_{uuid4().hex[:12]}"
+    preparing = await asyncpg.connect(other.config.get_dsn())
+    try:
+        await preparing.execute("BEGIN")
+        await preparing.execute("SELECT 1")
+        await preparing.execute(f"PREPARE TRANSACTION '{gid}'")
+        try:
+            assert await check(dataset) == set()
+        finally:
+            await preparing.execute(f"ROLLBACK PREPARED '{gid}'")
+    finally:
+        await preparing.close()

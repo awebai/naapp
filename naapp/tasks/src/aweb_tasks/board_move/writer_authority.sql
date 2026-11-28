@@ -225,7 +225,7 @@ refusals (code, principal, role, object) AS (
             -- the indexed table, or one of its columns
             AND NOT (dependency.refclassid = 'pg_class'::regclass AND dependency.refobjid = idx.indrelid)
             -- the parent partitioned index it is attached to
-            AND NOT (dependency.refclassid = 'pg_class'::regclass AND dependency.deptype = 'P'
+            AND NOT (dependency.refclassid = 'pg_class'::regclass
                      AND dependency.refobjid IN (SELECT inhparent FROM pg_inherits WHERE inhrelid = idx.indexrelid))
       )
     UNION ALL

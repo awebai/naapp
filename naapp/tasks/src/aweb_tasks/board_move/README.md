@@ -176,11 +176,11 @@ Then grant `tasks.write` and `tasks.override`; our agents switch to `aw tasks`.
 - **A3, every principal's write authority.** The principals are every login role that is neither the owner nor a superuser, and every subscription owner in the database. No role a principal reaches through any membership may:
   - be the owner, a superuser or `pg_write_all_data`, or own a dataset table;
   - hold a write privilege on a dataset table, or TRIGGER on one;
-  - hold MAINTAIN on a relation a writer owns, or own the database or a schema that holds one. Maintenance and a materialized view's refresh run code as the relation's owner, and a database's or schema's owner may reindex every table in it.
+  - be able to maintain a relation a writer owns: hold MAINTAIN on it or on a partition ancestor of it, own such an ancestor, or own the database or the schema of the relation or of an ancestor. Maintenance and a materialized view's refresh run code as the relation's owner. A partitioned table's maintenance reaches every partition without checking the partitions, and a database's or schema's owner may reindex every table in it.
 - **Nothing a writer owns acts for others.** These are the writers:
   - the owner, each dataset table's owner and the database's owner, whatever their privileges show, because an owner can grant back what it revoked;
   - every role with a write or TRIGGER privilege on a dataset table, every superuser included;
-  - and, applied again to each writer found, every member of a writer, every role holding MAINTAIN on a relation a writer owns, and the owner of the schema that holds it.
+  - and, applied again to each writer found, every member of a writer and every role able to maintain a relation a writer owns, as above.
 
   No writer may own a view or materialized view, a SECURITY DEFINER function or procedure, or a rule but a view's.
   - Objects in `pg_catalog` and `information_schema` are not checked. The trust assumption is that PostgreSQL's shipped objects there write no dataset row.

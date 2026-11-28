@@ -21,17 +21,20 @@
 -- - is the owner, a superuser or pg_write_all_data, or owns a dataset table;
 -- - holds a write privilege on a dataset table, on the table or on any column,
 --   or TRIGGER on one: a trigger runs with the rights of whoever next writes;
--- - holds MAINTAIN on a relation a writer owns, or owns the database or a
---   schema holding such a relation: maintenance, and a materialized view's
---   refresh, run code as the relation's owner, and a database's or schema's
---   owner may reindex every table in it.
+-- - can maintain a relation a writer owns: holds MAINTAIN on it or on a
+--   partition ancestor of it, owns such an ancestor, or owns the database or
+--   the schema of the relation or of an ancestor. Maintenance, and a
+--   materialized view's refresh, run code as the relation's owner; a
+--   partitioned table's maintenance reaches every partition with no check on
+--   the partitions; and a database's or schema's owner may reindex every
+--   table in it.
 --
 -- The writers are the owner, each dataset table's owner and the database's
 -- owner, whatever their privileges show, since an owner can grant itself back
--- what it revoked; every role holding a write, TRIGGER or MAINTAIN privilege
--- on a dataset table, every superuser among them; and, repeatedly, every
--- member of a writer, in any mode, and every role that holds MAINTAIN on a
--- relation a writer owns, or owns the schema holding it. No writer may own a view or materialized
+-- what it revoked; every role holding a write or TRIGGER privilege on a
+-- dataset table, every superuser among them; and, repeatedly, every member of
+-- a writer, in any mode, and every role that can maintain a relation a writer
+-- owns, as above. No writer may own a view or materialized
 -- view, a SECURITY DEFINER function or procedure, or a rule but a view's
 -- _RETURN: each lets whoever can use it act with its owner's rights. Objects
 -- in pg_catalog and information_schema are not checked: the trust assumption
@@ -79,16 +82,31 @@ writers (role) AS (
     SELECT next.role FROM writers CROSS JOIN LATERAL (
         SELECT member FROM pg_auth_members WHERE roleid = writers.role
         UNION ALL
-        SELECT namespace.nspowner
-        FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
-        WHERE relation.relowner = writers.role AND relation.relkind IN ('r', 'p', 'm')
-          AND namespace.oid IN (SELECT oid FROM checked)
-        UNION ALL
-        SELECT pg_roles.oid FROM pg_class relation CROSS JOIN pg_roles
+        SELECT authority.role
+        FROM pg_class relation
+        CROSS JOIN LATERAL (
+            SELECT relation.oid UNION SELECT relid FROM pg_partition_ancestors(relation.oid)
+        ) ancestor (oid)
+        JOIN pg_class above ON above.oid = ancestor.oid
+        CROSS JOIN LATERAL (
+            SELECT above.relowner
+            UNION ALL
+            SELECT nspowner FROM pg_namespace
+            WHERE oid = above.relnamespace AND oid IN (SELECT oid FROM checked)
+            UNION ALL
+            SELECT oid FROM pg_roles WHERE has_table_privilege(oid, above.oid, 'MAINTAIN')
+        ) authority (role)
         WHERE relation.relowner = writers.role AND relation.relkind IN ('r', 'p', 'm')
           AND relation.relnamespace IN (SELECT oid FROM checked)
-          AND has_table_privilege(pg_roles.oid, relation.oid, 'MAINTAIN')
     ) next (role)
+),
+-- Every relation whose maintenance runs a writer's code: the relations writers
+-- own. A partition ancestor of one has a writer for its owner too.
+maintained (oid, relnamespace, relowner) AS (
+    SELECT oid, relnamespace, relowner FROM pg_class
+    WHERE relkind IN ('r', 'p', 'm')
+      AND relnamespace IN (SELECT oid FROM checked)
+      AND relowner IN (SELECT role FROM writers)
 ),
 reach (principal, role) AS (
     SELECT oid, oid FROM principals
@@ -140,20 +158,18 @@ refusals (code, principal, role, object) AS (
     FROM reach CROSS JOIN tables
     WHERE tables.oid IS NOT NULL AND has_table_privilege(reach.role, tables.oid, 'TRIGGER')
     UNION ALL
-    SELECT 'write_authority_maintain_privilege', principal, role, relation.oid::regclass::text
-    FROM reach CROSS JOIN pg_class relation
-    WHERE relation.relkind IN ('r', 'p', 'm')
-      AND relation.relnamespace IN (SELECT oid FROM checked)
-      AND relation.relowner IN (SELECT role FROM writers)
-      AND has_table_privilege(reach.role, relation.oid, 'MAINTAIN')
+    SELECT 'write_authority_maintain_privilege', principal, role, maintained.oid::regclass::text
+    FROM reach CROSS JOIN maintained
+    WHERE has_table_privilege(reach.role, maintained.oid, 'MAINTAIN')
+    UNION ALL
+    -- An owner can grant itself back whatever privilege it revoked.
+    SELECT 'write_authority_maintenance_owner', principal, role, maintained.oid::regclass::text
+    FROM reach JOIN maintained ON maintained.relowner = reach.role
     UNION ALL
     SELECT 'write_authority_maintenance_scope', principal, role, namespace.nspname::text
     FROM reach JOIN pg_namespace namespace ON namespace.nspowner = reach.role
     WHERE namespace.oid IN (SELECT oid FROM checked)
-      AND EXISTS (
-          SELECT 1 FROM pg_class relation
-          WHERE relation.relnamespace = namespace.oid AND relation.relkind IN ('r', 'p', 'm')
-            AND relation.relowner IN (SELECT role FROM writers))
+      AND namespace.oid IN (SELECT relnamespace FROM maintained)
     UNION ALL
     SELECT 'write_authority_maintenance_scope', principal, role, datname::text
     FROM reach JOIN pg_database ON pg_database.datdba = reach.role

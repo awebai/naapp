@@ -737,3 +737,96 @@ async def test_the_owner_is_a_writer_even_when_it_owns_no_dataset_table(dataset:
     refusals = await dataset.refusals()
     assert Refusal("indirection_security_definer", None, dataset.owner, "noop()") in refusals
     assert {refusal.object for refusal in refusals if refusal.code == "shape_not_owned"} == set(DATASET)
+
+
+# --- maintenance through a partitioned parent ---------------------------------
+
+
+async def _partitioned_callback(dataset: Dataset, parent_owner: str, leaf_owner: str) -> None:
+    """``maintained.parent``, owned by ``parent_owner``, with one leaf owned by
+    ``leaf_owner``. The index function writes the dataset and records the role it
+    runs as in ``maintained.seen``."""
+    live = f'"{dataset.schema}"'
+    await dataset.admin.execute("CREATE SCHEMA maintained")
+    for role in {parent_owner, leaf_owner}:
+        await dataset.admin.execute(f"GRANT USAGE ON SCHEMA maintained TO {role}")
+    await dataset.admin.execute("CREATE TABLE maintained.seen (role TEXT)")
+    await dataset.admin.execute("GRANT INSERT ON maintained.seen TO PUBLIC")
+    await dataset.admin.execute(
+        "CREATE FUNCTION maintained.record() RETURNS void LANGUAGE plpgsql AS"
+        f" 'BEGIN INSERT INTO maintained.seen VALUES (current_user); DELETE FROM {live}.tasks; END'"
+    )
+    await dataset.admin.execute(
+        "CREATE FUNCTION maintained.indexed(integer) RETURNS integer LANGUAGE plpgsql IMMUTABLE AS"
+        " 'BEGIN PERFORM maintained.record(); RETURN $1; END'"
+    )
+    await dataset.admin.execute("CREATE TABLE maintained.parent (id INTEGER) PARTITION BY RANGE (id)")
+    await dataset.admin.execute("CREATE TABLE maintained.leaf PARTITION OF maintained.parent FOR VALUES FROM (0) TO (10)")
+    await dataset.admin.execute("INSERT INTO maintained.parent VALUES (1)")
+    await dataset.admin.execute("CREATE INDEX ON maintained.parent (maintained.indexed(id))")
+    await dataset.admin.execute(f"ALTER TABLE maintained.parent OWNER TO {parent_owner}")
+    await dataset.admin.execute(f"ALTER TABLE maintained.leaf OWNER TO {leaf_owner}")
+    await dataset.admin.execute("TRUNCATE maintained.seen")
+
+
+async def test_maintaining_a_parent_of_a_writers_partition_refuses(dataset: Dataset) -> None:
+    # MAINTAIN on the parent reindexes the leaf, whose index functions run as
+    # the leaf's owner, with no MAINTAIN on the leaf.
+    writer = await dataset.role("NOLOGIN")
+    await dataset.admin.execute(f'GRANT DELETE ON "{dataset.schema}".tasks TO {writer}')
+    await dataset.admin.execute(f'GRANT USAGE ON SCHEMA "{dataset.schema}" TO {writer}')
+    parent_owner = await dataset.role("NOLOGIN")
+    login, dsn = await dataset.login()
+    await _partitioned_callback(dataset, parent_owner, writer)
+    await dataset.admin.execute(f"GRANT USAGE ON SCHEMA maintained TO {login}")
+    await dataset.admin.execute(f"GRANT MAINTAIN ON maintained.parent TO {login}")
+    assert not await dataset.admin.fetch_value(
+        f"SELECT has_table_privilege('{login}', 'maintained.leaf', 'MAINTAIN')"
+    )
+
+    await _writes(dsn, dataset.schema, "REINDEX TABLE maintained.parent")
+    assert await dataset.admin.fetch_value("SELECT array_agg(DISTINCT role) FROM maintained.seen") == [writer]
+
+    refusals = await dataset.refusals()
+    assert Refusal("write_authority_maintain_privilege", login, login, "maintained.parent") in refusals
+    assert {refusal.principal for refusal in refusals} == {login}
+
+
+async def test_owning_a_parent_of_a_writers_partition_refuses(dataset: Dataset) -> None:
+    writer = await dataset.role("NOLOGIN")
+    await dataset.admin.execute(f'GRANT DELETE ON "{dataset.schema}".tasks TO {writer}')
+    login = await dataset.role("LOGIN")
+    await _partitioned_callback(dataset, login, writer)
+    # An owner can grant itself back whatever privilege it revoked.
+    await dataset.admin.execute(f"REVOKE ALL ON maintained.parent FROM {login}")
+
+    assert await dataset.refusals() == {
+        Refusal("write_authority_maintenance_owner", login, login, "maintained.parent"),
+    }
+
+
+async def test_a_security_definer_function_owned_by_a_parent_maintainer_refuses(dataset: Dataset) -> None:
+    writer = await dataset.role("NOLOGIN")
+    await dataset.admin.execute(f'GRANT DELETE ON "{dataset.schema}".tasks TO {writer}')
+    parent_owner = await dataset.role("NOLOGIN")
+    maintainer = await dataset.role("NOLOGIN")
+    await _partitioned_callback(dataset, parent_owner, writer)
+    await dataset.admin.execute(f"GRANT MAINTAIN ON maintained.parent TO {maintainer}")
+    await dataset.admin.execute(
+        "CREATE FUNCTION maintained.noop() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'SELECT'"
+    )
+    await dataset.admin.execute(f"ALTER FUNCTION maintained.noop() OWNER TO {maintainer}")
+
+    # The parent's owner is a writer too, so its routine would refuse as well.
+    assert await dataset.refusals() == {
+        Refusal("indirection_security_definer", None, maintainer, "maintained.noop()"),
+    }
+
+
+async def test_maintaining_a_parent_with_no_writers_partition_passes(dataset: Dataset) -> None:
+    neighbour = await dataset.role("NOLOGIN")
+    login = await dataset.role("LOGIN")
+    await _partitioned_callback(dataset, neighbour, neighbour)
+    await dataset.admin.execute(f"GRANT MAINTAIN ON maintained.parent TO {login}")
+
+    assert await dataset.refusals() == set()

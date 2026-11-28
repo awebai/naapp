@@ -63,6 +63,12 @@ SIDE_EFFECTS = ("none", "reversible", "irreversible")
 RESULT_HANDLINGS = ("deny", "withhold", "store_as_secret")
 MAX_TIMEOUT_S = 30
 
+_MAIL_LOCAL = r"[A-Za-z0-9!#$%&'*+/=?^_{}|~-]+"
+_MAIL_DOMAIN = r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?"
+_MAIL_ADDRESS = rf"{_MAIL_LOCAL}(?:\.{_MAIL_LOCAL})*@{_MAIL_DOMAIN}(?:\.{_MAIL_DOMAIN})+"
+# A message ID may use a single-label domain; an actual recipient needs a mail domain.
+_MESSAGE_ID = rf"<{_MAIL_LOCAL}(?:\.{_MAIL_LOCAL})*@{_MAIL_DOMAIN}(?:\.{_MAIL_DOMAIN})*>"
+
 # The fixed character classes a string parameter may be limited to.
 CHARSETS: Mapping[str, re.Pattern[str]] = {
     "digits": re.compile(r"[0-9]+"),
@@ -70,11 +76,17 @@ CHARSETS: Mapping[str, re.Pattern[str]] = {
     "alnum": re.compile(r"[A-Za-z0-9]+"),
     "slug": re.compile(r"[a-z0-9][a-z0-9_-]*"),
     "base64url": re.compile(r"[A-Za-z0-9_-]+"),
+    "base64url-padded": re.compile(r"[A-Za-z0-9_-]+={0,2}"),
+    "mail-address": re.compile(_MAIL_ADDRESS),
+    "message-id": re.compile(_MESSAGE_ID),
+    "mail-subject": re.compile(r"[^\x00-\x1f\x7f-\x9f]+"),
 }
 
 
 _PARAM_NAME = re.compile(r"[a-z_][a-z0-9_]{0,63}")
 _PATH_PARAM = re.compile(r"\{([a-z_][a-z0-9_]{0,63})\}")
+_FIXED_QUERY_NAME = re.compile(r"\$?[A-Za-z_][A-Za-z0-9_.~-]{0,63}")
+_FIXED_QUERY_VALUE = re.compile(r"[\x20-\x7e]{0,512}")
 _TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9A-Za-z]+")
 _LOWER_TOKEN = re.compile(r"[!#$%&'*+\-.^_`|~0-9a-z]+")
 _HEADER_VALUE = re.compile(r"[\x20-\x7e\t]*")
@@ -127,9 +139,21 @@ def _json_values(value: Any) -> Iterator[Any]:
 
 def _check_url(method: str, url: Any) -> list[str]:
     """The URL's path parameters, in order, refusing anything but one fixed https target."""
-    url = _exact(url, frozenset({"host", "port", "path"}), "url")
+    url = _exact(
+        url, frozenset({"host", "port", "path"}), "url", optional=frozenset({"query"})
+    )
     _require(isinstance(url["host"], str) and not url["host"].startswith("*."), "the host is fixed")
     _require(isinstance(url["path"], str) and "**" not in url["path"], "the path is fixed")
+    query = url.get("query", {})
+    _require(
+        isinstance(query, Mapping)
+        and len(query) <= 16
+        and all(
+            _matches(_FIXED_QUERY_NAME, name) and _matches(_FIXED_QUERY_VALUE, value)
+            for name, value in query.items()
+        ),
+        "url.query is a bounded map of fixed query names to printable ASCII values",
+    )
     try:
         parse_destination(
             {"host": url["host"], "port": url["port"], "path": url["path"], "methods": [method]},
@@ -346,6 +370,12 @@ def _check(after: Any) -> None:
     path_params = _check_url(method, after["url"])
     placements = _check_params(after["params"])
     _require(
+        set(after["url"].get("query", {})).isdisjoint(
+            name for name, where in placements.items() if where == "query"
+        ),
+        "fixed query names cannot be caller query slots",
+    )
+    _require(
         path_params == [name for name in path_params if placements.get(name) == "path"]
         and set(path_params) == {name for name, where in placements.items() if where == "path"}
         and len(set(path_params)) == len(path_params),
@@ -357,12 +387,39 @@ def _check(after: Any) -> None:
         _require(not body_params, "a body parameter needs a body template")
     else:
         _require(method in BODY_METHODS, f"a {method} request has no body")
-        body = _exact(body, frozenset({"template"}), "body")
+        body = _exact(body, frozenset({"template"}), "body", optional=frozenset({"format"}))
         _require(
             set(_body_slots(body["template"])) == body_params,
             "the body's slots are its body parameters",
         )
+        if "format" in body:
+            _require(body["format"] == "mime-reply", "unknown body format")
+            message = _exact(
+                body["template"], frozenset({"from", "to", "in_reply_to", "subject", "text"}),
+                "mime-reply template",
+            )
+            _require(
+                _matches(CHARSETS["mail-address"], message["from"])
+                and len(message["from"]) <= 254,
+                "the MIME sender is a fixed email address",
+            )
+            for field, charset in (
+                ("to", "mail-address"), ("in_reply_to", "message-id"), ("subject", "mail-subject"),
+                ("text", None),
+            ):
+                slot = _exact(message[field], frozenset({"$param"}), "MIME value")
+                param = after["params"][slot["$param"]]
+                _require(
+                    _schema_types(param["schema"]) == {"string"} and param["charset"] == charset,
+                    "MIME values need typed string slots",
+                )
     _check_headers(after["headers"])
+    if body is not None and "format" in body:
+        _require(
+            [value for name, value in after["headers"]["fixed"].items()
+             if name.lower() == "content-type"] == ["text/plain"],
+            "a base64 MIME request needs the fixed text/plain media type",
+        )
     _check_response(after["response"])
     _require(
         after["side_effect"] in SIDE_EFFECTS, "side_effect is none, reversible or irreversible"

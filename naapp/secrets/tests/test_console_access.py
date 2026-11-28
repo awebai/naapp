@@ -483,6 +483,21 @@ async def test_role_derived_access_names_its_role_for_each_member(access):
     assert (OPEN_AGENT.did_aw, READING.grant_id) not in grants(page)
 
 
+async def test_access_buttons_start_disabled_without_restoring_previous_state(access):
+    async with clients(access) as (human, _):
+        await sign_in(access.world, human, owner_scope(INSTALLATION_ID, TEAM, ALICE.principal_did))
+        response = await human.get("/access")
+        assert response.status_code == 200
+
+    page = Page(response.text)
+    for control in ("access-revoke", "access-remove-member"):
+        buttons = page.all(control)
+        assert buttons, control
+        for button in buttons:
+            assert button.get("autocomplete") == "off"
+            assert "disabled" in button
+
+
 async def test_the_secret_view_lists_who_can_use_it_and_how(access):
     async with clients(access) as (human, _):
         await sign_in(access.world, human, owner_scope(INSTALLATION_ID, TEAM, ALICE.principal_did))

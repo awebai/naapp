@@ -1,0 +1,38 @@
+# Template for a fresh Tasks deployment on Render. It is NOT the production
+# identity: the live service is pinned in ops/render-production.json and operated
+# only through the Makefile's prod-* targets. The live service is not
+# Blueprint-managed, so this file records its settings and never drives them.
+# The build fields below must match that manifest; a test enforces it.
+#
+# A Blueprint declares no secret files. The two signing keys are Render secret
+# files, each an Ed25519 seed, mounted at /etc/secrets/<name>:
+#   tasks-emit-1        for kid tasks:emit-1
+#   tasks-grant-read-1  for kid tasks:grant-read-1
+services:
+  - type: web
+    name: tasks
+    env: docker
+    region: virginia
+    plan: starter
+    numInstances: 1
+    rootDir: ""
+    dockerfilePath: ./naapp/tasks/Dockerfile
+    dockerContext: .
+    healthCheckPath: /live
+    envVars:
+      - key: PORT
+        sync: false
+      - key: TASKS_DATABASE_URL
+        sync: false
+      - key: TASKS_AWID_REGISTRY_URL
+        value: https://api.awid.ai
+      - key: TASKS_AWID_SERVICE_TOKEN
+        sync: false
+      - key: TASKS_APP_ID
+        value: tasks
+      - key: TASKS_PUBLIC_ORIGIN
+        sync: false
+      - key: TASKS_APP_EVENTS_ORIGIN
+        sync: false
+      - key: TASKS_APP_KEY_FILES
+        value: '{"tasks:emit-1": "/etc/secrets/tasks-emit-1", "tasks:grant-read-1": "/etc/secrets/tasks-grant-read-1"}'

@@ -1,4 +1,4 @@
-.PHONY: test check-shards lint e2e
+.PHONY: test check-shards lint e2e graph-rehearsal
 
 SECRETS_UNIT = pytest -q -m "not e2e"
 
@@ -13,6 +13,10 @@ check-shards:
 # It starts Docker containers, so it runs only in an assigned slot.
 e2e:
 	SECRETS_E2E=1 uv run pytest -q -m e2e tests/test_e2e_owner_acts.py
+
+graph-rehearsal:
+	test -x "$$NAAPP_AW_BINARY"
+	uv run --no-sync pytest -q -m e2e tests/test_graph_mailbox_rehearsal.py
 
 lint:
 	uv run ruff check .

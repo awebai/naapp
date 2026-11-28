@@ -15,7 +15,7 @@ import pytest
 from aweb_naapp.egress import EgressRefused, canonical_url, match_destination
 from aweb_naapp.egress.addresses import InternalDestinations
 
-from aweb_secrets.operation import OperationTemplate
+from aweb_secrets.operation import OperationInvalid, OperationTemplate
 from aweb_secrets.operation_request import render_operation
 
 from .test_operation_record import REFUND
@@ -129,6 +129,26 @@ def test_a_query_parameter_is_one_encoded_value() -> None:
     template = OperationTemplate.from_after(after)
     request = _render(template, PARAMS, headers=[])
     assert request.url.endswith("/refunds?currency=EUR")
+
+
+def test_owner_query_fields_are_pinned_and_encoded_as_values() -> None:
+    url = {**REFUND["url"], "query": {"$select": "id,amount", "note": "a&admin=true"}}
+    template = _template(url=url)
+    request = _render(template, PARAMS)
+    assert request.url.endswith("?%24select=id%2Camount&note=a%26admin%3Dtrue")
+    assert template.digest != _template().digest
+    with pytest.raises(EgressRefused) as refused:
+        _render(template, {**PARAMS, "$select": "*"})
+    assert refused.value.code == "params_invalid"
+
+
+def test_a_fixed_query_name_cannot_be_a_caller_slot() -> None:
+    after = copy.deepcopy(REFUND)
+    after["url"]["query"] = {"currency": "USD"}
+    after["params"]["currency"]["placement"] = "query"
+    after["body"]["template"].pop("currency")
+    with pytest.raises(OperationInvalid):
+        OperationTemplate.from_after(after)
 
 
 def test_a_query_value_cannot_add_a_parameter() -> None:

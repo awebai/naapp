@@ -711,6 +711,14 @@ jobs:
           PYTEST_ADDOPTS: -rs
         run: make test
 
+      - name: Rehearse mailbox use with the pinned aw release
+        env:
+          NAAPP_AW_BINARY: ${{ github.workspace }}/.tools/bin/aw
+          PYTEST_ADDOPTS: --junitxml=${{ github.workspace }}/junit/secrets-graph-rehearsal.xml
+        run: |
+          make aw
+          make rehearse-secrets-graph
+
       - name: Keep the per-test results
         if: always()
         uses: actions/upload-artifact@v4

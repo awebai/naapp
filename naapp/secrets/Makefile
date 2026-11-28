@@ -15,6 +15,7 @@ e2e:
 	SECRETS_E2E=1 uv run pytest -q -m e2e tests/test_e2e_owner_acts.py
 
 graph-rehearsal:
+	test -x "$$NAAPP_AW_BINARY"
 	uv run --no-sync pytest -q -m e2e tests/test_graph_mailbox_rehearsal.py
 
 lint:

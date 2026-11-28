@@ -711,7 +711,7 @@ jobs:
           PYTEST_ADDOPTS: --junitxml=${{ github.workspace }}/junit/secrets-graph-rehearsal.xml
         run: |
           make aw
-          make -C naapp/secrets graph-rehearsal
+          make rehearse-secrets-graph
 
       - name: Keep the per-test results
         if: always()

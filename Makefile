@@ -20,7 +20,7 @@ SCRIPT_TESTS := test_affected_packages test_ci_result test_ci_workflow test_rele
 	test_secrets_shards test_shipping
 
 .PHONY: affected sync lint lint-scripts test test-scripts production-awid-sync browsers renderer-deps test-renderer image-smoke-folio image-smoke-library image-smoke-tasks check-library-dev aw \
-	check-library-aatk check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets e2e-tasks release-checks \
+	check-library-aatk check-secrets-shards secrets-aw-tools e2e-folio e2e-library e2e-secrets e2e-tasks rehearse-secrets-graph release-checks \
 	release-candidate release-publish
 
 # The packages the change from BASE to HEAD affects, as a JSON list.
@@ -119,6 +119,9 @@ check-library-dev:
 
 aw:
 	scripts/install-aw.sh $(AW_DIR)
+
+rehearse-secrets-graph:
+	NAAPP_AW_BINARY="$${NAAPP_AW_BINARY:-$(AW_DIR)/aw}" $(MAKE) -C naapp/secrets graph-rehearsal
 
 check-library-aatk:
 	$(MAKE) -C naapp/library aatk-spec-check

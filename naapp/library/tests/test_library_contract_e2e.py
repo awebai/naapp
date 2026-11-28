@@ -1146,7 +1146,7 @@ def test_empty_profile_invariant_never_requires_reachable_library(
     # Library logs each request it serves, this one included.
     assert library.http.get(f"{library.origin}/v1/blueprints").status_code == 200
     served = library_lane.requests_served()
-    assert any('"GET /v1/blueprints HTTP/1.1"' in line for line in served), served[-3:]
+    assert any('"GET /v1/blueprints HTTP/1.1"' in line for line in served), served
     team = found_team(
         namespace,
         env={"AWEB_URL": unreachable, "LIBRARY_URL": unreachable, "AWEBAI_LIBRARY_URL": unreachable},

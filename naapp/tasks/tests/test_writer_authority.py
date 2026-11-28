@@ -567,3 +567,173 @@ async def test_a_security_definer_function_owned_by_any_kind_of_writer_refuses(
     await dataset.admin.execute(f'ALTER FUNCTION "{dataset.schema}".noop() OWNER TO {writer}')
 
     assert await dataset.refusals() == {Refusal("indirection_security_definer", None, writer, "noop()")}
+
+
+# --- writers whose authority no ACL shows -------------------------------------
+
+
+async def test_the_owner_is_a_writer_even_with_its_own_privileges_revoked(dataset: Dataset) -> None:
+    # An owner may revoke its own privileges, and can always grant them back.
+    for table in DATASET:
+        await dataset.as_owner(f"REVOKE ALL ON {table} FROM {dataset.owner}")
+    await dataset.as_owner(
+        "CREATE FUNCTION noop() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'SELECT'"
+    )
+    assert not await dataset.admin.fetch_value(
+        f"SELECT has_table_privilege('{dataset.owner}', '\"{dataset.schema}\".tasks', 'DELETE')"
+    )
+
+    assert await dataset.refusals() == {
+        Refusal("indirection_security_definer", None, dataset.owner, "noop()"),
+    }
+
+
+async def _owner_callback(dataset: Dataset, schema: str, table_owner: str) -> str:
+    """A table in ``schema`` owned by ``table_owner``, whose index function writes the
+    dataset and records the role it runs as in ``{schema}.seen``. Returns the table."""
+    live = f'"{dataset.schema}"'
+    await dataset.admin.execute(f"CREATE TABLE {schema}.seen (role TEXT)")
+    await dataset.admin.execute(
+        f"CREATE FUNCTION {schema}.record() RETURNS void LANGUAGE plpgsql AS"
+        f" 'BEGIN INSERT INTO {schema}.seen VALUES (current_user); DELETE FROM {live}.tasks; END'"
+    )
+    await dataset.admin.execute(
+        f"CREATE FUNCTION {schema}.indexed(integer) RETURNS integer LANGUAGE plpgsql IMMUTABLE AS"
+        f" 'BEGIN PERFORM {schema}.record(); RETURN $1; END'"
+    )
+    await dataset.admin.execute(f"CREATE TABLE {schema}.callback (id INTEGER)")
+    await dataset.admin.execute(f"INSERT INTO {schema}.callback VALUES (1)")
+    await dataset.admin.execute(f"CREATE INDEX ON {schema}.callback ({schema}.indexed(id))")
+    await dataset.admin.execute(f"ALTER TABLE {schema}.callback OWNER TO {table_owner}")
+    await dataset.admin.execute(f"ALTER TABLE {schema}.seen OWNER TO {table_owner}")
+    await dataset.admin.execute(f"TRUNCATE {schema}.seen")
+    return f"{schema}.callback"
+
+
+async def test_a_schema_owner_reindexing_a_writers_table_refuses(dataset: Dataset) -> None:
+    # A schema's owner may reindex every table in it, without MAINTAIN on any,
+    # and the index functions run as each table's owner.
+    writer = await dataset.role("NOLOGIN")
+    await dataset.admin.execute(f'GRANT DELETE ON "{dataset.schema}".tasks TO {writer}')
+    await dataset.admin.execute(f'GRANT USAGE ON SCHEMA "{dataset.schema}" TO {writer}')
+    login, dsn = await dataset.login()
+    await dataset.admin.execute(f"CREATE SCHEMA maintained AUTHORIZATION {login}")
+    await dataset.admin.execute(f"GRANT USAGE ON SCHEMA maintained TO {writer}")
+    table = await _owner_callback(dataset, "maintained", writer)
+    assert not await dataset.admin.fetch_value(f"SELECT has_table_privilege('{login}', '{table}', 'MAINTAIN')")
+
+    await _writes(dsn, dataset.schema, "REINDEX SCHEMA maintained")
+    assert await dataset.admin.fetch_value("SELECT array_agg(DISTINCT role) FROM maintained.seen") == [writer]
+
+    assert await dataset.refusals() == {
+        Refusal("write_authority_maintenance_scope", login, login, "maintained"),
+    }
+
+
+async def test_a_login_that_reaches_the_database_owner_refuses(dataset: Dataset) -> None:
+    owner = await dataset.admin.fetch_value(
+        "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()"
+    )
+    login = await dataset.role("LOGIN")
+    await dataset.admin.execute(f'ALTER DATABASE "{dataset.database}" OWNER TO {login}')
+    try:
+        assert await dataset.refusals() == {
+            Refusal("write_authority_maintenance_scope", login, login, dataset.database),
+        }
+    finally:
+        await dataset.admin.execute(f'ALTER DATABASE "{dataset.database}" OWNER TO "{owner}"')
+
+
+async def test_a_security_definer_function_owned_by_a_maintainer_of_a_writers_table_refuses(
+    dataset: Dataset,
+) -> None:
+    # MAINTAIN on a writer's table makes a writer: reindexing runs the table owner's code.
+    maintainer = await dataset.role("NOLOGIN")
+    login, dsn = await dataset.login()
+    live = f'"{dataset.schema}"'
+    table = await _owner_callback(dataset, live, dataset.owner)
+    await dataset.admin.execute(f"GRANT MAINTAIN ON {table} TO {maintainer}")
+    await dataset.admin.execute(f"GRANT USAGE ON SCHEMA {live} TO {maintainer}")
+    await dataset.admin.execute(
+        f"CREATE FUNCTION {live}.rebuild() RETURNS void LANGUAGE sql SECURITY DEFINER"
+        f" AS 'REINDEX TABLE {table}'"
+    )
+    await dataset.admin.execute(f"ALTER FUNCTION {live}.rebuild() OWNER TO {maintainer}")
+
+    await _writes(dsn, dataset.schema, "SELECT rebuild()")
+    assert await dataset.admin.fetch_value(f"SELECT array_agg(DISTINCT role) FROM {live}.seen") == [dataset.owner]
+
+    assert await dataset.refusals() == {
+        Refusal("indirection_security_definer", None, maintainer, "rebuild()"),
+    }
+
+
+async def test_a_table_owner_is_a_writer_even_with_its_own_privileges_revoked(dataset: Dataset) -> None:
+    other = await dataset.role("NOLOGIN")
+    live = f'"{dataset.schema}"'
+    await dataset.admin.execute(f"ALTER TABLE {live}.claims OWNER TO {other}")
+    await dataset.admin.execute(f"REVOKE ALL ON {live}.claims FROM {other}")
+    await dataset.admin.execute(f"CREATE FUNCTION {live}.noop() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'SELECT'")
+    await dataset.admin.execute(f"ALTER FUNCTION {live}.noop() OWNER TO {other}")
+
+    assert await dataset.refusals() == {
+        Refusal("shape_not_owned", None, None, "claims"),
+        Refusal("indirection_security_definer", None, other, "noop()"),
+    }
+
+
+async def test_the_database_owner_is_a_writer(dataset: Dataset) -> None:
+    # It may reindex every table in the database, the dataset's included.
+    owner = await dataset.admin.fetch_value(
+        "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()"
+    )
+    database_owner = await dataset.role("NOLOGIN")
+    live = f'"{dataset.schema}"'
+    await dataset.admin.execute(f'ALTER DATABASE "{dataset.database}" OWNER TO {database_owner}')
+    try:
+        await dataset.admin.execute(f"CREATE FUNCTION {live}.noop() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'SELECT'")
+        await dataset.admin.execute(f"ALTER FUNCTION {live}.noop() OWNER TO {database_owner}")
+
+        assert await dataset.refusals() == {
+            Refusal("indirection_security_definer", None, database_owner, "noop()"),
+        }
+    finally:
+        await dataset.admin.execute(f'ALTER DATABASE "{dataset.database}" OWNER TO "{owner}"')
+
+
+async def test_the_owner_of_a_schema_holding_a_writers_table_is_a_writer(dataset: Dataset) -> None:
+    schema_owner = await dataset.role("NOLOGIN")
+    await dataset.admin.execute(f"CREATE SCHEMA maintained AUTHORIZATION {schema_owner}")
+    await dataset.admin.execute("CREATE TABLE maintained.outside (id INTEGER)")
+    await dataset.admin.execute(f"ALTER TABLE maintained.outside OWNER TO {dataset.owner}")
+    await dataset.admin.execute("CREATE FUNCTION maintained.noop() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'SELECT'")
+    await dataset.admin.execute(f"ALTER FUNCTION maintained.noop() OWNER TO {schema_owner}")
+
+    assert await dataset.refusals() == {
+        Refusal("indirection_security_definer", None, schema_owner, "maintained.noop()"),
+    }
+
+
+async def test_a_login_owning_a_schema_with_no_writers_table_passes(dataset: Dataset) -> None:
+    login = await dataset.role("LOGIN")
+    await dataset.admin.execute(f"CREATE SCHEMA own AUTHORIZATION {login}")
+    await dataset.admin.execute("CREATE TABLE own.notes (id INTEGER)")
+    await dataset.admin.execute(f"ALTER TABLE own.notes OWNER TO {login}")
+
+    assert await dataset.refusals() == set()
+
+
+async def test_the_owner_is_a_writer_even_when_it_owns_no_dataset_table(dataset: Dataset) -> None:
+    other = await dataset.role("NOLOGIN")
+    live = f'"{dataset.schema}"'
+    # Nor the schema, which would make it a writer as the schema's owner.
+    await dataset.admin.execute(f"ALTER SCHEMA {live} OWNER TO {other}")
+    await dataset.admin.execute(f"GRANT USAGE ON SCHEMA {live} TO {dataset.owner}")
+    for table in DATASET:
+        await dataset.admin.execute(f"ALTER TABLE {live}.{table} OWNER TO {other}")
+    await dataset.admin.execute(f"CREATE FUNCTION {live}.noop() RETURNS void LANGUAGE sql SECURITY DEFINER AS 'SELECT'")
+    await dataset.admin.execute(f"ALTER FUNCTION {live}.noop() OWNER TO {dataset.owner}")
+
+    refusals = await dataset.refusals()
+    assert Refusal("indirection_security_definer", None, dataset.owner, "noop()") in refusals
+    assert {refusal.object for refusal in refusals if refusal.code == "shape_not_owned"} == set(DATASET)

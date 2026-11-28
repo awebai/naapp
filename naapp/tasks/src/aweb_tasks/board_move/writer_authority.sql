@@ -21,12 +21,17 @@
 -- - is the owner, a superuser or pg_write_all_data, or owns a dataset table;
 -- - holds a write privilege on a dataset table, on the table or on any column,
 --   or TRIGGER on one: a trigger runs with the rights of whoever next writes;
--- - holds MAINTAIN on a relation a writer owns: maintenance, and a
---   materialized view's refresh, run code as the relation's owner.
+-- - holds MAINTAIN on a relation a writer owns, or owns the database or a
+--   schema holding such a relation: maintenance, and a materialized view's
+--   refresh, run code as the relation's owner, and a database's or schema's
+--   owner may reindex every table in it.
 --
--- The writers are the owner, every superuser, every role that owns a dataset
--- table or holds a write, TRIGGER or MAINTAIN privilege on one, and every
--- member of a writer, in any mode. No writer may own a view or materialized
+-- The writers are the owner, each dataset table's owner and the database's
+-- owner, whatever their privileges show, since an owner can grant itself back
+-- what it revoked; every role holding a write, TRIGGER or MAINTAIN privilege
+-- on a dataset table, every superuser among them; and, repeatedly, every
+-- member of a writer, in any mode, and every role that holds MAINTAIN on a
+-- relation a writer owns, or owns the schema holding it. No writer may own a view or materialized
 -- view, a SECURITY DEFINER function or procedure, or a rule but a view's
 -- _RETURN: each lets whoever can use it act with its owner's rights. Objects
 -- in pg_catalog and information_schema are not checked: the trust assumption
@@ -54,17 +59,36 @@ principals (oid) AS (
     SELECT subowner FROM pg_subscription
     WHERE subdbid = (SELECT oid FROM pg_database WHERE datname = current_database())
 ),
-writers (role) AS (
-    -- A table's owner, and every superuser, holds every privilege on it.
-    SELECT pg_roles.oid FROM pg_roles CROSS JOIN tables
-    WHERE tables.oid IS NOT NULL
-      AND (has_table_privilege(pg_roles.oid, tables.oid, 'INSERT, UPDATE, DELETE, TRUNCATE, TRIGGER, MAINTAIN')
-           OR has_any_column_privilege(pg_roles.oid, tables.oid, 'INSERT, UPDATE'))
-    UNION
-    SELECT membership.member FROM writers JOIN pg_auth_members membership ON membership.roleid = writers.role
-),
 checked AS (
     SELECT oid FROM pg_namespace WHERE nspname NOT IN ('pg_catalog', 'information_schema')
+),
+writers (role) AS (
+    SELECT oid FROM owner
+    UNION
+    SELECT relowner FROM tables WHERE oid IS NOT NULL
+    UNION
+    SELECT datdba FROM pg_database WHERE datname = current_database()
+    UNION
+    -- Every superuser holds every privilege. MAINTAIN on a dataset table is
+    -- found below, on the relations the table owners own.
+    SELECT pg_roles.oid FROM pg_roles CROSS JOIN tables
+    WHERE tables.oid IS NOT NULL
+      AND (has_table_privilege(pg_roles.oid, tables.oid, 'INSERT, UPDATE, DELETE, TRUNCATE, TRIGGER')
+           OR has_any_column_privilege(pg_roles.oid, tables.oid, 'INSERT, UPDATE'))
+    UNION
+    SELECT next.role FROM writers CROSS JOIN LATERAL (
+        SELECT member FROM pg_auth_members WHERE roleid = writers.role
+        UNION ALL
+        SELECT namespace.nspowner
+        FROM pg_class relation JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
+        WHERE relation.relowner = writers.role AND relation.relkind IN ('r', 'p', 'm')
+          AND namespace.oid IN (SELECT oid FROM checked)
+        UNION ALL
+        SELECT pg_roles.oid FROM pg_class relation CROSS JOIN pg_roles
+        WHERE relation.relowner = writers.role AND relation.relkind IN ('r', 'p', 'm')
+          AND relation.relnamespace IN (SELECT oid FROM checked)
+          AND has_table_privilege(pg_roles.oid, relation.oid, 'MAINTAIN')
+    ) next (role)
 ),
 reach (principal, role) AS (
     SELECT oid, oid FROM principals
@@ -122,6 +146,18 @@ refusals (code, principal, role, object) AS (
       AND relation.relnamespace IN (SELECT oid FROM checked)
       AND relation.relowner IN (SELECT role FROM writers)
       AND has_table_privilege(reach.role, relation.oid, 'MAINTAIN')
+    UNION ALL
+    SELECT 'write_authority_maintenance_scope', principal, role, namespace.nspname::text
+    FROM reach JOIN pg_namespace namespace ON namespace.nspowner = reach.role
+    WHERE namespace.oid IN (SELECT oid FROM checked)
+      AND EXISTS (
+          SELECT 1 FROM pg_class relation
+          WHERE relation.relnamespace = namespace.oid AND relation.relkind IN ('r', 'p', 'm')
+            AND relation.relowner IN (SELECT role FROM writers))
+    UNION ALL
+    SELECT 'write_authority_maintenance_scope', principal, role, datname::text
+    FROM reach JOIN pg_database ON pg_database.datdba = reach.role
+    WHERE datname = current_database()
     -- A3, through what a writer owns
     UNION ALL
     SELECT 'indirection_view', NULL, relowner, oid::regclass::text FROM pg_class

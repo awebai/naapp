@@ -67,7 +67,9 @@ one machine: `prepare_namespace()` publishes the namespace's controller in the
 lane's DNS, `found_team()` founds a team in it, and `connect_team()` and
 `install_app()` install an app the way an operator's team does. `ComposeLane.http`
 sends ordinary requests, and `LaneClient` takes httpx's `params` and `json`
-for them. `naapp/library/tests/test_e2e_smoke.py` shows the fixtures.
+for them. `naapp/library/tests/library_lane.py` and
+`naapp/folio/tests/folio_lane.py` show the fixtures; Folio's also runs a
+Chromium on the lane, which its tests reach with `chromium.connect()`.
 
 ## Checks that hold across the move
 

@@ -130,7 +130,7 @@ check-library-aatk:
 # The real-stack journeys. They start Docker containers.
 e2e-folio:
 	PATH="$(AW_DIR):$$PATH" bash scripts/check-naapp-e2e-aw.sh
-	PATH="$(AW_DIR):$$PATH" $(MAKE) -C naapp/folio e2e
+	NAAPP_AW_BINARY="$${NAAPP_AW_BINARY:-$(AW_DIR)/aw}" $(MAKE) -C naapp/folio e2e
 
 e2e-library:
 	PATH="$(AW_DIR):$$PATH" bash scripts/check-naapp-e2e-aw.sh

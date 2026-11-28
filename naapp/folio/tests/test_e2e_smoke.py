@@ -1,236 +1,131 @@
+"""Folio on a real stack: the lane's AWID with DNS verification, its
+coordination server and Folio's production image behind TLS, on one private
+network. Each team installs Folio with the real ``aw plugin install`` before
+it calls a member route.
+"""
+
 from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shlex
-import subprocess
 import time
 import uuid
-from collections.abc import Callable, Iterator
-from contextlib import contextmanager
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from http import HTTPMethod
 from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
-from aweb_naapp_testing import deployment
-from aweb_naapp_testing.deployment import (
-    AWWorkspace,
-    CapturedRequest,
-    E2ETeam,
-    RunningApp,
-    compose,
-    configure_app_client,
-    connect_team_server,
-    e2e_stack,
+from aweb_naapp_testing import Member
+from aweb_naapp_testing.compose_lane import REGISTRY_ORIGIN, TEAM_SERVER_ORIGIN, ComposeLane
+from aweb_naapp_testing.lane_team import (
+    LaneApp,
+    LaneNamespace,
+    LaneTeam,
+    assert_aw_status,
+    assert_aw_success,
+    aw,
+    aw_json,
+    aw_request,
+    command,
+    connect_team,
     grant_install_admin,
-    install_app,
-    installable_deployment,
-    provision_team,
     publish_team_server,
-    wait_http_ok,
+    run_aw,
+    run_aw_json,
+    shell,
+    spawn,
+    team_key_seed,
 )
+from folio_lane import BACKEND_ORIGIN, FolioLane, provision_team
+from nacl.signing import SigningKey
 
 pytestmark = pytest.mark.e2e
 
-STACK = e2e_stack(os.environ, project="folio-e2e", database="folio")
-AWID_URL = STACK.awid_url
-# Same-operator credential shared with the e2e awid service (docker-compose.e2e.yml).
-AWID_SERVICE_TOKEN = os.environ.get(
-    "FOLIO_E2E_AWID_SERVICE_TOKEN", "folio-e2e-awid-service-token-0123456789abcdef"
-)
-POSTGRES_URL = STACK.postgres_url
-# Folio's own settings the caller's environment must not leak into a deployment.
-_DEPLOYMENT_SETTINGS = (
-    "FOLIO_AWID_SERVICE_TOKEN",
-    "FOLIO_TEAM_SERVER_INTERNAL_ORIGINS",
-    "FOLIO_HOOK_INTERNAL_DESTINATIONS",
-    "FOLIO_HOOK_INTERNAL_CIDR",
-    "FOLIO_HOOK_CA_FILE",
-)
 
-# The names Folio's e2e modules import for a deployment and its aw calls.
-RunningFolio = RunningApp
-_run_aw = deployment.run_aw
-_run_aw_json = deployment.run_aw_json
-_aw_request = deployment.aw_request
-_assert_aw_success = deployment.assert_aw_success
-_assert_aw_status = deployment.assert_aw_status
-_aw_json = deployment.aw_json
-
-
-def _require_e2e_enabled() -> None:
-    if os.environ.get("FOLIO_E2E") != "1":
-        pytest.skip("set FOLIO_E2E=1 or run `make e2e` to execute docker-backed e2e tests")
-
-
-def _folio_settings(
-    *, awid_service_token: str | None, app_id: str
-) -> Callable[[str], dict[str, str]]:
-    """Folio's own settings at a deployment's public origin."""
-
-    def settings(origin: str) -> dict[str, str]:
-        values = {
-            "FOLIO_DATABASE_URL": POSTGRES_URL,
-            "FOLIO_AWID_REGISTRY_URL": AWID_URL,
-            "FOLIO_AUTH_CACHE_TTL_SECONDS": "2",
-            "FOLIO_PUBLIC_ORIGIN": origin,
-            "FOLIO_APP_ID": app_id,
-        }
-        if awid_service_token is not None:
-            values["FOLIO_AWID_SERVICE_TOKEN"] = awid_service_token
-        return values
-
-    return settings
-
-
-@pytest.fixture(scope="module")
-def folio(tmp_path_factory: pytest.TempPathFactory) -> Iterator[RunningFolio]:
-    with _installed_deployment(tmp_path_factory.mktemp("folio-e2e"), AWID_SERVICE_TOKEN) as running:
-        yield running
-
-
-@pytest.fixture(scope="module")
-def folio_without_awid_service_token(
-    tmp_path_factory: pytest.TempPathFactory,
-) -> Iterator[RunningFolio]:
-    with _installed_deployment(tmp_path_factory.mktemp("folio-private-e2e"), None) as running:
-        yield running
-
-
-@contextmanager
-def _installed_deployment(
-    tmp_path: Path, service_token: str | None, *, app_id: str = "folio-e2e"
-) -> Iterator[RunningFolio]:
-    """Folio plus the coordination server its teams install it through."""
-    _require_e2e_enabled()
-    wait_http_ok(f"{AWID_URL}/health")
-    with installable_deployment(
-        tmp_path,
-        stack=STACK,
-        name="folio",
-        factory="folio.api:create_app",
-        settings_prefix="FOLIO_",
-        env_for=_folio_settings(awid_service_token=service_token, app_id=app_id),
-        awid_service_token=AWID_SERVICE_TOKEN,
-        drop_env=_DEPLOYMENT_SETTINGS,
-    ) as running:
-        yield running
-
-
-@pytest.fixture(scope="module")
-def folio_origin(folio: RunningFolio) -> str:
-    return folio.origin
-
-
-@pytest.fixture()
-def aw_workspace_factory(tmp_path: Path) -> Callable[[str], AWWorkspace]:
-    _require_e2e_enabled()
-    return deployment.aw_workspace_factory(tmp_path, awid_url=AWID_URL)
-
-
-@pytest.fixture()
-def aw_workspace(aw_workspace_factory: Callable[[str], AWWorkspace]) -> AWWorkspace:
-    return aw_workspace_factory("primary")
-
-
-def _provision_team(
-    workspace: AWWorkspace,
-    *,
-    alias: str = "alice",
-    folio: RunningFolio | None = None,
-) -> E2ETeam:
-    """A new team with ``alias`` as its member; with ``folio``, the team also
-    installs that deployment through its coordination server."""
-    team = provision_team(workspace, awid_url=AWID_URL, namespace_prefix="folio", alias=alias)
-    if folio is not None:
-        connect_team_server(team, folio, awid_url=AWID_URL)
-        install_app(team, folio)
-    return team
+def _on_host(lane: ComposeLane, path: str) -> Path:
+    """A machine path under /runtime, as the same file on the runner."""
+    return lane.runtime / path.removeprefix("/runtime/")
 
 
 def _create_document(
-    folio: RunningFolio, team: E2ETeam, *, slug: str, title: str, body: str
+    folio: LaneApp, team: LaneTeam, *, slug: str, title: str, body: str
 ) -> dict[str, Any]:
     payload = json.dumps({"slug": slug, "title": title, "body": body}, separators=(",", ":"))
-    result = _aw_request(team, "POST", f"{folio.origin}/v1/documents", body=payload)
-    data = _aw_json(result, context=f"create document {slug}")
+    result = aw_request(team, HTTPMethod.POST, f"{folio.origin}/v1/documents", body=payload)
+    data = aw_json(result, context=f"create document {slug}")
     assert isinstance(data, dict)
     return data
 
 
-def _get_document(folio: RunningFolio, team: E2ETeam, slug: str) -> dict[str, Any]:
-    result = _aw_request(team, "GET", f"{folio.origin}/v1/documents/{slug}")
-    data = _aw_json(result, context=f"get document {slug}")
+def _get_document(folio: LaneApp, team: LaneTeam, slug: str) -> dict[str, Any]:
+    result = aw_request(team, HTTPMethod.GET, f"{folio.origin}/v1/documents/{slug}")
+    data = aw_json(result, context=f"get document {slug}")
     assert isinstance(data, dict)
     return data
 
 
-def _list_documents(folio: RunningFolio, team: E2ETeam) -> list[dict[str, Any]]:
-    result = _aw_request(team, "GET", f"{folio.origin}/v1/documents")
-    data = _aw_json(result, context="list documents")
+def _list_documents(folio: LaneApp, team: LaneTeam) -> list[dict[str, Any]]:
+    result = aw_request(team, HTTPMethod.GET, f"{folio.origin}/v1/documents")
+    data = aw_json(result, context="list documents")
     assert isinstance(data, list)
     return data
 
 
-def _append_version(
-    folio: RunningFolio, team: E2ETeam, *, slug: str, body: str, tmp_path: Path
-) -> dict[str, Any]:
-    body_file = tmp_path / f"{slug}-{uuid.uuid4().hex}.txt"
-    body_file.write_text(body, encoding="utf-8")
-    result = _aw_request(
-        team, "POST", f"{folio.origin}/v1/documents/{slug}/versions", body_file=body_file
+def _append_version(folio: LaneApp, team: LaneTeam, *, slug: str, body: str) -> dict[str, Any]:
+    body_file = team.workspace.write(f"{slug}-{uuid.uuid4().hex}.txt", body)
+    result = aw_request(
+        team, HTTPMethod.POST, f"{folio.origin}/v1/documents/{slug}/versions", body_file=body_file
     )
-    data = _aw_json(result, context=f"append version {slug}")
+    data = aw_json(result, context=f"append version {slug}")
     assert isinstance(data, dict)
     return data
 
 
-def _list_versions(folio: RunningFolio, team: E2ETeam, slug: str) -> list[dict[str, Any]]:
-    result = _aw_request(team, "GET", f"{folio.origin}/v1/documents/{slug}/versions")
-    data = _aw_json(result, context=f"list versions {slug}")
+def _list_versions(folio: LaneApp, team: LaneTeam, slug: str) -> list[dict[str, Any]]:
+    result = aw_request(team, HTTPMethod.GET, f"{folio.origin}/v1/documents/{slug}/versions")
+    data = aw_json(result, context=f"list versions {slug}")
     assert isinstance(data, list)
     return data
 
 
-def _get_billing(folio: RunningFolio, team: E2ETeam) -> dict[str, Any]:
-    result = _aw_request(team, "GET", f"{folio.origin}/v1/billing")
-    data = _aw_json(result, context="get billing")
+def _get_billing(folio: LaneApp, team: LaneTeam) -> dict[str, Any]:
+    result = aw_request(team, HTTPMethod.GET, f"{folio.origin}/v1/billing")
+    data = aw_json(result, context="get billing")
     assert isinstance(data, dict)
     return data
 
 
-def test_health_endpoints_are_public(folio: RunningFolio) -> None:
+def test_health_endpoints_are_public(folio: LaneApp) -> None:
     for path in ("/health", "/live", "/ready"):
-        response = httpx.get(f"{folio.origin}{path}", timeout=10.0)
+        response = folio.http.get(f"{folio.origin}{path}")
         assert response.status_code == 200, response.text
         body = response.json()
         assert body["status"] == "ok" and body["service"] == folio.app_id, body
         assert "git_sha" in body["build"], body
-    checks = httpx.get(f"{folio.origin}/health", timeout=10.0).json()["checks"]
+    checks = folio.http.get(f"{folio.origin}/health").json()["checks"]
     assert checks == {"database": "ok", "outbox": "ok"}, checks
 
 
-def test_no_envelope_fails_closed(folio_origin: str) -> None:
-    response = httpx.get(f"{folio_origin}/v1/documents", timeout=10.0)
+def test_no_envelope_fails_closed(folio: LaneApp) -> None:
+    response = folio.http.get(f"{folio.origin}/v1/documents")
     assert response.status_code == 401, response.text
 
 
-def test_manifest_catalog_is_public_and_variants_byte_stable(folio: RunningFolio) -> None:
+def test_manifest_catalog_is_public_and_variants_byte_stable(folio: LaneApp) -> None:
     from aweb_naapp.manifest import canonical_bytes
     from manifest_config import served_manifest
 
     # Catalog discovery is public and pins the deployment's filled v2 bytes.
-    catalog = httpx.get(f"{folio.origin}/.well-known/aweb-app-versions.json", timeout=10.0)
+    catalog = folio.http.get(f"{folio.origin}/.well-known/aweb-app-versions.json")
     assert catalog.status_code == 200, catalog.text
     variant = catalog.json()["variants"][0]
     assert catalog.json()["app_id"] == folio.app_id
     assert variant["manifest_version"] == 2
     assert variant["url"] == "/manifests/v2.json"
-    response = httpx.get(f"{folio.origin}{variant['url']}", timeout=10.0)
+    response = folio.http.get(f"{folio.origin}{variant['url']}")
 
     assert response.status_code == 200, response.text
     assert response.headers["content-type"].startswith("application/json")
@@ -240,22 +135,19 @@ def test_manifest_catalog_is_public_and_variants_byte_stable(folio: RunningFolio
     expected["app"]["id"] = folio.app_id
     assert response.content == canonical_bytes(expected)
     assert variant["digest"] == "sha256:" + hashlib.sha256(response.content).hexdigest()
-    assert httpx.get(f"{folio.origin}/aweb-app.json", timeout=10.0).content == response.content
-    again = httpx.get(f"{folio.origin}{variant['url']}", timeout=10.0)
+    assert folio.http.get(f"{folio.origin}/aweb-app.json").content == response.content
+    again = folio.http.get(f"{folio.origin}{variant['url']}")
     assert again.content == response.content
-    assert httpx.get(f"{folio.origin}/.well-known/aweb-app.json", timeout=10.0).status_code == 404
+    assert folio.http.get(f"{folio.origin}/.well-known/aweb-app.json").status_code == 404
 
 
 def test_local_member_installs_folio_without_global_identity_metadata(
-    folio: RunningFolio,
-    aw_workspace: AWWorkspace,
-    tmp_path: Path,
+    folio: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    controller = _provision_team(aw_workspace)
-    assert folio.server is not None
-    aw_workspace.env["AWEB_URL"] = folio.server.origin
-    invite = _run_aw_json(
-        aw_workspace,
+    controller = provision_team(namespace)
+    invite = run_aw_json(
+        controller.workspace,
         "id",
         "team",
         "invite",
@@ -265,25 +157,22 @@ def test_local_member_installs_folio_without_global_identity_metadata(
         controller.team,
         "--member-local",
     )
-    member_path = tmp_path / "local-member"
-    member_path.mkdir()
     # A same-machine controller invite uses the real controller and AWID. The
     # member owns a fresh signing key and certificate, with no global metadata.
-    workspace = AWWorkspace(path=member_path, env=dict(aw_workspace.env))
-    configure_app_client(workspace, folio)
-    _run_aw(workspace, "id", "team", "accept-invite", invite["token"], "--local", "--name", "bob")
-    assert not (member_path / ".aw" / "identity.yaml").exists()
-    assert (member_path / ".aw" / "signing.key").is_file()
-    _run_aw(
+    workspace = namespace.workspace(f"{controller.team}-local-member")
+    run_aw(workspace, "id", "team", "accept-invite", invite["token"], "--local", "--name", "bob")
+    assert not (workspace.host / ".aw" / "identity.yaml").exists()
+    assert (workspace.host / ".aw" / "signing.key").is_file()
+    run_aw(
         workspace,
         "workspace",
         "connect",
         "--service",
-        folio.server.origin,
+        TEAM_SERVER_ORIGIN,
         "--team",
         controller.team_id,
     )
-    cert = _run_aw_json(workspace, "id", "cert", "show")
+    cert = run_aw_json(workspace, "id", "cert", "show")
     member = replace(
         controller,
         workspace=workspace,
@@ -292,13 +181,15 @@ def test_local_member_installs_folio_without_global_identity_metadata(
         did_key=str(cert["member_did_key"]),
         certificate_id=str(cert["certificate_id"]),
     )
-    publish_team_server(controller, folio.server.origin, awid_url=AWID_URL)
-    grant_install_admin(member, folio.server)
-    installed = _run_aw_json(workspace, "plugin", "install", folio.origin)
+    publish_team_server(controller)
+    grant_install_admin(member)
+    installed = run_aw_json(workspace, "plugin", "install", folio.origin)
     assert installed["approved"], installed
-    receipt = _aw_json(
-        _aw_request(
-            member, "GET", folio.server.origin + "/v1/apps/installed?team_id=" + member.team_id
+    receipt = aw_json(
+        aw_request(
+            member,
+            HTTPMethod.GET,
+            f"{TEAM_SERVER_ORIGIN}/v1/apps/installed?team_id={member.team_id}",
         ),
         context="local member installation",
     )
@@ -310,261 +201,199 @@ def test_local_member_installs_folio_without_global_identity_metadata(
         and app["origin_verified"]
         for app in receipt["apps"]
     ), receipt
-    result = _aw_request(member, "GET", folio.origin + "/v1/documents")
-    assert _assert_aw_success(result, context="local member Folio tools").strip() == "[]"
+    result = aw_request(member, HTTPMethod.GET, f"{folio.origin}/v1/documents")
+    assert assert_aw_success(result, context="local member Folio tools").strip() == "[]"
 
 
 def test_member_authenticates_without_the_awid_service_token(
-    folio_without_awid_service_token: RunningFolio, aw_workspace: AWWorkspace
+    folio_without_awid_service_token: LaneApp, namespace: LaneNamespace
 ) -> None:
     # Without a service token Folio checks the member's certificate through
     # AWID's per-certificate status.
-    team = _provision_team(aw_workspace, folio=folio_without_awid_service_token)
-    result = _aw_request(team, "GET", f"{folio_without_awid_service_token.origin}/v1/documents")
-    assert _assert_aw_success(result, context="member without service token").strip() == "[]"
+    team = provision_team(namespace, folio=folio_without_awid_service_token)
+    result = aw_request(
+        team, HTTPMethod.GET, f"{folio_without_awid_service_token.origin}/v1/documents"
+    )
+    assert assert_aw_success(result, context="member without service token").strip() == "[]"
 
 
 def test_install_after_mint_uses_replacement_grant(
-    aw_workspace: AWWorkspace,
-    tmp_path: Path,
+    folio_install: LaneApp,
+    folio_lane: FolioLane,
+    namespace: LaneNamespace,
 ) -> None:
-    team = _provision_team(aw_workspace)
-    resident_home = aw_workspace.path / ".aw"
-    before_home = tmp_path / "before-install"
-    replacement_home = tmp_path / "after-install"
-    instance = tmp_path / "instance"
-    instance.mkdir()
+    lane = folio_lane.lane
+    team = provision_team(namespace)
+    resident = team.workspace
+    resident_home = f"{resident.path}/.aw"
+    before_home = f"{resident.path}-before-install"
+    replacement_home = f"{resident.path}-after-install"
+    instance = namespace.workspace(f"{team.team}-instance")
     # A reachable TLS deployment has its own identity, never the hosted id.
-    app_id = "folio-install"
-    with _installed_deployment(tmp_path, AWID_SERVICE_TOKEN, app_id=app_id) as folio:
-        server = folio.server
-        assert server is not None
-        origin = server.origin
-        aw_workspace.env["AWEB_URL"] = origin
-        configure_app_client(aw_workspace, folio)
-        _run_aw(aw_workspace, "workspace", "connect", "--service", origin, "--team", team.team_id)
-        publish_team_server(team, origin, awid_url=AWID_URL)
-        grant_install_admin(team, server)
-        with (tmp_path / "custody.log").open("w+") as log:
-            custody = subprocess.Popen(
-                ["aw", "--identity-home", str(resident_home), "custody", "serve"],
-                cwd=aw_workspace.path,
-                env=aw_workspace.env,
-                stdout=log,
-                stderr=log,
-            )
-            try:
-                deadline = time.monotonic() + 30
-                while True:
-                    status = subprocess.run(
-                        [
-                            "aw",
-                            "--identity-home",
-                            str(resident_home),
-                            "--json",
-                            "custody",
-                            "status",
-                        ],
-                        cwd=instance,
-                        env=aw_workspace.env,
-                        text=True,
-                        capture_output=True,
-                        timeout=5,
-                    )
-                    if status.returncode == 0:
-                        break
-                    assert time.monotonic() < deadline, status.stderr
-                    assert custody.poll() is None, "custody exited before readiness"
-                    time.sleep(0.05)
-                minted = _run_aw_json(
-                    aw_workspace,
-                    "id",
-                    "grant",
-                    "mint",
-                    "--bundle",
-                    "normal-agent",
-                    "--ttl",
-                    "30m",
-                    "--custody-socket",
-                    "auto",
-                    "--out",
-                    str(before_home),
-                )
-                assert minted["apps"] == []
-                assert minted["custody_socket_path"] == json.loads(status.stdout)["socket_path"]
-                before_material = {
-                    p.name: hashlib.sha256(p.read_bytes()).digest()
-                    for p in before_home.iterdir()
-                    if p.is_file()
-                }
-                grant_env = dict(aw_workspace.env, AWEB_IDENTITY_HOME=str(before_home))
-                grant = AWWorkspace(path=instance, env=grant_env)
-                manifest = folio.origin
-                refused = subprocess.run(
-                    ["aw", "plugin", "install", manifest],
-                    cwd=instance,
-                    env=grant_env,
-                    text=True,
-                    capture_output=True,
-                    timeout=30,
-                )
-                assert refused.returncode != 0 and "app_management_denied" in refused.stderr
-                installed = _run_aw_json(
-                    aw_workspace,
-                    "--identity-home",
-                    str(resident_home),
-                    "plugin",
-                    "install",
-                    manifest,
-                )
-                assert installed["approved"] and installed["existing_grants_unchanged"]
-                assert installed["identity_home"] == str(resident_home)
-                assert installed["active_grants"] == 1
-                assert installed["grant_restart_command"] == [
-                    "env",
-                    "AWEB_IDENTITY_HOME=<new-grant-home>",
-                    "<agent-command>",
-                ]
-                assert installed["oats_renew_restart_command"] == [
-                    "oats",
-                    "session",
-                    "restart",
-                    "--home",
-                    "<instance-home>",
-                ]
-                updated = _run_aw(aw_workspace, "--json=false", "plugin", "update", app_id)
-                commands = [
-                    shlex.split(line.strip())
-                    for line in updated.stdout.splitlines()
-                    if line.startswith("  ")
-                ]
-                assert installed["grant_refresh_command"] in commands
-                assert installed["grant_restart_command"] in commands
-                assert installed["oats_renew_restart_command"] in commands
-                payload = tmp_path / "document with space.json"
-                payload.write_text(
-                    json.dumps(dict(slug="grant-install", title="Grant install", body="first"))
-                )
-                denied = subprocess.run(
-                    ["aw", app_id, "create", "--body-file", str(payload)],
-                    cwd=instance,
-                    env=grant_env,
-                    text=True,
-                    capture_output=True,
-                    timeout=30,
-                )
-                assert denied.returncode != 0 and "app_tool_denied" in denied.stderr
-                # Follow the machine-readable action; never modify the old grant.
-                action = installed["grant_refresh_command"]
-                assert action[0] == "aw" and action[-1] == "<new-grant-home>"
-                action[-1] = str(replacement_home)
-                ttl_index = action.index("--ttl") + 1
-                assert action[ttl_index] == "<ttl>"
-                action[ttl_index] = "15m"
-                replacement = _run_aw_json(aw_workspace, *action[1:])
-                assert replacement["grant_id"] != minted["grant_id"]
-                assert replacement["custody_socket_path"] == minted["custody_socket_path"]
-                expires = datetime.fromisoformat(replacement["expires_at"].replace("Z", "+00:00"))
-                assert timedelta(0) < expires - datetime.now(UTC) <= timedelta(minutes=15)
-                assert app_id in {app["app_id"] for app in replacement["apps"]}
-                grant = AWWorkspace(
-                    path=instance, env=dict(grant.env, AWEB_IDENTITY_HOME=str(replacement_home))
-                )
-                # Follow the printed shell instructions, replacing the WHOLE
-                # quoted placeholder and preserving the spaced path argument.
-                restart_template = next(
-                    line.strip()
-                    for line in updated.stdout.splitlines()
-                    if line.startswith("  ")
-                    and shlex.split(line.strip()) == installed["grant_restart_command"]
-                )
-                restart_shell = restart_template.replace(
-                    shlex.quote("AWEB_IDENTITY_HOME=<new-grant-home>"),
-                    shlex.quote(f"AWEB_IDENTITY_HOME={replacement_home}"),
-                ).replace(
-                    shlex.quote("<agent-command>"),
-                    shlex.join(["aw", "--json", app_id, "create", "--body-file", str(payload)]),
-                )
-                launched = subprocess.run(
-                    ["sh", "-c", restart_shell],
-                    cwd=instance,
-                    env=grant_env,
-                    text=True,
-                    capture_output=True,
-                    timeout=30,
-                )
-                assert launched.returncode == 0, launched.stderr
-                created = json.loads(launched.stdout)
-                # JSON uses argument elements, never a joined command string.
-                restart_argv = [
-                    installed["grant_restart_command"][0],
-                    f"AWEB_IDENTITY_HOME={replacement_home}",
-                    "aw",
-                    "--json",
-                    app_id,
-                    "show",
-                    "--slug",
-                    "grant-install",
-                ]
-                resumed = subprocess.run(
-                    restart_argv,
-                    cwd=instance,
-                    env=grant_env,
-                    text=True,
-                    capture_output=True,
-                    timeout=30,
-                )
-                assert resumed.returncode == 0, resumed.stderr
-                assert json.loads(resumed.stdout)["body"] == "first"
-                assert created["slug"] == "grant-install" and created["body"] == "first"
-                body = tmp_path / "append.md"
-                body.write_text("second\n")
-                appended = _run_aw_json(
-                    grant,
-                    app_id,
-                    "append",
-                    "--slug",
-                    "grant-install",
-                    "--body-file",
-                    str(body),
-                    "--json=true",
-                )
-                assert appended["current_version"] == 2
-                shown = _run_aw_json(
-                    grant, app_id, "show", "--slug", "grant-install", "--json=false"
-                )
-                assert (
-                    shown["body"] == "second\n"
-                    and shown["latest"]["created_by_did_key"] == team.did_key
-                )
-                _run_aw(aw_workspace, "id", "grant", "revoke", minted["grant_id"])
-                active = _run_aw_json(aw_workspace, "plugin", "update", app_id)
-                assert active["active_grants"] == 1  # revoked grants are excluded
-                _run_aw(aw_workspace, "id", "grant", "revoke", replacement["grant_id"])
-                inactive = _run_aw_json(aw_workspace, "plugin", "update", app_id)
-                assert inactive["active_grants"] == 0
-                assert not (instance / ".aw").exists()
-                assert not (replacement_home / "signing.key").exists()
-                assert before_material == {
-                    p.name: hashlib.sha256(p.read_bytes()).digest()
-                    for p in before_home.iterdir()
-                    if p.is_file()
-                }
-            finally:
-                custody.terminate()
-                try:
-                    custody.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    custody.kill()
-                    custody.wait(timeout=10)
+    app_id = folio_install.app_id
+    manifest = folio_install.origin
+    connect_team(team)
+    pid_file = f"{resident.path}/custody.pid"
+    spawn(
+        resident,
+        f"echo $$ > {shlex.quote(pid_file)}; exec aw --identity-home "
+        f"{shlex.quote(resident_home)} custody serve > {shlex.quote(resident.path)}/custody.log 2>&1",
+    )
+    try:
+        deadline = time.monotonic() + 30
+        while True:
+            status = aw(instance, "--identity-home", resident_home, "--json", "custody", "status")
+            if status.returncode == 0:
+                break
+            assert time.monotonic() < deadline, status.stderr
+            time.sleep(0.2)
+        minted = run_aw_json(
+            resident,
+            "id",
+            "grant",
+            "mint",
+            "--bundle",
+            "normal-agent",
+            "--ttl",
+            "30m",
+            "--custody-socket",
+            "auto",
+            "--out",
+            before_home,
+        )
+        assert minted["apps"] == []
+        assert minted["custody_socket_path"] == json.loads(status.stdout)["socket_path"]
+        before_material = {
+            p.name: hashlib.sha256(p.read_bytes()).digest()
+            for p in _on_host(lane, before_home).iterdir()
+            if p.is_file()
+        }
+        grant_env = {"AWEB_IDENTITY_HOME": before_home}
+        refused = aw(instance, "plugin", "install", manifest, env=grant_env)
+        assert refused.returncode != 0 and "app_management_denied" in refused.stderr
+        installed = run_aw_json(
+            resident, "--identity-home", resident_home, "plugin", "install", manifest
+        )
+        assert installed["approved"] and installed["existing_grants_unchanged"]
+        assert installed["identity_home"] == resident_home
+        assert installed["active_grants"] == 1
+        assert installed["grant_restart_command"] == [
+            "env",
+            "AWEB_IDENTITY_HOME=<new-grant-home>",
+            "<agent-command>",
+        ]
+        assert installed["oats_renew_restart_command"] == [
+            "oats",
+            "session",
+            "restart",
+            "--home",
+            "<instance-home>",
+        ]
+        updated = run_aw(resident, "--json=false", "plugin", "update", app_id)
+        commands = [
+            shlex.split(line.strip())
+            for line in updated.stdout.splitlines()
+            if line.startswith("  ")
+        ]
+        assert installed["grant_refresh_command"] in commands
+        assert installed["grant_restart_command"] in commands
+        assert installed["oats_renew_restart_command"] in commands
+        payload = instance.write(
+            "document with space.json",
+            json.dumps(dict(slug="grant-install", title="Grant install", body="first")),
+        )
+        denied = aw(instance, app_id, "create", "--body-file", payload, env=grant_env)
+        assert denied.returncode != 0 and "app_tool_denied" in denied.stderr
+        # Follow the machine-readable action; never modify the old grant.
+        action = installed["grant_refresh_command"]
+        assert action[0] == "aw" and action[-1] == "<new-grant-home>"
+        action[-1] = replacement_home
+        ttl_index = action.index("--ttl") + 1
+        assert action[ttl_index] == "<ttl>"
+        action[ttl_index] = "15m"
+        replacement = run_aw_json(resident, *action[1:])
+        assert replacement["grant_id"] != minted["grant_id"]
+        assert replacement["custody_socket_path"] == minted["custody_socket_path"]
+        expires = datetime.fromisoformat(replacement["expires_at"].replace("Z", "+00:00"))
+        assert timedelta(0) < expires - datetime.now(UTC) <= timedelta(minutes=15)
+        assert app_id in {app["app_id"] for app in replacement["apps"]}
+        # Follow the printed shell instructions, replacing the WHOLE quoted
+        # placeholder and preserving the spaced path argument.
+        restart_template = next(
+            line.strip()
+            for line in updated.stdout.splitlines()
+            if line.startswith("  ")
+            and shlex.split(line.strip()) == installed["grant_restart_command"]
+        )
+        restart_shell = restart_template.replace(
+            shlex.quote("AWEB_IDENTITY_HOME=<new-grant-home>"),
+            shlex.quote(f"AWEB_IDENTITY_HOME={replacement_home}"),
+        ).replace(
+            shlex.quote("<agent-command>"),
+            shlex.join(["aw", "--json", app_id, "create", "--body-file", payload]),
+        )
+        launched = shell(instance, restart_shell, env=grant_env)
+        assert launched.returncode == 0, launched.stderr
+        created = json.loads(launched.stdout)
+        # JSON uses argument elements, never a joined command string.
+        restart_argv = [
+            installed["grant_restart_command"][0],
+            f"AWEB_IDENTITY_HOME={replacement_home}",
+            "aw",
+            "--json",
+            app_id,
+            "show",
+            "--slug",
+            "grant-install",
+        ]
+        resumed = command(instance, *restart_argv, env=grant_env)
+        assert resumed.returncode == 0, resumed.stderr
+        assert json.loads(resumed.stdout)["body"] == "first"
+        assert created["slug"] == "grant-install" and created["body"] == "first"
+        body = instance.write("append.md", "second\n")
+        replacement_env = {"AWEB_IDENTITY_HOME": replacement_home}
+        appended = run_aw_json(
+            instance,
+            app_id,
+            "append",
+            "--slug",
+            "grant-install",
+            "--body-file",
+            body,
+            "--json=true",
+            env=replacement_env,
+        )
+        assert appended["current_version"] == 2
+        shown = run_aw_json(
+            instance, app_id, "show", "--slug", "grant-install", "--json=false",
+            env=replacement_env,
+        )
+        assert (
+            shown["body"] == "second\n"
+            and shown["latest"]["created_by_did_key"] == team.did_key
+        )
+        run_aw(resident, "id", "grant", "revoke", minted["grant_id"])
+        active = run_aw_json(resident, "plugin", "update", app_id)
+        assert active["active_grants"] == 1  # revoked grants are excluded
+        run_aw(resident, "id", "grant", "revoke", replacement["grant_id"])
+        inactive = run_aw_json(resident, "plugin", "update", app_id)
+        assert inactive["active_grants"] == 0
+        assert not (instance.host / ".aw").exists()
+        assert not (_on_host(lane, replacement_home) / "signing.key").exists()
+        assert before_material == {
+            p.name: hashlib.sha256(p.read_bytes()).digest()
+            for p in _on_host(lane, before_home).iterdir()
+            if p.is_file()
+        }
+    finally:
+        shell(resident, f"kill $(cat {shlex.quote(pid_file)})")
 
 
 def test_document_endpoints_versions_raw_utf8_and_attribution(
-    folio: RunningFolio,
-    aw_workspace: AWWorkspace,
-    tmp_path: Path,
+    folio: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = _provision_team(aw_workspace, folio=folio)
+    team = provision_team(namespace, folio=folio)
 
     created = _create_document(folio, team, slug="handoff", title="Handoff", body="first")
     assert created["slug"] == "handoff"
@@ -580,9 +409,7 @@ def test_document_endpoints_versions_raw_utf8_and_attribution(
     fetched = _get_document(folio, team, "handoff")
     assert fetched["body"] == "first"
 
-    appended = _append_version(
-        folio, team, slug="handoff", body="second plain text\nnot json", tmp_path=tmp_path
-    )
+    appended = _append_version(folio, team, slug="handoff", body="second plain text\nnot json")
     assert appended["body"] == "second plain text\nnot json"
     assert appended["current_version"] == 2
     assert appended["latest"]["created_by_did_key"] == team.did_key
@@ -601,23 +428,22 @@ def test_document_endpoints_versions_raw_utf8_and_attribution(
     assert all(item["created_by_alias"] == team.alias for item in versions)
     assert all(item["certificate_id"] == team.certificate_id for item in versions)
 
-    bad_body = tmp_path / "invalid-utf8.bin"
-    bad_body.write_bytes(b"\xff")
-    bad = _aw_request(
-        team, "POST", f"{folio.origin}/v1/documents/handoff/versions", body_file=bad_body
+    bad_body = team.workspace.write("invalid-utf8.bin", b"\xff")
+    bad = aw_request(
+        team, HTTPMethod.POST, f"{folio.origin}/v1/documents/handoff/versions", body_file=bad_body
     )
-    _assert_aw_status(bad, 400, context="append invalid UTF-8")
+    assert_aw_status(bad, 400, context="append invalid UTF-8")
 
 
 def test_revoked_certificate_fails_after_awid_revocation_cache_refresh(
-    folio: RunningFolio,
-    aw_workspace: AWWorkspace,
+    folio: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = _provision_team(aw_workspace, folio=folio)
+    team = provision_team(namespace, folio=folio)
     assert _list_documents(folio, team) == []
 
-    _run_aw(
-        aw_workspace,
+    run_aw(
+        team.workspace,
         "id",
         "team",
         "remove-member",
@@ -628,81 +454,82 @@ def test_revoked_certificate_fails_after_awid_revocation_cache_refresh(
         "--member",
         team.address,
         "--registry",
-        AWID_URL,
+        REGISTRY_ORIGIN,
     )
     time.sleep(2.2)
-    revoked = _aw_request(team, "GET", f"{folio.origin}/v1/documents")
-    _assert_aw_status(revoked, 401, context="revoked certificate")
+    revoked = aw_request(team, HTTPMethod.GET, f"{folio.origin}/v1/documents")
+    assert_aw_status(revoked, 401, context="revoked certificate")
+
+
+def _await_registry(folio_lane: FolioLane) -> None:
+    deadline = time.monotonic() + 60
+    while True:
+        try:
+            if folio_lane.client.get(f"{REGISTRY_ORIGIN}/health").status_code == 200:
+                return
+        except AssertionError:
+            pass
+        assert time.monotonic() < deadline, "the lane's AWID did not come back"
+        time.sleep(1.0)
 
 
 def test_awid_unavailable_honors_cache_then_fails_closed(
-    folio: RunningFolio,
-    aw_workspace: AWWorkspace,
+    folio: LaneApp,
+    folio_lane: FolioLane,
+    namespace: LaneNamespace,
 ) -> None:
-    team = _provision_team(aw_workspace, folio=folio)
+    team = provision_team(namespace, folio=folio)
     assert _list_documents(folio, team) == []
 
     # Killed rather than stopped: a graceful stop can outlast the 2 s cache TTL
     # under load, which would expire the facts before the cached request.
-    compose(STACK, "kill", "awid")
+    lane = folio_lane.lane
+    lane.checked(lane.compose("kill", "awid"), "kill the lane's AWID")
     try:
-        cached = _aw_request(team, "GET", f"{folio.origin}/v1/documents")
+        cached = aw_request(team, HTTPMethod.GET, f"{folio.origin}/v1/documents")
         assert (
-            _assert_aw_success(cached, context="cached request while awid stopped").strip() == "[]"
+            assert_aw_success(cached, context="cached request while awid stopped").strip() == "[]"
         )
 
         time.sleep(2.2)
-        expired = _aw_request(team, "GET", f"{folio.origin}/v1/documents")
-        _assert_aw_status(expired, 503, context="cache expired while awid stopped")
+        expired = aw_request(team, HTTPMethod.GET, f"{folio.origin}/v1/documents")
+        assert_aw_status(expired, 503, context="cache expired while awid stopped")
     finally:
-        compose(STACK, "start", "awid")
-        wait_http_ok(f"{AWID_URL}/health", timeout_seconds=60.0)
-
-
-def _replay_headers(captured: CapturedRequest) -> dict[str, str]:
-    return {
-        key: value
-        for key, value in captured.headers.items()
-        if key.lower() not in {"host", "content-length", "connection", "accept-encoding"}
-    }
+        lane.checked(lane.compose("start", "awid"), "start the lane's AWID")
+        _await_registry(folio_lane)
 
 
 def test_replay_negatives_reject_path_method_and_audience(
-    folio: RunningFolio,
-    aw_workspace: AWWorkspace,
+    folio: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = _provision_team(aw_workspace, folio=folio)
-    original = _aw_request(team, "GET", f"{folio.origin}/v1/documents")
-    assert _assert_aw_success(original, context="original signed request").strip() == "[]"
-    captured = folio.last_request
-    headers = _replay_headers(captured)
-
-    path_replay = httpx.request(
-        captured.method,
-        f"{folio.origin}/v1/documents/replayed",
-        headers=headers,
-        content=captured.body,
-        timeout=10.0,
+    team = provision_team(namespace, folio=folio)
+    # A request the team's own controller key signs, for the member's
+    # published certificate: Folio admits it, then refuses it replayed.
+    member = Member(
+        team_id=team.team_id,
+        team_key=SigningKey(team_key_seed(namespace, team)),
+        member_key=SigningKey.generate(),
+        certificate_id=team.certificate_id,
+        alias=team.alias,
     )
+    headers = member.headers(aud=folio.origin, method="GET", path="/v1/documents")
+    original = folio.http.get(f"{folio.origin}/v1/documents", headers=headers)
+    assert original.status_code == 200, original.text
+    assert original.json() == []
+
+    path_replay = folio.http.get(f"{folio.origin}/v1/documents/replayed", headers=headers)
     assert path_replay.status_code == 401, path_replay.text
 
-    method_replay = httpx.request(
-        "POST",
-        f"{folio.origin}{captured.path}",
-        headers=headers,
-        content=captured.body,
-        timeout=10.0,
-    )
+    method_replay = folio.http.post(f"{folio.origin}/v1/documents", headers=headers)
     assert method_replay.status_code == 401, method_replay.text
 
-    wrong_aud = _aw_request(team, "GET", f"{folio.backend_origin}/v1/documents")
-    _assert_aw_status(wrong_aud, 401, context="signed audience for backend host")
+    wrong_aud = aw_request(team, HTTPMethod.GET, f"{BACKEND_ORIGIN}/v1/documents")
+    assert_aw_status(wrong_aud, 401, context="signed audience for backend host")
 
 
-def test_real_aw_usage_is_measured_not_capped(
-    folio: RunningFolio, aw_workspace: AWWorkspace, tmp_path: Path
-) -> None:
-    team = _provision_team(aw_workspace, folio=folio)
+def test_real_aw_usage_is_measured_not_capped(folio: LaneApp, namespace: LaneNamespace) -> None:
+    team = provision_team(namespace, folio=folio)
 
     for index in range(4):
         created = _create_document(
@@ -714,9 +541,7 @@ def test_real_aw_usage_is_measured_not_capped(
         )
         assert created["slug"] == f"note-{index}"
     for version in range(2, 52):
-        appended = _append_version(
-            folio, team, slug="note-0", body=f"v{version}", tmp_path=tmp_path
-        )
+        appended = _append_version(folio, team, slug="note-0", body=f"v{version}")
         assert appended["current_version"] == version
 
     assert _get_billing(folio, team) == {

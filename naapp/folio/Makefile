@@ -1,8 +1,7 @@
-.PHONY: test test-server lint compile run e2e e2e-up e2e-down api-serve api-stop \
+.PHONY: test test-server lint compile run e2e api-serve api-stop \
 	prod-status prod-deploy prod-wait prod-verify prod-rollback
 
 API_PORT ?= 8765
-# The e2e stack's compose project; a gate passes its own with the NAAPP_E2E_* ports.
 export NAAPP_E2E_PROJECT ?= folio-e2e
 PROD_CONFIG ?= ops/render-production.json
 # A local .env configures the dev server only when it exists; Folio itself reads
@@ -19,14 +18,10 @@ lint:
 	uv run ruff check .
 	uv run mypy src
 
+# The tests start and remove their own lane (docker-compose.e2e.yml). The lane's
+# machines run the aw release at NAAPP_AW_BINARY.
 e2e:
-	$(MAKE) -C ../.. naapp-package-e2e PACKAGE=naapp/folio ENABLE=FOLIO_E2E
-
-e2e-up:
-	docker compose -p $(NAAPP_E2E_PROJECT) -f docker-compose.e2e.yml up --build -d
-
-e2e-down:
-	docker compose -p $(NAAPP_E2E_PROJECT) -f docker-compose.e2e.yml down -v --remove-orphans
+	FOLIO_E2E=1 uv run pytest -q -m e2e
 
 compile:
 	uv run python -m compileall -q src tests

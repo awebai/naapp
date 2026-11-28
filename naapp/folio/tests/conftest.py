@@ -7,6 +7,14 @@ from typing import Any
 
 import pytest
 from aweb_naapp_testing.databases import SchemaDatabases
+from folio_lane import (  # noqa: F401
+    folio,
+    folio_install,
+    folio_lane,
+    folio_without_awid_service_token,
+    lane_browser,
+    namespace,
+)
 from manifest_config import TEST_EMIT_SEED_HEX
 
 pytest_plugins = ["pgdbm.fixtures.conftest"]

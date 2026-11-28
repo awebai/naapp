@@ -3,28 +3,22 @@ from __future__ import annotations
 import base64
 import json
 import re
-from collections.abc import Callable
 from typing import Any
 
-import httpx
 import pytest
+from aweb_naapp_testing.lane_team import (
+    LaneApp,
+    LaneNamespace,
+    assert_aw_status,
+    aw_json,
+    aw_request,
+)
+from folio_lane import provision_team
 from test_e2e_asset_capabilities import _member_read, _served
 from test_e2e_present import _mint_present
-from test_e2e_smoke import (
-    AWWorkspace,
-    RunningFolio,
-    _assert_aw_status,
-    _aw_json,
-    _aw_request,
-    _create_document,
-    _provision_team,
-    aw_workspace_factory,
-    folio,
-)
+from test_e2e_smoke import _create_document
 
 from folio.presentation import _AWEB_DARK_PALETTE, _AWEB_LIGHT_PALETTE
-
-__all__ = ["folio", "aw_workspace_factory"]
 
 pytestmark = pytest.mark.e2e
 
@@ -38,31 +32,31 @@ _SVG_WITH_SCRIPT = base64.b64encode(
 ).decode("ascii")
 
 
-def _put_theme(folio: RunningFolio, team: Any, payload: dict[str, Any]) -> dict[str, Any]:
-    result = _aw_request(
+def _put_theme(folio: LaneApp, team: Any, payload: dict[str, Any]) -> dict[str, Any]:
+    result = aw_request(
         team,
         "PUT",
         f"{folio.origin}/v1/theme",
         body=json.dumps(payload, separators=(",", ":")),
     )
-    data = _aw_json(result, context="put theme")
+    data = aw_json(result, context="put theme")
     assert isinstance(data, dict)
     return data
 
 
-def _get_theme(folio: RunningFolio, team: Any) -> dict[str, Any]:
-    result = _aw_request(team, "GET", f"{folio.origin}/v1/theme")
-    data = _aw_json(result, context="get theme")
+def _get_theme(folio: LaneApp, team: Any) -> dict[str, Any]:
+    result = aw_request(team, "GET", f"{folio.origin}/v1/theme")
+    data = aw_json(result, context="get theme")
     assert isinstance(data, dict)
     return data
 
 
 def test_theme_wraps_present_page_and_body_team_cannot_cross_scope(
-    folio: RunningFolio,
-    aw_workspace_factory: Callable[[str], AWWorkspace],
+    folio: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team_a = _provision_team(aw_workspace_factory("theme-a"), folio=folio, alias="alice")
-    team_b = _provision_team(aw_workspace_factory("theme-b"), folio=folio, alias="bob")
+    team_a = provision_team(namespace, folio=folio, alias="alice")
+    team_b = provision_team(namespace, folio=folio, alias="bob")
 
     _create_document(
         folio,
@@ -72,7 +66,7 @@ def test_theme_wraps_present_page_and_body_team_cannot_cross_scope(
         body="# Plain\n\nA table:\n\n| A | B |\n| - | - |\n| 1 | 2 |",
     )
     no_theme = _mint_present(folio, team_a, slug="memo")
-    no_theme_page = httpx.get(no_theme["url"], timeout=10.0)
+    no_theme_page = folio.http.get(no_theme["url"], timeout=10.0)
     assert no_theme_page.status_code == 200, no_theme_page.text
     assert "Presented with folio" in no_theme_page.text
     assert "theme-header" in no_theme_page.text
@@ -80,7 +74,7 @@ def test_theme_wraps_present_page_and_body_team_cannot_cross_scope(
     assert '<img class="brand-logo"' not in no_theme_page.text
     assert "<table>" in no_theme_page.text
 
-    invalid_logo = _aw_request(
+    invalid_logo = aw_request(
         team_a,
         "PUT",
         f"{folio.origin}/v1/theme",
@@ -89,8 +83,8 @@ def test_theme_wraps_present_page_and_body_team_cannot_cross_scope(
             separators=(",", ":"),
         ),
     )
-    _assert_aw_status(invalid_logo, 400, context="reject non-image logo content type")
-    svg_logo = _aw_request(
+    assert_aw_status(invalid_logo, 400, context="reject non-image logo content type")
+    svg_logo = aw_request(
         team_a,
         "PUT",
         f"{folio.origin}/v1/theme",
@@ -99,8 +93,8 @@ def test_theme_wraps_present_page_and_body_team_cannot_cross_scope(
             separators=(",", ":"),
         ),
     )
-    _assert_aw_status(svg_logo, 400, context="reject SVG logo content type")
-    mismatched_logo = _aw_request(
+    assert_aw_status(svg_logo, 400, context="reject SVG logo content type")
+    mismatched_logo = aw_request(
         team_a,
         "PUT",
         f"{folio.origin}/v1/theme",
@@ -109,7 +103,7 @@ def test_theme_wraps_present_page_and_body_team_cannot_cross_scope(
             separators=(",", ":"),
         ),
     )
-    _assert_aw_status(mismatched_logo, 400, context="reject logo magic byte mismatch")
+    assert_aw_status(mismatched_logo, 400, context="reject logo magic byte mismatch")
 
     theme = _put_theme(
         folio,
@@ -147,7 +141,7 @@ def test_theme_wraps_present_page_and_body_team_cannot_cross_scope(
     assert logo.stdout == base64.b64decode(_ONE_BY_ONE_PNG)
 
     themed = _mint_present(folio, team_a, slug="memo")
-    themed_page = httpx.get(themed["url"], timeout=10.0)
+    themed_page = folio.http.get(themed["url"], timeout=10.0)
     assert themed_page.status_code == 200, themed_page.text
     style = themed_page.text.split("</style>", 1)[0]
     assert "--bg: #001122;" in style
@@ -161,7 +155,7 @@ def test_theme_wraps_present_page_and_body_team_cannot_cross_scope(
     assert "&lt;img src=x onerror=alert(4)&gt;" in themed_page.text
     logo_on_page = f"{themed['url']}/assets/{theme['logo_asset_id']}"
     assert f'src="{logo_on_page}"' in themed_page.text
-    assert _served(httpx.get(logo_on_page, timeout=10.0), base64.b64decode(_ONE_BY_ONE_PNG))
+    assert _served(folio.http.get(logo_on_page, timeout=10.0), base64.b64decode(_ONE_BY_ONE_PNG))
     assert "<table>" in themed_page.text
 
     b_theme = _put_theme(
@@ -177,17 +171,17 @@ def test_theme_wraps_present_page_and_body_team_cannot_cross_scope(
     assert _get_theme(folio, team_b)["header"] == "Bob tried to name team A"
     assert _get_theme(folio, team_a)["header"] == "Brand header </style><script>alert(3)</script>"
 
-    still_a = httpx.get(_mint_present(folio, team_a, slug="memo")["url"], timeout=10.0)
+    still_a = folio.http.get(_mint_present(folio, team_a, slug="memo")["url"], timeout=10.0)
     assert "--bg: #001122;" in still_a.text
     assert "#330000" not in still_a.text
     assert "Bob tried" not in still_a.text
 
 
 def test_builtin_aweb_preset_themes_present_page_per_scheme(
-    folio: RunningFolio,
-    aw_workspace_factory: Callable[[str], AWWorkspace],
+    folio: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team = _provision_team(aw_workspace_factory("preset"), folio=folio, alias="dev")
+    team = provision_team(namespace, folio=folio, alias="dev")
     _create_document(folio, team, slug="brand", title="Brand", body="# Hi\n\nBody")
 
     saved = _put_theme(folio, team, {"preset": "aweb"})
@@ -195,7 +189,7 @@ def test_builtin_aweb_preset_themes_present_page_per_scheme(
     assert _get_theme(folio, team)["preset"] == "aweb"
 
     # Document/light default uses the aweb identity light palette.
-    light_style = httpx.get(
+    light_style = folio.http.get(
         _mint_present(folio, team, slug="brand")["url"], timeout=10.0
     ).text.split("</style>", 1)[0]
     light_colors = dict(re.findall(r"(--[\w-]+):\s*([^;]+);", light_style))
@@ -208,7 +202,7 @@ def test_builtin_aweb_preset_themes_present_page_per_scheme(
         team,
         {"preset": "aweb", "tokens": {"layout": {"color_scheme": "dark", "mode": "presentation"}}},
     )
-    dark_style = httpx.get(
+    dark_style = folio.http.get(
         _mint_present(folio, team, slug="brand")["url"], timeout=10.0
     ).text.split("</style>", 1)[0]
     dark_colors = dict(re.findall(r"(--[\w-]+):\s*([^;]+);", dark_style))
@@ -227,7 +221,7 @@ def test_builtin_aweb_preset_themes_present_page_per_scheme(
             },
         },
     )
-    custom_style = httpx.get(
+    custom_style = folio.http.get(
         _mint_present(folio, team, slug="brand")["url"], timeout=10.0
     ).text.split("</style>", 1)[0]
     custom_colors = dict(re.findall(r"(--[\w-]+):\s*([^;]+);", custom_style))
@@ -238,10 +232,10 @@ def test_builtin_aweb_preset_themes_present_page_per_scheme(
             assert custom_colors[name] == value
 
     # The reserved 'preset' key inside tokens fails closed over the wire.
-    collision = _aw_request(
+    collision = aw_request(
         team,
         "PUT",
         f"{folio.origin}/v1/theme",
         body=json.dumps({"tokens": {"preset": {"x": "y"}}}, separators=(",", ":")),
     )
-    _assert_aw_status(collision, 422, context="reject reserved preset key in tokens")
+    assert_aw_status(collision, 422, context="reject reserved preset key in tokens")

@@ -106,6 +106,15 @@ class LaneWorkspace:
     path: str
     host: Path
 
+    def write(self, name: str, content: str | bytes) -> str:
+        """Writes ``name`` in the workspace; returns its path in the machine."""
+        target = self.host / name
+        if isinstance(content, bytes):
+            target.write_bytes(content)
+        else:
+            target.write_text(content, encoding="utf-8")
+        return f"{self.path}/{name}"
+
 
 @dataclass(frozen=True)
 class LaneNamespace:
@@ -137,21 +146,55 @@ class LaneTeam:
     certificate_id: str
 
 
-def _aw_exec(
-    workspace: LaneWorkspace,
-    *args: str,
-    env: Mapping[str, str] | None = None,
-) -> subprocess.CompletedProcess[str]:
+def _exec_args(
+    workspace: LaneWorkspace, command: Sequence[str], env: Mapping[str, str] | None
+) -> list[str]:
     settings = {"AWEB_URL": TEAM_SERVER_ORIGIN, "NO_COLOR": "1", **(env or {})}
-    return docker(
+    return [
         "exec",
         "-w",
         workspace.path,
         *(f"--env={name}={value}" for name, value in settings.items()),
         workspace.machine,
-        "aw",
-        *args,
-    )
+        *command,
+    ]
+
+
+def _aw_exec(
+    workspace: LaneWorkspace,
+    *args: str,
+    env: Mapping[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    return command(workspace, "aw", *args, env=env)
+
+
+def command(
+    workspace: LaneWorkspace, *argv: str, env: Mapping[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """``argv`` in ``workspace``'s machine and directory, as it returned."""
+    return docker(*_exec_args(workspace, argv, env))
+
+
+def aw(
+    workspace: LaneWorkspace, *args: str, env: Mapping[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """``aw`` in ``workspace`` exactly as given, as it returned."""
+    return _aw_exec(workspace, *args, env=env)
+
+
+def shell(
+    workspace: LaneWorkspace, script: str, *, env: Mapping[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
+    """``sh -c script`` in ``workspace``, as it returned."""
+    return command(workspace, "sh", "-c", script, env=env)
+
+
+def spawn(
+    workspace: LaneWorkspace, script: str, *, env: Mapping[str, str] | None = None
+) -> None:
+    """Starts ``sh -c script`` in ``workspace`` without waiting for it."""
+    args = _exec_args(workspace, ["sh", "-c", script], env)
+    workspace.lane.checked(docker(args[0], "-d", *args[1:]), f"start {script}")
 
 
 def run_aw(
@@ -178,13 +221,34 @@ def run_aw_json(
 
 
 def aw_request(
-    team: LaneTeam, method: HTTPMethod, url: str, *, body: str | None = None
+    team: LaneTeam,
+    method: HTTPMethod,
+    url: str,
+    *,
+    body: str | None = None,
+    body_file: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """``aw id request`` with the team member's certificate, as it returned."""
+    """``aw id request`` with the team member's certificate, as it returned.
+    ``body_file`` is a path in the machine (:meth:`LaneWorkspace.write`)."""
     args = ["id", "request", method, url, "--team-auth", "--raw"]
     if body is not None:
         args.extend(["--body", body])
+    if body_file is not None:
+        args.extend(["--body-file", body_file])
     return _aw_exec(team.workspace, *args)
+
+
+def aw_read_bytes(team: LaneTeam, url: str) -> subprocess.CompletedProcess[bytes]:
+    """A member's ``aw id request GET``, with the response body's exact bytes
+    on stdout and the HTTP status line on stderr."""
+    return subprocess.run(
+        ["docker", *_exec_args(
+            team.workspace, ["aw", "id", "request", "GET", url, "--team-auth", "--raw"], None
+        )],
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
 
 
 def assert_aw_success(result: subprocess.CompletedProcess[str], *, context: str) -> str:
@@ -303,16 +367,26 @@ def connect_team(team: LaneTeam) -> None:
     """Connects ``team`` to the lane's coordination server, publishes that
     server as the team's and makes the member an install admin: everything an
     install needs."""
-    workspace = team.workspace
-    run_aw(workspace, "workspace", "connect", "--service", TEAM_SERVER_ORIGIN,
+    run_aw(team.workspace, "workspace", "connect", "--service", TEAM_SERVER_ORIGIN,
            "--team", team.team_id)
-    published = run_aw_json(workspace, "id", "team", "set-server", "--team", team.team,
+    publish_team_server(team)
+    grant_install_admin(team)
+
+
+def publish_team_server(team: LaneTeam) -> None:
+    """Publishes the lane's coordination server as ``team``'s, with its controller key."""
+    published = run_aw_json(team.workspace, "id", "team", "set-server", "--team", team.team,
                             "--namespace", team.namespace, "--url", TEAM_SERVER_ORIGIN,
                             "--registry", REGISTRY_ORIGIN)
     assert published["status"] == "published", published
     assert published["server_url"] == TEAM_SERVER_ORIGIN, published
-    workspace.lane.checked(
-        workspace.lane.compose(
+
+
+def grant_install_admin(team: LaneTeam) -> None:
+    """The server operator makes ``team``'s member an owner of its installations."""
+    lane = team.workspace.lane
+    lane.checked(
+        lane.compose(
             "exec", "-T", "aweb", "aweb", "install-admin", "grant", "--team-id", team.team_id,
             "--principal-did", team.did_key, "--role", "owner",
         ),

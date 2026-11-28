@@ -42,8 +42,6 @@ import pytest
 from awid.signing import load_signing_key_pem
 
 from aweb_naapp_testing.deployment_logs import logged_process, redacted
-from aweb_naapp_testing.lane_team import assert_aw_status as assert_aw_status
-from aweb_naapp_testing.lane_team import assert_aw_success as assert_aw_success
 from aweb_naapp_testing.lane_team import aw_json
 from aweb_naapp_testing.network import Certificates, local_address, make_certificates
 

@@ -2,26 +2,20 @@ from __future__ import annotations
 
 import base64
 import json
-from collections.abc import Callable
 from typing import Any
 
-import httpx
 import pytest
+from aweb_naapp_testing.lane_team import (
+    LaneApp,
+    LaneNamespace,
+    assert_aw_status,
+    aw_json,
+    aw_request,
+)
+from folio_lane import provision_team
 from test_e2e_asset_capabilities import _member_read, _served
 from test_e2e_present import _mint_present
-from test_e2e_smoke import (
-    AWWorkspace,
-    RunningFolio,
-    _assert_aw_status,
-    _aw_json,
-    _aw_request,
-    _create_document,
-    _provision_team,
-    aw_workspace_factory,
-    folio,
-)
-
-__all__ = ["folio", "aw_workspace_factory"]
+from test_e2e_smoke import _create_document
 
 pytestmark = pytest.mark.e2e
 
@@ -37,13 +31,13 @@ _SVG_WITH_SCRIPT = base64.b64encode(
 
 
 def _upload_asset(
-    folio: RunningFolio,
+    folio: LaneApp,
     team: Any,
     *,
     content_type: str = "image/png",
     data_base64: str = _ONE_BY_ONE_PNG,
 ) -> dict[str, Any]:
-    result = _aw_request(
+    result = aw_request(
         team,
         "POST",
         f"{folio.origin}/v1/assets",
@@ -51,19 +45,19 @@ def _upload_asset(
             {"content_type": content_type, "data_base64": data_base64}, separators=(",", ":")
         ),
     )
-    data = _aw_json(result, context="upload asset")
+    data = aw_json(result, context="upload asset")
     assert isinstance(data, dict)
     return data
 
 
 def test_image_asset_upload_embed_render_and_team_scoped_sanitizer(
-    folio: RunningFolio,
-    aw_workspace_factory: Callable[[str], AWWorkspace],
+    folio: LaneApp,
+    namespace: LaneNamespace,
 ) -> None:
-    team_a = _provision_team(aw_workspace_factory("assets-a"), folio=folio, alias="alice")
-    team_b = _provision_team(aw_workspace_factory("assets-b"), folio=folio, alias="bob")
+    team_a = provision_team(namespace, folio=folio, alias="alice")
+    team_b = provision_team(namespace, folio=folio, alias="bob")
 
-    invalid_svg = _aw_request(
+    invalid_svg = aw_request(
         team_a,
         "POST",
         f"{folio.origin}/v1/assets",
@@ -72,8 +66,8 @@ def test_image_asset_upload_embed_render_and_team_scoped_sanitizer(
             separators=(",", ":"),
         ),
     )
-    _assert_aw_status(invalid_svg, 400, context="reject SVG asset upload")
-    mismatched = _aw_request(
+    assert_aw_status(invalid_svg, 400, context="reject SVG asset upload")
+    mismatched = aw_request(
         team_a,
         "POST",
         f"{folio.origin}/v1/assets",
@@ -81,7 +75,7 @@ def test_image_asset_upload_embed_render_and_team_scoped_sanitizer(
             {"content_type": "image/png", "data_base64": _SVG_WITH_SCRIPT}, separators=(",", ":")
         ),
     )
-    _assert_aw_status(mismatched, 400, context="reject asset magic byte mismatch")
+    assert_aw_status(mismatched, 400, context="reject asset magic byte mismatch")
 
     asset_a = _upload_asset(folio, team_a)
     assert asset_a["content_type"] == "image/png"
@@ -105,11 +99,11 @@ def test_image_asset_upload_embed_render_and_team_scoped_sanitizer(
         ),
     )
     presented = _mint_present(folio, team_a, slug="deck")
-    page = httpx.get(presented["url"], timeout=10.0)
+    page = folio.http.get(presented["url"], timeout=10.0)
     assert page.status_code == 200, page.text
     image_url = f"{presented['url']}/assets/{asset_a['asset_id']}"
     assert f'src="{image_url}"' in page.text
-    assert _served(httpx.get(image_url, timeout=10.0), _ONE_BY_ONE_PNG_BYTES)
+    assert _served(folio.http.get(image_url, timeout=10.0), _ONE_BY_ONE_PNG_BYTES)
     assert "safe chart" in page.text
     assert "example.com" not in page.text
     assert "data:image" not in page.text
@@ -123,7 +117,7 @@ def test_image_asset_upload_embed_render_and_team_scoped_sanitizer(
         title="Borrowed",
         body=f"# Borrowed\n\n![other team]({asset_a['url']})",
     )
-    b_page = httpx.get(_mint_present(folio, team_b, slug="borrowed")["url"], timeout=10.0)
+    b_page = folio.http.get(_mint_present(folio, team_b, slug="borrowed")["url"], timeout=10.0)
     assert b_page.status_code == 200, b_page.text
     assert "<img" not in b_page.text.lower()
     assert str(asset_a["asset_id"]) not in b_page.text

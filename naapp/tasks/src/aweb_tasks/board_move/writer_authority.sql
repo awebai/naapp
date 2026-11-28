@@ -44,13 +44,15 @@
 -- and predicates and the statistics expressions, uses the columns' types and
 -- collations and the indexes' operator classes and collations, calls the
 -- access methods, and samples any foreign table below the relation through its
--- wrapper. So a writer's relation may have no column type, collation or
--- operator class outside pg_catalog; no table or index access method
--- PostgreSQL does not ship; and no foreign partition or inheritance
--- descendant. Nor may it have expression statistics: PostgreSQL accepts a
--- volatile statistics expression. An expression or partial index may depend,
--- as pg_depend records it, only on the indexed table or its columns and on the
--- parent partitioned index it is attached to. Any other recorded dependency
+-- wrapper. So a writer's relation may have no column whose type, or whose
+-- type's element, base, range subtype or multirange's range, at any depth, is
+-- outside pg_catalog; no collation or operator class outside pg_catalog; no
+-- table or index access method PostgreSQL does not ship; and no foreign
+-- partition or inheritance descendant. Nor may it have expression
+-- statistics: PostgreSQL accepts a volatile statistics expression. An
+-- expression or partial index may depend, as pg_depend records it, only on
+-- the indexed table or its columns and on the parent partitioned index it is
+-- attached to. Any other recorded dependency
 -- refuses: a function, an operator, a collation, a type or another relation.
 -- PostgreSQL records no dependency on its pinned core objects, so an
 -- expression of core functions and operators passes.
@@ -125,6 +127,28 @@ maintained (oid, relnamespace, relowner) AS (
     WHERE relkind IN ('r', 'p', 'm')
       AND relnamespace IN (SELECT oid FROM checked)
       AND relowner IN (SELECT role FROM writers)
+),
+-- Every type a maintained relation's column reaches: the column's own type,
+-- and through each type its element, its base, its range's subtype and a
+-- multirange's range.
+column_types (relation, relowner, attname, type) AS (
+    SELECT maintained.oid, maintained.relowner, attribute.attname, attribute.atttypid
+    FROM maintained
+    JOIN pg_attribute attribute
+        ON attribute.attrelid = maintained.oid AND attribute.attnum > 0 AND NOT attribute.attisdropped
+    UNION
+    SELECT column_types.relation, column_types.relowner, column_types.attname, reached.type
+    FROM column_types
+    JOIN pg_type ON pg_type.oid = column_types.type
+    CROSS JOIN LATERAL (
+        SELECT pg_type.typelem WHERE pg_type.typelem <> 0
+        UNION ALL
+        SELECT pg_type.typbasetype WHERE pg_type.typbasetype <> 0
+        UNION ALL
+        SELECT rngsubtype FROM pg_range WHERE rngtypid = pg_type.oid
+        UNION ALL
+        SELECT rngtypid FROM pg_range WHERE rngmultitypid = pg_type.oid
+    ) reached (type)
 ),
 -- Every relation below a maintained one, through partitions and inheritance.
 descendants (root, oid) AS (
@@ -236,12 +260,11 @@ refusals (code, principal, role, object) AS (
     JOIN pg_namespace namespace ON namespace.oid = statistics.stxnamespace
     WHERE statistics.stxexprs IS NOT NULL
     UNION ALL
-    SELECT 'indirection_column_type', NULL, maintained.relowner,
-           format('%s.%I', maintained.oid::regclass, attribute.attname)
-    FROM maintained
-    JOIN pg_attribute attribute
-        ON attribute.attrelid = maintained.oid AND attribute.attnum > 0 AND NOT attribute.attisdropped
-    JOIN pg_type column_type ON column_type.oid = attribute.atttypid
+    -- One row per column, however many of its types are outside pg_catalog.
+    SELECT DISTINCT 'indirection_column_type', NULL::oid, column_types.relowner,
+           format('%s.%I', column_types.relation::regclass, column_types.attname)
+    FROM column_types
+    JOIN pg_type column_type ON column_type.oid = column_types.type
     WHERE column_type.typnamespace <> 'pg_catalog'::regnamespace
     UNION ALL
     SELECT 'indirection_collation', NULL, maintained.relowner,

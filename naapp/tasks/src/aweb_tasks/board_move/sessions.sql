@@ -8,6 +8,11 @@
 -- Each row is one refusal: a code, and the principal, the role and the object
 -- involved, where the code has them. No row: nothing refuses.
 --
+-- Locks. Each dataset name, as resolved now, must be a relation this
+-- transaction holds EXCLUSIVE: lock.sql skips a name that was missing when it
+-- ran, and a table that appears later would otherwise pass S unlocked. Held
+-- locks keep their tables from being renamed or dropped until the listing ends.
+--
 -- Platform roles. Each must be an existing login role, neither the owner nor a
 -- superuser. A login role is one of writer_authority.sql's principals, so A3
 -- has just proved that it reaches no write authority.
@@ -32,6 +37,9 @@
 --   each table's owner, which writer_authority.sql's maintenance shape covers.
 
 WITH
+dataset (name) AS (
+    VALUES ('installations'), ('tasks'), ('claims'), ('locks'), ('comments'), ('dependencies'), ('events')
+),
 owner AS (
     SELECT oid FROM pg_roles WHERE rolname = current_user
 ),
@@ -48,7 +56,18 @@ sessions AS (
       AND activity.pid <> pg_backend_pid()
 ),
 refusals (code, principal, role, object) AS (
-    SELECT 'platform_role_unknown', NULL::oid, NULL::oid, name FROM platform WHERE oid IS NULL
+    SELECT 'lock_not_held', NULL::oid, NULL::oid, dataset.name::text
+    FROM dataset
+    LEFT JOIN pg_class relation
+        ON relation.relname = dataset.name
+       AND relation.relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = current_schema())
+    WHERE NOT EXISTS (
+        SELECT 1 FROM pg_locks held
+        WHERE held.locktype = 'relation' AND held.relation = relation.oid
+          AND held.pid = pg_backend_pid() AND held.mode = 'ExclusiveLock' AND held.granted
+    )
+    UNION ALL
+    SELECT 'platform_role_unknown', NULL, NULL, name FROM platform WHERE oid IS NULL
     UNION ALL
     SELECT 'platform_role_owner', NULL, oid, NULL FROM platform WHERE oid = (SELECT oid FROM owner)
     UNION ALL

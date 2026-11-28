@@ -134,9 +134,10 @@ async def test_the_check_runs_as_the_readme_says(dataset: Dataset) -> None:
         await connected.close()
 
 
-def test_the_lock_file_locks_every_dataset_table() -> None:
-    locked = move.LOCK_SQL.read_text(encoding="utf-8")
-    assert all(f"'{table}'" in locked for table in move.TABLES)
+@pytest.mark.parametrize("sql", [move.LOCK_SQL, move.SESSIONS_SQL], ids=lambda path: path.name)
+def test_the_lock_and_its_check_name_every_dataset_table(sql: Any) -> None:
+    named = sql.read_text(encoding="utf-8")
+    assert all(f"'{table}'" in named for table in move.TABLES)
 
 
 # --- C3, the sessions ---------------------------------------------------------
@@ -304,6 +305,12 @@ async def test_an_uncommitted_write_refuses_at_the_lock(dataset: Dataset) -> Non
         await writer.close()
 
 
+async def rollback_prepared(database: Any, gid: str) -> None:
+    """Rolls back the transaction prepared as ``gid``, if there is one, through a fresh connection."""
+    if await database.fetch_value("SELECT 1 FROM pg_prepared_xacts WHERE gid = $1", gid):
+        await database.execute(f"ROLLBACK PREPARED '{gid}'")
+
+
 async def test_a_prepared_transaction_in_this_database_refuses(dataset: Dataset) -> None:
     assert int(await dataset.admin.fetch_value("SHOW max_prepared_transactions")) > 0, (
         "the test PostgreSQL server needs max_prepared_transactions > 0 to prepare a transaction"
@@ -311,18 +318,18 @@ async def test_a_prepared_transaction_in_this_database_refuses(dataset: Dataset)
     gid = f"writer_check_{uuid4().hex[:12]}"
     # A transaction that wrote outside the dataset leaves the dataset's locks obtainable.
     await dataset.as_owner("CREATE TABLE scratch (n int)")
-    preparing = await dataset.owner_connection()
     try:
-        await preparing.execute("BEGIN")
-        await preparing.execute("INSERT INTO scratch VALUES (1)")
-        await preparing.execute(f"PREPARE TRANSACTION '{gid}'")
-    finally:
-        await preparing.close()
-    try:
+        preparing = await dataset.owner_connection()
+        try:
+            await preparing.execute("BEGIN")
+            await preparing.execute("INSERT INTO scratch VALUES (1)")
+            await preparing.execute(f"PREPARE TRANSACTION '{gid}'")
+        finally:
+            await preparing.close()
+
         assert await check(dataset) == {Refusal("prepared_transaction", None, dataset.owner, gid)}
     finally:
-        if await dataset.admin.fetch_value("SELECT 1 FROM pg_prepared_xacts WHERE gid = $1", gid):
-            await dataset.admin.execute(f"ROLLBACK PREPARED '{gid}'")
+        await rollback_prepared(dataset.admin, gid)
 
 
 # --- S and A3 in the check ----------------------------------------------------
@@ -338,7 +345,28 @@ async def test_the_check_refuses_on_write_authority(dataset: Dataset) -> None:
 async def test_a_missing_dataset_table_refuses_as_the_shape_not_at_the_lock(dataset: Dataset) -> None:
     await dataset.as_owner("DROP TABLE dependencies")
 
-    assert await check(dataset) == {Refusal("shape_missing_table", None, None, "dependencies")}
+    assert await check(dataset) == {
+        Refusal("shape_missing_table", None, None, "dependencies"),
+        Refusal("lock_not_held", None, None, "dependencies"),
+    }
+
+
+async def test_a_dataset_table_that_appears_after_the_lock_step_refuses(dataset: Dataset) -> None:
+    # The job's three files, in one transaction, with the table back between the lock and S.
+    await dataset.as_owner("ALTER TABLE dependencies RENAME TO dependencies_away")
+    checking = await dataset.owner_connection()
+    try:
+        async with checking.transaction():
+            await checking.execute(move.LOCK_SQL.read_text(encoding="utf-8"))
+            await dataset.as_owner("ALTER TABLE dependencies_away RENAME TO dependencies")
+            authority = await checking.fetch(move.WRITER_AUTHORITY_SQL.read_text(encoding="utf-8"))
+            sessions = await checking.fetch(move.SESSIONS_SQL.read_text(encoding="utf-8"))
+    finally:
+        await checking.close()
+
+    # S sees all seven, as they are now; only the lock check sees the one this transaction did not lock.
+    assert {Refusal(**dict(row)) for row in authority} == set()
+    assert {Refusal(**dict(row)) for row in sessions} == {Refusal("lock_not_held", None, None, "dependencies")}
 
 
 @pytest.mark.parametrize(("replacement", "refused"), [
@@ -357,14 +385,36 @@ async def test_a_dataset_table_replaced_by_another_relation_refuses_as_the_shape
 async def test_a_prepared_transaction_in_another_database_passes(dataset: Dataset, test_db_factory: Any) -> None:
     other = await test_db_factory.create_db(suffix="writer_check_other")
     gid = f"writer_check_{uuid4().hex[:12]}"
-    preparing = await asyncpg.connect(other.config.get_dsn())
     try:
-        await preparing.execute("BEGIN")
-        await preparing.execute("SELECT 1")
-        await preparing.execute(f"PREPARE TRANSACTION '{gid}'")
+        preparing = await asyncpg.connect(other.config.get_dsn())
         try:
-            assert await check(dataset) == set()
+            await preparing.execute("BEGIN")
+            await preparing.execute("SELECT 1")
+            await preparing.execute(f"PREPARE TRANSACTION '{gid}'")
         finally:
-            await preparing.execute(f"ROLLBACK PREPARED '{gid}'")
+            await preparing.close()
+
+        assert await check(dataset) == set()
     finally:
-        await preparing.close()
+        await rollback_prepared(other, gid)
+
+
+@pytest.mark.parametrize("held", ["a weaker lock of its own", "another backend's exclusive lock"])
+async def test_a_dataset_lock_this_transaction_does_not_hold_exclusive_refuses(dataset: Dataset, held: str) -> None:
+    checking = await dataset.owner_connection()
+    other = await dataset.owner_connection()
+    try:
+        async with other.transaction():
+            async with checking.transaction():
+                if held == "a weaker lock of its own":
+                    await checking.execute(f"LOCK TABLE {', '.join(move.TABLES)} IN ROW SHARE MODE")
+                else:
+                    await other.execute(move.LOCK_SQL.read_text(encoding="utf-8"))
+                sessions = await checking.fetch(move.SESSIONS_SQL.read_text(encoding="utf-8"))
+    finally:
+        await checking.close()
+        await other.close()
+
+    assert {Refusal(**dict(row)) for row in sessions if row["code"] == "lock_not_held"} == {
+        Refusal("lock_not_held", None, None, table) for table in move.TABLES
+    }

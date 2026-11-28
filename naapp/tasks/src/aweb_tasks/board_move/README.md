@@ -153,7 +153,7 @@ Then grant `tasks.write` and `tasks.override`; our agents switch to `aw tasks`.
    - **It reads no grant and starts no app runtime,** so no drain runs. Its one transaction, run as the owner, runs the writer check and then lists:
      1. `lock.sql` takes the seven dataset tables' EXCLUSIVE locks and holds them. It waits at most 10 s, so a transaction that has written the dataset makes it refuse with `lock_timeout`.
      2. `writer_authority.sql` reads S and A3, the dataset's shape and every principal's write authority, as [the write-authority preflight](#the-write-authority-preflight) describes.
-     3. `sessions.sql` reads P and C3:
+     3. `sessions.sql` first checks that this transaction holds the EXCLUSIVE lock on each of the seven tables, as their names resolve now (`lock_not_held`). `lock.sql` skips a name that was missing when it ran, so a table that appeared later would otherwise pass S unlocked. A held lock keeps its table from being renamed or dropped until the listing ends. Then it reads P and C3:
         - **P:** no prepared transaction in the database.
         - **C3:** every other backend attached to the database, classified by its role id.
           - The owner's refuses while it is inside a transaction, active or idle.
@@ -205,7 +205,8 @@ Then grant `tasks.write` and `tasks.override`; our agents switch to `aw tasks`.
 
   No writer may own a view or materialized view, a SECURITY DEFINER function or procedure, or a rule but a view's.
 - **Maintenance runs nothing from outside PostgreSQL as a writer.** ANALYZE, which autovacuum runs at any time with no principal, acts as each relation's owner. So no relation a writer owns may have:
-  - a column type, column collation, index operator class or index collation outside `pg_catalog`. A type in `pg_catalog` has its element, base and range subtype there too, so checking the column's own type covers them;
+  - a column whose type is outside `pg_catalog`, or reaches a type outside it, at any depth, through an array's element, a domain's base, a range's subtype or a multirange's range. A superuser can put a type in `pg_catalog` over one from another schema, so the column's own type is not enough;
+  - a column collation, index operator class or index collation outside `pg_catalog`;
   - a table or index access method PostgreSQL doesn't ship;
   - a foreign partition or inheritance descendant, which ANALYZE samples through its wrapper;
   - expression statistics, since PostgreSQL accepts a volatile statistics expression;

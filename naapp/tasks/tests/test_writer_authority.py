@@ -980,3 +980,34 @@ async def test_a_writers_expression_statistics_refuse_even_on_postgresqls_own_co
     assert await dataset.refusals() == {
         Refusal("indirection_statistics_expression", None, dataset.owner, "maintained.lowered"),
     }
+
+
+@pytest.mark.parametrize(("statements", "column"), [
+    pytest.param(["CREATE DOMAIN pg_catalog.writer_check_calm AS maintained.mood",
+                  "CREATE TABLE maintained.analysed (mood pg_catalog.writer_check_calm)"],
+                 "mood", id="a catalogue domain's base"),
+    pytest.param(["CREATE DOMAIN pg_catalog.writer_check_calm AS maintained.mood",
+                  "CREATE TABLE maintained.analysed (moods pg_catalog.writer_check_calm[])"],
+                 "moods", id="a catalogue array's element"),
+    pytest.param(["CREATE TYPE pg_catalog.writer_check_span AS RANGE (subtype = maintained.mood,"
+                  " multirange_type_name = pg_catalog.writer_check_spans)",
+                  "CREATE TABLE maintained.analysed (spans pg_catalog.writer_check_spans)"],
+                 "spans", id="a catalogue multirange's range subtype"),
+])
+async def test_a_column_type_whose_chain_leaves_pg_catalog_refuses(
+    dataset: Dataset, statements: list[str], column: str,
+) -> None:
+    # A superuser can put a type in pg_catalog over one from another schema.
+    await _maintained_schema(dataset)
+    await dataset.admin.execute("CREATE TYPE maintained.mood AS ENUM ('calm')")
+    for statement in statements:
+        await dataset.admin.execute(statement)
+    await dataset.admin.execute(f"ALTER TABLE maintained.analysed OWNER TO {dataset.owner}")
+    assert await dataset.admin.fetch_value(
+        "SELECT typnamespace = 'pg_catalog'::regnamespace FROM pg_attribute JOIN pg_type ON pg_type.oid = atttypid"
+        " WHERE attrelid = 'maintained.analysed'::regclass AND attname = $1", column,
+    )
+
+    assert await dataset.refusals() == {
+        Refusal("indirection_column_type", None, dataset.owner, f"maintained.analysed.{column}"),
+    }

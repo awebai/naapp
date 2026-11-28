@@ -44,10 +44,16 @@
 -- and predicates and the statistics expressions, uses the columns' types and
 -- collations and the indexes' operator classes and collations, calls the
 -- access methods, and samples any foreign table below the relation through its
--- wrapper. So a writer's relation may have no expression or partial index and
--- no expression statistics; no column type, collation or operator class
--- outside pg_catalog; no table or index access method PostgreSQL does not
--- ship; and no foreign partition or inheritance descendant.
+-- wrapper. So a writer's relation may have no column type, collation or
+-- operator class outside pg_catalog; no table or index access method
+-- PostgreSQL does not ship; and no foreign partition or inheritance
+-- descendant. Nor may it have expression statistics: PostgreSQL accepts a
+-- volatile statistics expression. An expression or partial index may depend,
+-- as pg_depend records it, only on the indexed table or its columns and on the
+-- parent partitioned index it is attached to. Any other recorded dependency
+-- refuses: a function, an operator, a collation, a type or another relation.
+-- PostgreSQL records no dependency on its pinned core objects, so an
+-- expression of core functions and operators passes.
 --
 -- Objects in pg_catalog and information_schema are not checked: the trust
 -- assumption is that PostgreSQL's shipped objects there write no dataset row.
@@ -212,7 +218,16 @@ refusals (code, principal, role, object) AS (
     UNION ALL
     SELECT 'indirection_index_expression', NULL, maintained.relowner, idx.indexrelid::regclass::text
     FROM maintained JOIN pg_index idx ON idx.indrelid = maintained.oid
-    WHERE idx.indexprs IS NOT NULL OR idx.indpred IS NOT NULL
+    WHERE (idx.indexprs IS NOT NULL OR idx.indpred IS NOT NULL)
+      AND EXISTS (
+          SELECT 1 FROM pg_depend dependency
+          WHERE dependency.classid = 'pg_class'::regclass AND dependency.objid = idx.indexrelid
+            -- the indexed table, or one of its columns
+            AND NOT (dependency.refclassid = 'pg_class'::regclass AND dependency.refobjid = idx.indrelid)
+            -- the parent partitioned index it is attached to
+            AND NOT (dependency.refclassid = 'pg_class'::regclass AND dependency.deptype = 'P'
+                     AND dependency.refobjid IN (SELECT inhparent FROM pg_inherits WHERE inhrelid = idx.indexrelid))
+      )
     UNION ALL
     SELECT 'indirection_statistics_expression', NULL, maintained.relowner,
            format('%I.%I', namespace.nspname, statistics.stxname)

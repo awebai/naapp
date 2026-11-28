@@ -790,6 +790,19 @@ async def test_the_rollback_compare_lists_the_live_dataset_with_no_writer_left(
     assert compared == move.listing(data, source=False)
 
 
+async def test_the_writer_check_passes_on_the_deployed_apps_whole_schema(
+    live: Any, deployment: Deployment, installed: dict,
+) -> None:
+    # The app runtime's own migrations add partial indexes on core operators to the live schema.
+    partial = await live.fetch_value(
+        "SELECT count(*) FROM pg_index JOIN pg_class ON pg_class.oid = pg_index.indexrelid"
+        " WHERE pg_index.indpred IS NOT NULL AND pg_class.relnamespace = $1::regnamespace", live.schema,
+    )
+    assert partial > 0
+
+    assert await move.live_listing(target(live), installed["installation_id"]) == b""
+
+
 async def test_the_rollback_compare_refuses_while_another_session_is_in_a_transaction(
     board: OldBoard, live: Any, deployment: Deployment, installed: dict, tmp_path: Path
 ) -> None:
@@ -985,7 +998,7 @@ async def test_the_operator_moves_the_board_with_the_jobs(
     await command(deployment, coordination, "open", "--listing-sha256", digest)
 
     live_line = await command(deployment, coordination, "list-live", "--installation-id", installed["installation_id"])
-    assert live_line == f"{move.digest_line(baseline)}\n"
+    assert live_line == f"platform roles: none\n{move.digest_line(baseline)}\n"
 
 
 def run(live: Any, *args: str) -> subprocess.CompletedProcess[bytes]:
@@ -995,6 +1008,22 @@ def run(live: Any, *args: str) -> subprocess.CompletedProcess[bytes]:
         [sys.executable, "-m", "aweb_tasks.board_move", *args],
         cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, check=False,
     )
+
+
+async def test_list_live_echoes_its_platform_roles_and_exits_with_the_checks_refusals(
+    board: OldBoard, live: Any, dataset: Dataset, installed: dict,
+) -> None:
+    listed = await asyncio.to_thread(
+        run, live, "list-live", "--installation-id", installed["installation_id"],
+        "--platform-roles", dataset.owner,
+    )
+
+    assert (listed.returncode, listed.stdout) == (3, f"platform roles: {dataset.owner}\n".encode())
+    lines = listed.stderr.decode().splitlines()
+    assert all(line.startswith("refused: ") for line in lines)
+    assert [line.removeprefix("refused: ").split("|") for line in lines] == [
+        ["platform_role_owner", "", dataset.owner, ""],
+    ]
 
 
 async def test_the_jobs_exit_with_the_stop_or_the_refusal(

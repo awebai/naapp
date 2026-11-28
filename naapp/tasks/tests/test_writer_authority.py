@@ -915,3 +915,68 @@ async def test_a_writers_plain_indexes_and_statistics_on_built_in_types_pass(dat
         await dataset.admin.execute(f"ALTER TABLE maintained.{table} OWNER TO {dataset.owner}")
 
     assert await dataset.refusals() == set()
+
+
+async def test_a_writers_expression_and_partial_indexes_on_postgresqls_own_code_pass(dataset: Dataset) -> None:
+    # As the app runtime's own tables have: predicates and expressions whose
+    # functions and operators are all PostgreSQL's.
+    await _maintained_schema(dataset)
+    await dataset.admin.execute("CREATE TABLE maintained.analysed (id integer, label text)")
+    await dataset.admin.execute("CREATE INDEX ON maintained.analysed (id) WHERE label IS NULL")
+    await dataset.admin.execute("CREATE INDEX ON maintained.analysed (id) WHERE label IN ('a', 'b')")
+    await dataset.admin.execute("CREATE INDEX ON maintained.analysed (lower(label))")
+    # A partition's index attaches to its parent's, on which it depends.
+    await dataset.admin.execute("CREATE TABLE maintained.parted (id integer) PARTITION BY RANGE (id)")
+    await dataset.admin.execute("CREATE INDEX ON maintained.parted (id) WHERE id IS NOT NULL")
+    await dataset.admin.execute("CREATE TABLE maintained.part PARTITION OF maintained.parted FOR VALUES FROM (0) TO (10)")
+    for table in ("analysed", "parted", "part"):
+        await dataset.admin.execute(f"ALTER TABLE maintained.{table} OWNER TO {dataset.owner}")
+
+    assert await dataset.refusals() == set()
+
+
+@pytest.mark.parametrize(("statements", "object"), [
+    # An operator is recorded as itself, not as the function it calls.
+    pytest.param(
+        ["CREATE OPERATOR maintained.=== (leftarg = integer, rightarg = integer, function = int4eq)",
+         "CREATE INDEX analysed_named ON maintained.analysed (id) WHERE id OPERATOR(maintained.===) 1"],
+        "maintained.analysed_named", id="user operator in a predicate",
+    ),
+    # A regclass constant is recorded as the relation it names.
+    pytest.param(
+        ["CREATE TABLE maintained.other (id integer)",
+         "CREATE INDEX analysed_named ON maintained.analysed (id) WHERE id::oid <> 'maintained.other'::regclass"],
+        "maintained.analysed_named", id="another relation",
+    ),
+    # A relation in a system schema that PostgreSQL does not pin is recorded too.
+    pytest.param(
+        ["CREATE INDEX analysed_named ON maintained.analysed (id)"
+         " WHERE id::oid <> 'information_schema.tables'::regclass"],
+        "maintained.analysed_named", id="a system schema's relation",
+    ),
+])
+async def test_a_writers_index_naming_anything_outside_postgresql_refuses(
+    dataset: Dataset, statements: list[str], object: str,
+) -> None:
+    await _maintained_schema(dataset)
+    await dataset.admin.execute("CREATE TABLE maintained.analysed (id integer)")
+    for statement in statements:
+        await dataset.admin.execute(statement)
+    await dataset.admin.execute(f"ALTER TABLE maintained.analysed OWNER TO {dataset.owner}")
+
+    assert await dataset.refusals() == {
+        Refusal("indirection_index_expression", None, dataset.owner, object),
+    }
+
+
+async def test_a_writers_expression_statistics_refuse_even_on_postgresqls_own_code(dataset: Dataset) -> None:
+    # PostgreSQL accepts a volatile statistics expression, and records no
+    # dependency on a pinned core function, so no expression statistics pass.
+    await _maintained_schema(dataset)
+    await dataset.admin.execute("CREATE TABLE maintained.analysed (label text)")
+    await dataset.admin.execute("CREATE STATISTICS maintained.lowered ON (lower(label)) FROM maintained.analysed")
+    await dataset.admin.execute(f"ALTER TABLE maintained.analysed OWNER TO {dataset.owner}")
+
+    assert await dataset.refusals() == {
+        Refusal("indirection_statistics_expression", None, dataset.owner, "maintained.lowered"),
+    }

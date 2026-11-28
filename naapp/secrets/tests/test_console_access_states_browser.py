@@ -209,13 +209,37 @@ async def test_once_every_grant_is_revoked_the_page_says_no_agent_has_access(
     async with await browser.new_context(viewport={"width": width, "height": 1000}) as context:
         page, _, _ = await enrolled_page(world, context, origin)
         await page.goto(origin + "/access")
-        for grant in (DB_WRITE, READING, OPEN):
-            controls = page.locator(
-                f'.access-grant[data-grant-id="{grant.grant_id}"] .access-revoke'
-            )
-            page.once("dialog", lambda dialog: asyncio.ensure_future(dialog.accept()))
-            await controls.first.click()
-            await expect(controls).to_have_count(0)
+        script_requested, release_script = asyncio.Event(), asyncio.Event()
+
+        async def pause_first_reload(route):
+            script_requested.set()
+            await release_script.wait()
+            await route.continue_()
+
+        # Serve the real script, but keep the refreshed controls in the
+        # interval before their handlers are installed.
+        await page.route("**/console-access/access.js", pause_first_reload)
+        try:
+            for grant in (DB_WRITE, READING, OPEN):
+                controls = page.locator(
+                    f'.access-grant[data-grant-id="{grant.grant_id}"] .access-revoke'
+                )
+                page.once("dialog", lambda dialog: asyncio.ensure_future(dialog.accept()))
+                async with page.expect_navigation(wait_until="commit") as navigation:
+                    await controls.first.click()
+                assert (await navigation.value).ok
+                if grant == DB_WRITE:
+                    await asyncio.wait_for(script_requested.wait(), 15)
+                    next_control = page.locator(
+                        f'.access-grant[data-grant-id="{READING.grant_id}"] .access-revoke'
+                    ).first
+                    await expect(next_control).to_be_visible()
+                    assert await next_control.is_disabled(), "an action must wait for its handler"
+                    release_script.set()
+                await page.wait_for_load_state("load")
+                await expect(controls).to_have_count(0)
+        finally:
+            release_script.set()
         await expect(page.locator("#access-empty")).to_be_visible()
         await expect(page.locator(".access-agent")).to_have_count(0)
         await page.screenshot(path=tmp_path / f"empty-{width}.png", full_page=True)

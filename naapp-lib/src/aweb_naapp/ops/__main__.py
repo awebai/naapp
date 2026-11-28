@@ -2,8 +2,10 @@
 
     python -m aweb_naapp.ops [--config FILE] [--env-file FILE] COMMAND
 
-status and verify only read. deploy and rollback mutate the service and require
---apply plus the exact service ID. Each prints one JSON result.
+status and verify only read. deploy, rollback, suspend, resume and job mutate the
+service and require --apply plus the exact service ID. job runs only a job listed
+in the app's ops/one-off-jobs.json, with each typed slot given as slot=value.
+Each prints one JSON result; job exits 3 unless the job succeeded.
 """
 
 from __future__ import annotations
@@ -15,6 +17,9 @@ import sys
 from pathlib import Path
 
 from aweb_naapp.ops import render
+from aweb_naapp.ops.jobs import JobAllowlist, parse_slot_args
+
+MUTATIONS = {"deploy", "rollback", "suspend", "resume", "job"}
 
 
 def parser() -> argparse.ArgumentParser:
@@ -52,15 +57,32 @@ def parser() -> argparse.ArgumentParser:
     rollback.add_argument("--confirm-service-id", default=os.environ.get("CONFIRM_SERVICE_ID", ""))
     rollback.add_argument("--timeout", type=int, default=900)
     rollback.add_argument("--apply", action="store_true", default=os.environ.get("APPLY") == "1")
+    suspend = sub.add_parser("suspend")
+    suspend.add_argument("--timeout", type=int, default=300)
+    resume = sub.add_parser("resume")
+    resume.add_argument("--commit", default=os.environ.get("PROD_COMMIT", ""))
+    resume.add_argument("--timeout", type=int, default=900)
+    job = sub.add_parser("job")
+    job.add_argument("--jobs-file", default=os.environ.get("JOBS_FILE", "ops/one-off-jobs.json"))
+    job.add_argument("--name", default=os.environ.get("JOB_NAME", ""))
+    job.add_argument("--args", default=os.environ.get("JOB_ARGS", ""))
+    job.add_argument("--timeout", type=int, default=600)
+    for command in (suspend, resume, job):
+        command.add_argument("--confirm-service-id", default=os.environ.get("CONFIRM_SERVICE_ID", ""))
+        command.add_argument("--apply", action="store_true", default=os.environ.get("APPLY") == "1")
     return p
 
 
 def run(args: argparse.Namespace) -> dict:
     config = render.ProductionConfig.load(Path(args.config))
-    if args.command in {"deploy", "rollback"}:
+    if args.command in MUTATIONS:
         render.confirm_apply(config, apply=args.apply, confirm_service_id=args.confirm_service_id)
     if args.command == "deploy":
         render.confirm_repository_change(args.from_repository, args.confirm_from_repository)
+    if args.command == "resume":
+        render.require_commit(args.commit)
+    if args.command == "job":
+        argv = JobAllowlist.load(Path(args.jobs_file)).argv(args.name, parse_slot_args(args.args))
     if getattr(args, "timeout", 1) <= 0:
         raise render.OpsError("timeout must be positive")
     client = render.RenderClient(render.load_api_key(Path(args.env_file).expanduser()))
@@ -83,6 +105,12 @@ def run(args: argparse.Namespace) -> dict:
         )
     if args.command == "verify":
         return render.verify(client, config, deploy_id=args.deploy_id, commit=args.commit)
+    if args.command == "suspend":
+        return render.suspend(client, config, timeout_seconds=args.timeout)
+    if args.command == "resume":
+        return render.resume(client, config, commit=args.commit, timeout_seconds=args.timeout)
+    if args.command == "job":
+        return render.run_job(client, config, argv, timeout_seconds=args.timeout)
     return render.rollback(
         client,
         config,
@@ -94,6 +122,11 @@ def run(args: argparse.Namespace) -> dict:
     )
 
 
+def exit_status(result: dict) -> int:
+    """0, except for a one-off job whose outcome is anything but succeeded."""
+    return 0 if result.get("outcome", "succeeded") == "succeeded" else 3
+
+
 def main() -> int:
     args = parser().parse_args()
     try:
@@ -102,7 +135,7 @@ def main() -> int:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 2
     print(json.dumps(result, indent=2, sort_keys=True))
-    return 0
+    return exit_status(result)
 
 
 if __name__ == "__main__":

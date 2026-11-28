@@ -10,6 +10,7 @@ pytest_plugins = (
     "pgdbm.fixtures.conftest",
     "aweb_naapp_testing.server",
     "aweb_naapp_testing.database_fixtures",
+    "tests.owned_dataset",
 )
 
 

@@ -10,110 +10,18 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
-from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any
 from uuid import uuid4
 
 import asyncpg
 import pytest
-from pgdbm import AsyncDatabaseManager, AsyncMigrationManager, DatabaseConfig
 
-from aweb_tasks.app import MIGRATIONS_PATH
 from aweb_tasks.board_move import move
+from aweb_tasks.board_move.move import Refusal
+
+from .owned_dataset import Dataset
 
 DATASET = ("installations", "tasks", "claims", "locks", "comments", "dependencies", "events")
-
-
-@dataclass(frozen=True)
-class Refusal:
-    code: str
-    principal: str | None
-    role: str | None
-    object: str | None
-
-
-@dataclass
-class Dataset:
-    """The live dataset in its own database, owned by a non-superuser owner role."""
-
-    admin: AsyncDatabaseManager
-    database: str
-    schema: str
-    owner: str
-    owner_dsn: str
-    role: Callable[..., Awaitable[str]]
-    login: Callable[[], Awaitable[tuple[str, str]]]
-
-    async def as_owner(self, sql: str) -> None:
-        connection = await asyncpg.connect(self.owner_dsn, server_settings={"search_path": self.schema})
-        try:
-            await connection.execute(sql)
-        finally:
-            await connection.close()
-
-    async def refusals(self) -> set[Refusal]:
-        """The predicates' rows, run as the owner inside a read-only transaction."""
-        connection = await asyncpg.connect(self.owner_dsn, server_settings={"search_path": self.schema})
-        try:
-            async with connection.transaction(readonly=True):
-                rows = await connection.fetch(move.WRITER_AUTHORITY_SQL.read_text(encoding="utf-8"))
-        finally:
-            await connection.close()
-        return {Refusal(**dict(row)) for row in rows}
-
-    async def codes(self) -> set[str]:
-        return {refusal.code for refusal in await self.refusals()}
-
-
-def _dsn(config: Any, role: str, password: str, database: str) -> str:
-    return f"postgresql://{role}:{password}@{config.host}:{config.port}/{database}"
-
-
-@pytest.fixture
-async def dataset(test_db_factory: Any) -> AsyncIterator[Dataset]:
-    admin = await test_db_factory.create_db(suffix="writer_authority")
-    database = await admin.fetch_value("SELECT current_database()")
-    schema = admin.schema
-    created: list[str] = []
-
-    async def role(options: str = "LOGIN") -> str:
-        name = f"writer_check_{uuid4().hex[:12]}"
-        await admin.execute(f"CREATE ROLE {name} {options}")
-        created.append(name)
-        return name
-
-    async def login() -> tuple[str, str]:
-        """A principal that can connect and resolve the dataset's schema: its name and DSN."""
-        name, secret = await role(), uuid4().hex
-        await admin.execute(f"ALTER ROLE {name} PASSWORD '{secret}'")
-        await admin.execute(f'GRANT CONNECT ON DATABASE "{database}" TO {name}')
-        await admin.execute(f'GRANT USAGE ON SCHEMA "{schema}" TO {name}')
-        return name, _dsn(admin.config, name, secret, database)
-
-    owner, password = await role(), uuid4().hex
-    await admin.execute(f"ALTER ROLE {owner} PASSWORD '{password}'")
-    # pgdbm's connect runs CREATE SCHEMA IF NOT EXISTS, which needs CREATE.
-    await admin.execute(f'GRANT CONNECT, CREATE ON DATABASE "{database}" TO {owner}')
-    await admin.execute(f'ALTER SCHEMA "{schema}" OWNER TO {owner}')
-    owner_dsn = _dsn(admin.config, owner, password, database)
-    migrator = AsyncDatabaseManager(DatabaseConfig(
-        connection_string=owner_dsn, schema=schema, min_connections=1, max_connections=1,
-    ))
-    await migrator.connect()
-    try:
-        await AsyncMigrationManager(
-            migrator, migrations_path=str(MIGRATIONS_PATH), module_name="tasks"
-        ).apply_pending_migrations()
-    finally:
-        await migrator.disconnect()
-    try:
-        yield Dataset(admin=admin, database=database, schema=schema, owner=owner,
-                      owner_dsn=owner_dsn, role=role, login=login)
-    finally:
-        for name in reversed(created):
-            await admin.execute(f"DROP OWNED BY {name} CASCADE")
-            await admin.execute(f"DROP ROLE {name}")
 
 
 # --- what must pass -----------------------------------------------------------

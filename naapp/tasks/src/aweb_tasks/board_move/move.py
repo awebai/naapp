@@ -43,6 +43,28 @@ class MoveRefused(Exception):
 
 
 @dataclass(frozen=True)
+class Refusal:
+    """One reason the writer check refuses: a code, and the principal, the role it
+    reaches and the object involved, where the code has them."""
+
+    code: str
+    principal: str | None
+    role: str | None
+    object: str | None
+
+    def line(self) -> str:
+        return "|".join(part or "" for part in (self.code, self.principal, self.role, self.object))
+
+
+class CheckRefused(MoveRefused):
+    """The writer check found a writer the move cannot rule out."""
+
+    def __init__(self, refusals: tuple[Refusal, ...]) -> None:
+        self.refusals = refusals
+        super().__init__("\n".join(refusal.line() for refusal in refusals))
+
+
+@dataclass(frozen=True)
 class Stop:
     code: str
     reason: str

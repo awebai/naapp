@@ -30,3 +30,11 @@ services:
         "tasks:grant-read-1": "/run/secrets/tasks/grant-read"}
       # The team's aweb server, where the app's events go.
       TASKS_APP_EVENTS_ORIGIN: ${TASKS_APP_EVENTS_ORIGIN:?TASKS_APP_EVENTS_ORIGIN is required, tasks.appEventsOrigin}
+      # Team-server reads reach an internal address only when the operator
+      # names its origin for that purpose, and then only inside the services
+      # network (DESTINATIONS and CIDR). They come from the environment Compose
+      # runs in, or not at all.
+      TASKS_TEAM_SERVER_INTERNAL_ORIGINS:
+      TASKS_HOOK_INTERNAL_DESTINATIONS:
+      TASKS_HOOK_INTERNAL_CIDR:
+      TASKS_HOOK_CA_FILE:

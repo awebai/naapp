@@ -107,6 +107,12 @@ def lane(tmp_path_factory: pytest.TempPathFactory, request: pytest.FixtureReques
             # compose.tasks.yaml's settings, for this lane.
             "TASKS_APP_ID": "tasks", "TASKS_PUBLIC_ORIGIN": API, "AWID_REGISTRY_URL": REGISTRY_ORIGIN,
             "TEAM_ID": TEAM_ID, "TASKS_APP_EVENTS_ORIGIN": TEAM_SERVER_ORIGIN,
+            # The lane's coordination server is the operator's own, inside
+            # the lane's network, behind the lane's CA.
+            "TASKS_TEAM_SERVER_INTERNAL_ORIGINS": json.dumps([TEAM_SERVER_ORIGIN]),
+            "TASKS_HOOK_INTERNAL_DESTINATIONS": "allowed",
+            "TASKS_HOOK_INTERNAL_CIDR": DEFAULT_SUBNET,
+            "TASKS_HOOK_CA_FILE": "/runtime/tls/ca.pem",
         },
         subnet=DEFAULT_SUBNET,
     )
